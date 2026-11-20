@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture Labs — Application</title></head>
+<body>
+  <!-- Fictional client-rendered form: fields appear two seconds after load, like Ashby. -->
+  <main id="app"><p>Loading application…</p></main>
+  <script>
+    setTimeout(() => {
+      const longLabel = "Tell us about a time you worked through an ambiguous technical problem. ".repeat(6).trim();
+      document.getElementById("app").innerHTML = `
+        <form>
+          <label>Email <input type="email" name="email" required></label>
+          <label>Graduation year <input type="number" id="grad-year" name="grad-year" required></label>
+          <label for="story">${longLabel}</label>
+          <textarea id="story" name="story"></textarea>
+          <button type="submit">Submit application</button>
+        </form>`;
+    }, 2000);
+  </script>
+</body>
+</html>

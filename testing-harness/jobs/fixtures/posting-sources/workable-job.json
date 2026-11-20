@@ -1,0 +1,16 @@
+{
+  "id": 4521907,
+  "shortcode": "17F965FBBB",
+  "title": "Data Engineering Intern",
+  "remote": false,
+  "location": { "country": "United States", "countryCode": "US", "city": "Austin", "region": "Texas" },
+  "locations": [{ "country": "United States", "countryCode": "US", "city": "Austin", "region": "Texas", "hidden": false }],
+  "state": "published",
+  "isInternal": false,
+  "published": "2026-11-18T14:30:00.000Z",
+  "type": "internship",
+  "department": ["Data"],
+  "description": "<p>Nimbus Labs helps small farms forecast irrigation needs from public weather data.</p><p>As a data engineering intern you will build reliable ingestion jobs and dashboards used by growers every day.</p>",
+  "requirements": "<ul><li>Python experience</li><li>Currently enrolled in a computer science or data science degree program</li></ul>",
+  "benefits": "<p>Paid internship with a housing stipend.</p>"
+}

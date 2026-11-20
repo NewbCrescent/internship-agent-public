@@ -1,0 +1,54 @@
+{
+  "name": "@internship-agent/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest --root ../.. run testing-harness/agent",
+    "test:mapper": "vitest --root ../.. run testing-harness/agent/question-mapper.test.ts",
+    "test:doorbell": "vitest --root ../.. run testing-harness/agent/pipeline-doorbell.test.ts",
+    "test:pass": "vitest --root ../.. run testing-harness/agent/pipeline-pass.integration.test.ts",
+    "test:labels": "vitest --root ../.. run testing-harness/agent/requirement-labels.integration.test.ts",
+    "test:company": "vitest --root ../.. run testing-harness/agent/company-policy.integration.test.ts",
+    "test:retry": "vitest --root ../.. run testing-harness/agent/automatic-retry.integration.test.ts",
+    "test:evidence": "vitest --root ../.. run testing-harness/agent/submit-evidence.integration.test.ts",
+    "test:security-code": "vitest --root ../.. run testing-harness/agent/greenhouse-security-code.test.ts",
+    "test:notify": "vitest --root ../.. run testing-harness/agent/discord-notify.test.ts",
+    "test:discord-read": "vitest --root ../.. run testing-harness/agent/discord-read.test.ts",
+    "test:digest": "vitest --root ../.. run testing-harness/agent/daily-digest.integration.test.ts",
+    "test:mail": "vitest --root ../.. run testing-harness/agent/mail-outcomes.test.ts",
+    "test:mail:local": "vitest --root ../.. run testing-harness/agent/mail-watch.integration.test.ts",
+    "test:memory": "vitest --root ../.. run testing-harness/agent/memory-service.integration.test.ts",
+    "test:profile-facts": "vitest --root ../.. run testing-harness/agent/profile-facts.integration.test.ts",
+    "test:answers": "vitest --root ../.. run testing-harness/agent/question-answers.test.ts",
+    "test:answers:local": "vitest --root ../.. run testing-harness/agent/question-answers.integration.test.ts",
+    "test:profile-coursework": "vitest --root ../.. run testing-harness/agent/profile-coursework.integration.test.ts",
+    "test:profile-resume": "vitest --root ../.. run testing-harness/agent/profile-resume.integration.test.ts",
+    "test:workday-account": "vitest --root ../.. run testing-harness/agent/workday-account.test.ts",
+    "test:workday-account:local": "vitest --root ../.. run testing-harness/agent/workday-account-store.integration.test.ts",
+    "test:record": "vitest --root ../.. run testing-harness/agent/application-record.integration.test.ts",
+    "test:record:chromium": "vitest --root ../.. run testing-harness/agent/application-record.chromium.test.ts"
+  },
+  "dependencies": {
+    "@internship-agent/browser": "workspace:*",
+    "@internship-agent/db": "workspace:*",
+    "@internship-agent/domain": "workspace:*",
+    "@internship-agent/jobs": "workspace:*",
+    "@internship-agent/matching": "workspace:*",
+    "@internship-agent/resume": "workspace:*",
+    "@internship-agent/verifier": "workspace:*",
+    "@internship-agent/voice": "workspace:*",
+    "@internship-agent/writer": "workspace:*",
+    "imapflow": "2.12.1",
+    "playwright-core": "1.63.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.11"
+  }
+}

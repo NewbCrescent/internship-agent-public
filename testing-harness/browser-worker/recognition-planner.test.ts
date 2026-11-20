@@ -1,0 +1,1198 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  attachedNamesFromText,
+  classifyFieldRole,
+  classifyUploadRole,
+  hasTranscriptField,
+  isSubmitControl,
+  planAutofill,
+  readConfirmationFromText,
+  readNewConfirmation,
+  submitAndConfirm,
+  type BrowserPage,
+  recognizeFields,
+  recognizeForm,
+  waitForStableControls,
+  isHearAboutQuestion,
+  isSafeguardField,
+  matchCountryOption,
+  matchSuggestion,
+  pickHearAboutOption,
+  stripRequiredMarker,
+  unfilledPause,
+  CONSENT_QUESTION,
+  classifyUnconfirmed,
+  invalidFieldPauses,
+  isConfirmationUrl,
+  postSubmitEvidenceOf,
+  readNewConfirmationUrl,
+  stripUrlQuery,
+  SubmissionChallenged,
+  SubmissionHeld,
+  SubmissionNeedsInput,
+  SubmissionRefused,
+  SubmissionUnconfirmed,
+  isGreenhouseBoardUrl,
+  isSecurityCodeStep,
+  scrubSecret,
+  SECURITY_CODE_STILL_ASKED,
+  SecurityCodeNotEntered,
+  securityCodeHoldMessage,
+  SubmissionCodeNotFound,
+  withoutSecret,
+  type FieldResolution,
+  type InvalidField,
+  type PostSubmitEvidence,
+  type RawControl,
+  type SecurityCodeHoldKind,
+  type SecurityCodeLookup,
+  type SecurityCodeLookupResult,
+  UNLABELED_CONTROL_LABEL
+} from "@internship-agent/browser";
+
+function control(partial: Partial<RawControl> & { tag: RawControl["tag"] }): RawControl {
+  return partial;
+}
+
+describe("form recognition", () => {
+  it("labels controls from aria, label, placeholder, then name", () => {
+    const fields = recognizeFields([
+      control({ tag: "input", type: "email", id: "e", label: "Email address", required: true }),
+      control({ tag: "input", type: "text", name: "phone", placeholder: "Phone number" }),
+      control({ tag: "textarea", name: "cover", label: "Cover letter" }),
+      control({ tag: "select", name: "auth", label: "Work authorization", options: ["Yes", "No"] }),
+      control({ tag: "input", type: "submit", label: "Submit application" }),
+      control({ tag: "button", label: "Submit application" })
+    ]);
+    expect(fields.map((field) => [field.label, field.kind, field.required])).toEqual([
+      ["Email address", "email", true],
+      ["Phone number", "text", false],
+      ["Cover letter", "textarea", false],
+      ["Work authorization", "select", false]
+    ]);
+  });
+
+  it("picks the terminal submit control and reads confirmations", () => {
+    expect(isSubmitControl(control({ tag: "button", label: "Submit application" }))).toBe(true);
+    expect(isSubmitControl(control({ tag: "button", label: "Save draft" }))).toBe(false);
+    expect(readConfirmationFromText("Thank you! Your application was received.")).toContain("Thank you");
+    expect(readConfirmationFromText("Please fix the errors below.")).toBe(null);
+  });
+
+  it("skips labels made only of invisible characters, and never uses a UUID name as a label (Dover)", () => {
+    const fields = recognizeFields([
+      control({ tag: "input", type: "text", name: "firstName", label: "\u200B", placeholder: "First name" }),
+      control({ tag: "input", type: "text", name: "3f2a9c1e-5b7d-4e8a-9c0f-1a2b3c4d5e6f", label: "\u200B\u200B" }),
+      control({ tag: "input", type: "text", name: "question_3f2a9c1e-5b7d-4e8a-9c0f-1a2b3c4d5e6f" }),
+      control({ tag: "input", type: "email", name: "email", label: "Email\u200B *" }),
+      control({ tag: "select", name: "visa", label: "Visa status", options: ["\u200B", "Citizen", "Visa holder"] })
+    ]);
+    expect(fields[0]!.label).toBe("First name");
+    expect(fields[1]!.label).toMatch(UNLABELED_CONTROL_LABEL);
+    expect(fields[2]!.label).toMatch(UNLABELED_CONTROL_LABEL);
+    expect([fields[3]!.label, fields[3]!.required]).toEqual(["Email", true]);
+    expect(fields[4]!.options).toEqual(["Citizen", "Visa holder"]);
+  });
+
+  it("keeps recognition pure and bounded", () => {
+    const many: RawControl[] = Array.from({ length: 200 }, (_, index) => (
+      control({ tag: "input", type: "text", name: `field-${index}`, label: `Field ${index}` })
+    ));
+    const form = recognizeForm("https://example.com/apply", "Apply", many);
+    expect(form.fields.length).toBeLessThanOrEqual(120);
+  });
+});
+
+describe("autofill planning", () => {
+  const form = recognizeForm("https://example.com/apply", "Apply", [
+    control({ tag: "input", type: "email", id: "email", label: "Email", required: true }),
+    control({ tag: "input", type: "text", id: "q1", label: "Why do you want this role?", required: true }),
+    control({ tag: "select", id: "q2", label: "Are you authorized to work?", options: ["Yes", "No"], required: true }),
+    control({ tag: "input", type: "text", id: "q3", label: "Favorite color?", required: false }),
+    control({ tag: "input", type: "text", id: "q4", label: "Solve this captcha now", required: true }),
+    control({ tag: "input", type: "file", id: "resume", label: "Resume", required: true })
+  ]);
+
+  it("fills known answers and pauses on the unknown", () => {
+    const plan = planAutofill(form, {
+      profile: { email: "jordan@example.com" },
+      resolutions: new Map([
+        ["q2", { status: "RESOLVED", key: "authorized_to_work", scope: "country:US", display: "Yes", value: true }]
+      ]),
+      packageAnswers: [{ prompt: "Why are you interested in this role?", text: "I am excited about Aurora Labs." }],
+      variantId: "11111111-1111-4111-8111-111111111111"
+    });
+    const byId = new Map(plan.decisions.map((decision) => [decision.fieldId, decision]));
+    expect(byId.get("email")).toMatchObject({ action: "fill", value: "jordan@example.com" });
+    expect(byId.get("q1")).toMatchObject({ action: "fill" });
+    expect(byId.get("q1")?.basis).toMatchObject({ kind: "package-answer" });
+    expect(byId.get("q2")).toMatchObject({ action: "choose", value: "Yes" });
+    expect(byId.get("q3")).toMatchObject({ action: "skip" });
+    expect(byId.get("q4")).toMatchObject({ action: "pause" });
+    expect(byId.get("resume")).toMatchObject({ action: "upload" });
+    expect(plan.safeguardHalt).toBe(true);
+    expect(plan.pauses.some((pause) => pause.safeguard)).toBe(true);
+  });
+
+  it("pauses with the memory suggestion when a fact is missing", () => {
+    const plan = planAutofill(form, {
+      profile: {},
+      resolutions: new Map([
+        ["q2", { status: "NEEDS_INPUT", key: "authorized_to_work", scope: "country:US" }]
+      ]),
+      packageAnswers: [],
+      variantId: null
+    });
+    const byId = new Map(plan.decisions.map((decision) => [decision.fieldId, decision]));
+    expect(byId.get("email")?.action).toBe("pause");
+    const pause = plan.pauses.find((entry) => entry.fieldId === "q2");
+    expect(pause?.suggestedKey).toBe("authorized_to_work");
+    expect(pause?.suggestedScope).toBe("country:US");
+  });
+
+  it("fills the coursework answer only into free-text fields", () => {
+    const answer = "Data Structures (CS 61B); Machine Learning (CS 189, in progress)";
+    const coursework = recognizeForm("https://example.com/apply", "Apply", [
+      control({ tag: "textarea", id: "courses-text", label: "Relevant coursework", required: true }),
+      control({ tag: "select", id: "courses-select", label: "Relevant coursework", options: ["Yes", "No"], required: true })
+    ]);
+    const resolution = { status: "RESOLVED", key: "relevant_coursework", scope: "global", display: answer, value: answer } as const;
+    const plan = planAutofill(coursework, {
+      profile: {},
+      resolutions: new Map([["courses-text", resolution], ["courses-select", resolution]]),
+      packageAnswers: [],
+      variantId: null
+    });
+    const byId = new Map(plan.decisions.map((decision) => [decision.fieldId, decision]));
+    expect(byId.get("courses-text")).toMatchObject({ action: "fill", value: answer });
+    expect(byId.get("courses-text")?.basis).toMatchObject({ kind: "fact", key: "relevant_coursework" });
+    expect(byId.get("courses-select")).toMatchObject({ action: "pause" });
+  });
+});
+
+describe("upload routing", () => {
+  const TRANSCRIPT_ID = "22222222-2222-4222-8222-222222222222";
+  const VARIANT_ID = "11111111-1111-4111-8111-111111111111";
+  const uploadForm = recognizeForm("https://example.com/apply", "Apply", [
+    control({ tag: "input", type: "file", id: "resume", label: "Resume/CV", required: true }),
+    control({ tag: "input", type: "file", id: "transcript", label: "Unofficial transcript", required: true }),
+    control({ tag: "input", type: "file", id: "cover", label: "Cover letter", required: false }),
+    control({ tag: "input", type: "file", id: "other", label: "Attachments", required: false })
+  ]);
+
+  it("classifies upload fields by what they ask for", () => {
+    expect(classifyUploadRole("Resume/CV")).toBe("resume");
+    expect(classifyUploadRole("Upload your résumé")).toBe("resume");
+    expect(classifyUploadRole("Unofficial Transcript")).toBe("transcript");
+    expect(classifyUploadRole("Academic record")).toBe("transcript");
+    expect(classifyUploadRole("Cover letter")).toBe("cover");
+    expect(classifyUploadRole("Attachments")).toBe("document");
+    expect(classifyFieldRole(uploadForm.fields[1]!)).toBe("transcript");
+    expect(hasTranscriptField(uploadForm.fields)).toBe(true);
+    expect(hasTranscriptField(uploadForm.fields.filter((field) => field.id !== "transcript"))).toBe(false);
+  });
+
+  it("uploads the resume and transcript only into matching fields", () => {
+    const plan = planAutofill(uploadForm, {
+      profile: {},
+      resolutions: new Map(),
+      packageAnswers: [],
+      variantId: VARIANT_ID,
+      transcriptDocumentId: TRANSCRIPT_ID
+    });
+    const byId = new Map(plan.decisions.map((decision) => [decision.fieldId, decision]));
+    expect(byId.get("resume")).toMatchObject({ action: "upload", basis: { kind: "variant", variantId: VARIANT_ID } });
+    expect(byId.get("transcript")).toMatchObject({ action: "upload", basis: { kind: "candidate_document", documentId: TRANSCRIPT_ID } });
+    // Neither a cover letter nor an unlabeled attachment ever receives the resume; optional ones stay empty.
+    expect(byId.get("cover")).toMatchObject({ action: "skip", reason: "Optional upload left empty; the agent attaches only your resume and transcript." });
+    expect(byId.get("other")?.action).toBe("skip");
+    expect(plan.pauses).toEqual([]);
+  });
+
+  it("pauses a required cover letter or other document for the candidate", () => {
+    const required = recognizeForm("https://example.com/apply", "Apply", [
+      control({ tag: "input", type: "file", id: "cover", label: "Cover letter", required: true }),
+      control({ tag: "input", type: "file", id: "sample", label: "Writing sample *" })
+    ]);
+    const plan = planAutofill(required, { profile: {}, resolutions: new Map(), packageAnswers: [], variantId: VARIANT_ID });
+    expect(plan.decisions.map((decision) => decision.action)).toEqual(["pause", "pause"]);
+    expect(plan.pauses.map((pause) => [pause.fieldId, pause.upload])).toEqual([["cover", true], ["sample", true]]);
+  });
+
+  it("pauses a transcript field when no transcript is stored", () => {
+    const plan = planAutofill(uploadForm, { profile: {}, resolutions: new Map(), packageAnswers: [], variantId: VARIANT_ID });
+    const transcript = plan.decisions.find((decision) => decision.fieldId === "transcript");
+    expect(transcript?.action).toBe("pause");
+    expect(transcript?.pause?.question).toContain("transcript");
+  });
+});
+
+describe("Handshake Quick apply dialog", () => {
+  it("reads attached file names from the dialog text", () => {
+    const dialog = [
+      "Apply to Example Co",
+      "Details from Example Co:",
+      "Applying requires a resume. Attach it below and get one step closer to your next job!",
+      "Attach your resume",
+      "Jordan Rivera - Resume.pdf",
+      "Preview document",
+      "Submit Application"
+    ].join("\n");
+    expect(attachedNamesFromText(dialog)).toEqual(["Jordan Rivera - Resume.pdf"]);
+    expect(attachedNamesFromText("Apply to Example Co\nAttach your resume\nSubmit Application")).toEqual([]);
+    expect(attachedNamesFromText("Attach your resume\nJordan Rivera - Resume.pdf Preview document ×")).toEqual(["Jordan Rivera - Resume.pdf"]);
+  });
+
+  it("accepts only a confirmation that appears after the submit click", () => {
+    const before = "Order confirmation emails arrive within a day. Thank you for visiting.";
+    expect(readNewConfirmation(before, before)).toBe(null);
+    expect(readNewConfirmation(before, `${before}\nApplication submitted`)).toContain("submitted");
+    expect(readNewConfirmation("Please fix the errors below.", "Thank you! Your application was received.")).toContain("Thank you");
+    expect(readNewConfirmation(before, `${before}\nApplied on January 7, 2026`)).toBe("Applied on");
+    expect(readNewConfirmation("Applied on January 7, 2026", "Applied on January 7, 2026")).toBe(null);
+    expect(readConfirmationFromText("Applied on January 7, 2026")).toBe("Applied on");
+  });
+});
+
+describe("submission confirmation", () => {
+  it("reads Dover's success message (captured from its page bundle, 2026-11-20)", () => {
+    const formText = "Apply\nFirst Name *\nEmail *\nResume *\nApply\nJobs powered by";
+    expect(readNewConfirmation(formText, `${formText}\nThanks for applying!`)).toBeTruthy();
+  });
+
+  function submitPage(options: { confirmAfterReads: number; dialogOpen?: boolean }): BrowserPage {
+    let reads = 0;
+    let clicked = false;
+    return {
+      url: () => "https://example.com/apply",
+      title: async () => "Apply",
+      collectControls: async () => [],
+      bodyText: async () => {
+        if (clicked) reads += 1;
+        return clicked && reads >= options.confirmAfterReads ? "Application submitted" : "Please review your application.";
+      },
+      fillField: async () => {},
+      chooseOption: async () => {},
+      setChecked: async () => {},
+      uploadFile: async () => {},
+      clickSubmit: async () => { clicked = true; },
+      screenshot: async () => {},
+      close: async () => {},
+      applicationDialogOpen: async () => options.dialogOpen ?? true
+    };
+  }
+
+  it("waits for a confirmation that arrives after the click", async () => {
+    await expect(submitAndConfirm(submitPage({ confirmAfterReads: 3 }), { timeoutMs: 1_000, pollMs: 1 })).resolves.toContain("Application submitted");
+  });
+
+  it("reports a closed dialog without a recognized confirmation", async () => {
+    await expect(submitAndConfirm(submitPage({ confirmAfterReads: Infinity, dialogOpen: false }), { timeoutMs: 20, pollMs: 1 }))
+      .rejects.toThrow(/dialog closed, but no confirmation text was recognized/);
+    await expect(submitAndConfirm(submitPage({ confirmAfterReads: Infinity }), { timeoutMs: 20, pollMs: 1 }))
+      .rejects.toThrow(/no new confirmation appeared/);
+  });
+});
+
+describe("real-form robustness", () => {
+  it("trims oversized labels, ids, and option lists instead of rejecting the form", () => {
+    const longLabel = "Please describe ".repeat(30);
+    const fields = recognizeFields([
+      control({ tag: "textarea", id: "q".repeat(250), label: longLabel }),
+      control({ tag: "select", id: "country", label: "Country", options: Array.from({ length: 600 }, (_, index) => `Country ${index} ${"x".repeat(index === 0 ? 250 : 0)}`) })
+    ]);
+    expect(fields[0]!.label.length).toBe(300);
+    expect(fields[0]!.label.endsWith("…")).toBe(true);
+    expect(fields[0]!.id.length).toBe(200);
+    expect(fields[1]!.options).toHaveLength(500);
+    expect(fields[1]!.options![0]!.length).toBe(200);
+  });
+
+  it("recognizes number inputs and fills them only with numbers", () => {
+    const form = recognizeForm("https://example.test/apply", "Apply", [
+      control({ tag: "input", type: "number", id: "year", label: "Graduation year", required: true }),
+      control({ tag: "input", type: "number", id: "gpa-year", label: "Start year", required: true })
+    ]);
+    expect(form.fields.map((field) => field.kind)).toEqual(["number", "number"]);
+    const plan = planAutofill(form, {
+      profile: {},
+      resolutions: new Map([
+        ["year", { status: "RESOLVED", key: "graduation_year", scope: "global", display: "2028", value: "2028" }],
+        ["gpa-year", { status: "RESOLVED", key: "available_start_date", scope: "global", display: "2027-06-01", value: "2027-06-01" }]
+      ]),
+      packageAnswers: [],
+      variantId: null
+    });
+    expect(plan.decisions[0]).toMatchObject({ action: "fill", value: "2028" });
+    expect(plan.decisions[1]).toMatchObject({ action: "pause", value: null });
+    expect(plan.pauses.map((pause) => pause.fieldId)).toEqual(["gpa-year"]);
+    expect(plan.pauses[0]!.question).toContain("takes a number");
+  });
+
+  it("waits for a client-rendered form to finish drawing", async () => {
+    let now = 0;
+    const counts = [0, 0, 0, 0, 12, 45, 45, 45, 45, 45, 45, 45];
+    let reads = 0;
+    const settled = await waitForStableControls(async () => counts[Math.min(reads++, counts.length - 1)]!, {
+      now: () => now, sleep: async (ms) => { now += ms; }
+    });
+    expect(settled).toBe(45);
+    expect(now).toBeGreaterThanOrEqual(2_000);
+
+    now = 0;
+    const empty = await waitForStableControls(async () => 0, { now: () => now, sleep: async (ms) => { now += ms; } });
+    expect(empty).toBe(0);
+    expect(now).toBeGreaterThanOrEqual(15_000);
+  });
+});
+
+describe("contact details from the profile", () => {
+  const profile = {
+    legalFirstName: "Jordan", legalLastName: "Rivera-Park", addressLine1: "100 Fixture Way", addressCity: "Seattle",
+    addressRegion: "Washington", addressPostalCode: "98101", addressCountry: "United States of America"
+  };
+  const plan = (controls: RawControl[], withProfile = profile) => planAutofill(recognizeForm("https://example.test/apply", "Apply", controls), {
+    profile: withProfile, resolutions: new Map(), packageAnswers: [], variantId: null
+  });
+
+  it("fills standard contact labels, choosing matching options", () => {
+    const result = plan([
+      control({ tag: "input", type: "text", id: "first", label: "First Name*", required: true }),
+      control({ tag: "input", type: "text", id: "last", label: "Legal Last Name", required: true }),
+      control({ tag: "input", type: "text", id: "line1", label: "Address Line 1*", required: true }),
+      control({ tag: "input", type: "text", id: "city", label: "City*", required: true }),
+      control({ tag: "input", type: "text", id: "zip", label: "Postal Code*", required: true }),
+      control({ tag: "select", id: "state", label: "State*", required: true, options: ["Oregon", "Washington"] }),
+      control({ tag: "select", id: "country", label: "Country / Territory*", required: true, options: ["Canada", "United States of America"] })
+    ]);
+    expect(Object.fromEntries(result.decisions.map((decision) => [decision.fieldId, [decision.action, decision.value]]))).toEqual({
+      first: ["fill", "Jordan"], last: ["fill", "Rivera-Park"], line1: ["fill", "100 Fixture Way"], city: ["fill", "Seattle"],
+      zip: ["fill", "98101"], state: ["choose", "Washington"], country: ["choose", "United States of America"]
+    });
+    expect(result.decisions[0]!.basis).toEqual({ kind: "profile", field: "legalFirstName" });
+    expect(result.pauses).toEqual([]);
+  });
+
+  it("never fills questions that merely mention a contact word, or an option the profile does not match", () => {
+    const result = plan([
+      control({ tag: "input", type: "text", id: "pref-city", label: "Which city would you prefer to work in?", required: true }),
+      control({ tag: "input", type: "text", id: "state-reason", label: "Please state why you are interested", required: true }),
+      control({ tag: "select", id: "country", label: "Country", required: true, options: ["Mexico", "Canada"] })
+    ]);
+    expect(result.decisions.map((decision) => decision.action)).toEqual(["pause", "pause", "pause"]);
+    expect(result.pauses[2]!.question).toContain("not one of its options");
+  });
+
+  it("pauses when the profile has no value, rather than inventing one", () => {
+    const result = plan([control({ tag: "input", type: "text", id: "first", label: "First Name", required: true })], {});
+    expect(result.decisions[0]).toMatchObject({ action: "pause" });
+  });
+});
+
+describe("how did you hear about us", () => {
+  it("recognizes the question in its usual wordings", () => {
+    for (const label of ["How Did You Hear About Us?*", "How did you learn about this position?", "Where did you hear about this job?", "Source"]) {
+      expect(isHearAboutQuestion(label), label).toBe(true);
+    }
+    expect(isHearAboutQuestion("Why do you want to work here?")).toBe(false);
+  });
+
+  it("prefers a job board, then LinkedIn, then another general board, then N/A, then any non-referral option", () => {
+    expect(pickHearAboutOption(["A Philips Employee Referred me", "LinkedIn, Monster, Indeed or other Job Board", "Social Networks"], "s"))
+      .toBe("LinkedIn, Monster, Indeed or other Job Board");
+    expect(pickHearAboutOption(["Aboriginal Jobs Canada", "Dice", "Indeed", "LinkedIn"], "s")).toBe("LinkedIn");
+    expect(pickHearAboutOption(["Employee Referral", "N/A", "Career Fair"], "s")).toBe("N/A");
+    const fallback = pickHearAboutOption(["Employee Referral", "Career Fair", "Magazine", "Recruiter contacted me"], "job-1");
+    expect(["Career Fair", "Magazine"]).toContain(fallback);
+    expect(pickHearAboutOption(["Employee Referral", "Career Fair", "Magazine", "Recruiter contacted me"], "job-1")).toBe(fallback);
+    expect(pickHearAboutOption(["Employee Referral", "A friend referred me", "Select One"], "s")).toBeNull();
+  });
+
+  it("answers a plain dropdown with the rule, and fills phone type and field of study from the profile", () => {
+    const result = planAutofill(recognizeForm("https://example.test/apply", "Apply", [
+      control({ tag: "select", id: "source", label: "How did you hear about us?", required: true, options: ["Employee Referral", "Job Board", "Other"] }),
+      control({ tag: "select", id: "phone-type", label: "Phone Device Type*", required: true, options: ["Home", "Mobile", "Work"] }),
+      control({ tag: "input", type: "text", id: "major", label: "Field of Study", required: true })
+    ]), { profile: { phoneType: "Mobile", fieldOfStudy: "Computer Science" }, resolutions: new Map(), packageAnswers: [], variantId: null });
+    expect(result.decisions.map((decision) => [decision.fieldId, decision.action, decision.value])).toEqual([
+      ["source", "choose", "Job Board"], ["phone-type", "choose", "Mobile"], ["major", "fill", "Computer Science"]
+    ]);
+  });
+});
+
+describe("CAPTCHA token fields and checkbox groups (Greenhouse's new board)", () => {
+  it("drops the hidden CAPTCHA token fields instead of reading them as a CAPTCHA question", () => {
+    const fields = recognizeFields([
+      control({ tag: "textarea", id: "g-recaptcha-response-100000", name: "g-recaptcha-response" }),
+      control({ tag: "textarea", name: "h-captcha-response" }),
+      control({ tag: "input", type: "text", id: "first_name", label: "First Name", required: true })
+    ]);
+    expect(fields.map((field) => field.label)).toEqual(["First Name"]);
+  });
+
+  it("treats only CAPTCHA wording as a safeguard, not the word challenge", () => {
+    const form = recognizeForm("https://example.test/apply", "Apply", [
+      control({ tag: "textarea", id: "q1", label: "Describe a technical challenge you solved", required: false }),
+      control({ tag: "input", type: "text", id: "q2", label: "Solve this captcha now", required: true })
+    ]);
+    expect(form.fields.map(isSafeguardField)).toEqual([false, true]);
+    const plan = planAutofill(form, { profile: {}, resolutions: new Map(), packageAnswers: [], variantId: null });
+    expect(plan.pauses.filter((pause) => pause.safeguard).map((pause) => pause.fieldId)).toEqual(["q2"]);
+  });
+
+  const group = (id: string, label: string, options: string[], required = true) =>
+    control({ tag: "input", type: "checkbox", widget: "checkbox-group", id, label, required, options });
+  const hearAbout = group("question_1[]", "How did you hear about this role?", ["LinkedIn", "Glassdoor", "Indeed", "Referred by a friend"]);
+  const planWith = (controls: RawControl[], resolutions: Map<string, FieldResolution>) =>
+    planAutofill(recognizeForm("https://example.test/apply", "Apply", controls), { profile: {}, resolutions, packageAnswers: [], variantId: null });
+
+  it("answers a How-did-you-hear checkbox group as one question from the saved how_heard fact", () => {
+    const saved = (display: string): Map<string, FieldResolution> =>
+      new Map([["question_1[]", { status: "RESOLVED", key: "how_heard", scope: "global", display, value: display }]]);
+    const online = planWith([hearAbout], saved("Online job board"));
+    expect(online.decisions).toEqual([expect.objectContaining({
+      fieldId: "question_1[]", action: "choose", value: "LinkedIn", basis: { kind: "fact", key: "how_heard", scope: "global" }
+    })]);
+    expect(online.pauses).toEqual([]);
+    expect(planWith([hearAbout], saved("Indeed")).decisions[0]).toMatchObject({ action: "choose", value: "Indeed" });
+    const referralOnly = planWith([group("question_2[]", "How did you hear about this role?", ["Referred by a friend", "Employee"])], new Map());
+    expect(referralOnly.decisions[0]?.value).not.toBe("Referred by a friend");
+    expect(referralOnly.decisions[0]?.action).toBe("pause");
+  });
+
+  it("chooses one option of another checkbox group, pauses or skips without an answer, and never checks the group", () => {
+    const tools = group("question_3[]", "Which tools have you used?", ["Python", "Rust", "Go"]);
+    const resolved = planWith([tools], new Map([["question_3[]", { status: "RESOLVED", key: "primary_tool", scope: "global", display: "rust", value: "rust" }]]));
+    expect(resolved.decisions[0]).toMatchObject({ action: "choose", value: "Rust" });
+    expect(planWith([tools], new Map()).decisions[0]).toMatchObject({ action: "pause" });
+    expect(planWith([group("question_4[]", "Which tools have you used?", ["Python", "Rust"], false)], new Map()).decisions[0]).toMatchObject({ action: "skip" });
+    const affirmed = planWith([tools], new Map([["question_3[]", { status: "RESOLVED", key: "primary_tool", scope: "global", display: "Yes", value: true }]]));
+    expect(affirmed.decisions.map((decision) => decision.action)).not.toContain("check");
+  });
+
+  it("matches a phone-country list option that carries the dialing code", () => {
+    const result = planAutofill(recognizeForm("https://example.test/apply", "Apply", [
+      control({ tag: "select", id: "country", label: "Country*", required: true, options: ["Canada +1", "United States +1", "United Kingdom +44"] })
+    ]), { profile: { addressCountry: "United States" }, resolutions: new Map(), packageAnswers: [], variantId: null });
+    expect(result.decisions[0]).toMatchObject({ action: "choose", value: "United States +1", basis: { kind: "profile", field: "addressCountry" } });
+  });
+});
+
+describe("real ATS labels, contact fields, choices, and type-aheads (Lever, Ashby, Greenhouse)", () => {
+  const resolved = (key: string, value: boolean | string): FieldResolution =>
+    ({ status: "RESOLVED", key, scope: "global", display: typeof value === "string" ? value : value ? "Yes" : "No", value });
+  const profile = {
+    fullName: "Jordan Rivera", email: "jordan@example.test", phone: "+1 555 0100", linkedinUrl: "https://www.linkedin.com/in/jordan-fixture",
+    githubUrl: "https://github.com/jordan-fixture", addressCity: "Berkeley", addressRegion: "California"
+  };
+  const plan = (controls: RawControl[], resolutions = new Map<string, FieldResolution>()) => planAutofill(
+    recognizeForm("https://jobs.lever.co/fixture/1/apply", "Apply", controls),
+    { profile, resolutions, packageAnswers: [], variantId: null }
+  );
+
+  it("strips required markers from labels and reads them as required", () => {
+    expect(stripRequiredMarker("Full name✱")).toEqual({ label: "Full name", marked: true });
+    expect(stripRequiredMarker("Phone ✱")).toEqual({ label: "Phone", marked: true });
+    expect(stripRequiredMarker("Email *")).toEqual({ label: "Email", marked: true });
+    expect(stripRequiredMarker("Name (required)")).toEqual({ label: "Name", marked: true });
+    expect(stripRequiredMarker("Location ＊")).toEqual({ label: "Location", marked: true });
+    expect(stripRequiredMarker("Why us?")).toEqual({ label: "Why us?", marked: false });
+    const fields = recognizeFields([
+      control({ tag: "input", type: "text", id: "name", label: "Full name✱" }),
+      control({ tag: "input", type: "text", id: "phone", label: "Phone ✱" })
+    ]);
+    expect(fields.map((field) => [field.label, field.required])).toEqual([["Full name", true], ["Phone", true]]);
+  });
+
+  it("fills Name, Email (a text box), Phone, LinkedIn, GitHub, and Current location from the profile", () => {
+    const result = plan([
+      control({ tag: "input", type: "text", id: "name", label: "Full name✱" }),
+      control({ tag: "input", type: "text", id: "ashby-name", label: "Name", required: true }),
+      control({ tag: "input", type: "text", id: "email", label: "Email", required: true }),
+      control({ tag: "input", type: "text", id: "phone", label: "Phone ✱" }),
+      control({ tag: "input", type: "url", id: "linkedin", label: "LinkedIn", required: true }),
+      control({ tag: "input", type: "text", id: "linkedin-url", label: "LinkedIn URL" }),
+      control({ tag: "input", type: "text", id: "github", label: "GitHub URL" }),
+      control({ tag: "input", type: "text", id: "location", label: "Current location ✱" })
+    ]);
+    expect(Object.fromEntries(result.decisions.map((decision) => [decision.fieldId, [decision.action, decision.value]]))).toEqual({
+      name: ["fill", "Jordan Rivera"], "ashby-name": ["fill", "Jordan Rivera"], email: ["fill", "jordan@example.test"],
+      phone: ["fill", "+1 555 0100"], linkedin: ["fill", "https://www.linkedin.com/in/jordan-fixture"],
+      "linkedin-url": ["fill", "https://www.linkedin.com/in/jordan-fixture"], github: ["fill", "https://github.com/jordan-fixture"],
+      location: ["fill", "Berkeley, California"]
+    });
+    expect(result.decisions[2]!.basis).toEqual({ kind: "profile", field: "email" });
+    expect(result.pauses).toEqual([]);
+  });
+
+  it("never types a known answer into a radio set: it chooses an offered option or pauses", () => {
+    const radio = control({ tag: "input", type: "radio", id: "cards[1][field0]", label: "Nationality status", required: true, options: ["EU national", "Non Applicable I am a national of a Member State of the European Union"] });
+    const unmatched = plan([radio], new Map([["cards[1][field0]", resolved("authorized_to_work", "Yes")]]));
+    expect(unmatched.decisions[0]!.action).toBe("pause");
+    const noOptions = plan([control({ tag: "input", type: "radio", id: "r", label: "Do you agree?", required: true })], new Map([["r", resolved("custom", "Yes")]]));
+    expect(noOptions.decisions[0]).toMatchObject({ action: "pause" });
+    expect(noOptions.decisions[0]!.pause?.question).toContain("is a choice");
+    const matched = plan([{ ...radio, options: ["Yes", "No"] }], new Map([["cards[1][field0]", resolved("authorized_to_work", "Yes")]]));
+    expect(matched.decisions[0]).toMatchObject({ action: "choose", value: "Yes" });
+  });
+
+  it("types a known value into a type-ahead and picks the suggestion instead of filling", () => {
+    const result = plan([
+      control({ tag: "input", type: "text", id: "location-input", label: "Current location ✱", widget: "autocomplete" }),
+      control({ tag: "select", id: "candidate-location", label: "Location (City)", widget: "autocomplete", options: [] }),
+      control({ tag: "input", type: "text", id: "school", label: "School", widget: "autocomplete", required: true }),
+      control({ tag: "input", type: "text", id: "optional-city", label: "Preferred office", widget: "autocomplete" })
+    ], new Map([["school", resolved("school", "University of California, Berkeley")]]));
+    expect(result.decisions.map((decision) => [decision.fieldId, decision.action, decision.value])).toEqual([
+      ["location-input", "choose", "Berkeley, California"],
+      ["candidate-location", "choose", "Berkeley, California"],
+      ["school", "choose", "University of California, Berkeley"],
+      ["optional-city", "skip", null]
+    ]);
+    expect(result.decisions[0]!.reason).toBe("Typed into the site's suggestion list and picked the matching suggestion.");
+    const required = plan([control({ tag: "input", type: "text", id: "city", label: "Preferred office", widget: "autocomplete", required: true })]);
+    expect(required.decisions[0]!.action).toBe("pause");
+  });
+
+  it("matches a suggestion exactly or uniquely, never by guessing", () => {
+    expect(matchSuggestion("Seattle", ["Seattle", "Seattle, Washington, United States"])).toBe("Seattle");
+    expect(matchSuggestion("South San Francisco", ["South San Francisco, California, United States", "San Francisco, California, United States"]))
+      .toBe("South San Francisco, California, United States");
+    expect(matchSuggestion("Berkeley", ["Berkeley, California, United States", "Berkeley, Missouri, United States"])).toBeNull();
+    expect(matchSuggestion("Berkeley, California", ["Berkeley, California, United States", "Berkeley, Missouri, United States"]))
+      .toBe("Berkeley, California, United States");
+    expect(matchSuggestion("Springfield, IL", ["Springfield, Illinois, United States", "Springfield, Missouri, United States"]))
+      .toBe("Springfield, Illinois, United States");
+    expect(matchSuggestion("Zurich", ["Zürich, Switzerland", "Zug, Switzerland"])).toBe("Zürich, Switzerland");
+    expect(matchSuggestion("Austin", [])).toBeNull();
+  });
+
+  it("pauses a data-retention consent checkbox with a plain reason, even when memory says yes", () => {
+    const label = "I agree that Fixture Robotics has my consent to retain my data for up to 3 years for future roles.";
+    const result = plan([
+      control({ tag: "input", type: "checkbox", id: "consent", label }),
+      control({ tag: "input", type: "checkbox", id: "consent-required", label: "I consent to the processing of my personal data", required: true })
+    ], new Map([["consent", resolved("custom", true)], ["consent-required", resolved("custom", true)]]));
+    expect(result.decisions.map((decision) => decision.action)).toEqual(["pause", "pause"]);
+    expect(result.pauses.map((pause) => pause.question)).toEqual([CONSENT_QUESTION, CONSENT_QUESTION]);
+    expect(CONSENT_QUESTION).toBe("consent checkbox: needs your OK");
+    expect(result.decisions.some((decision) => decision.action === "check")).toBe(false);
+  });
+
+  it("chooses a saved question answer for a type-ahead and a checkbox group, never ticking a consent box", () => {
+    const answerId = "6f1d0c1e-8f3a-4c2b-9d7e-1a2b3c4d5e6f";
+    const saved = (answer: string, answerKind: "text" | "option"): FieldResolution =>
+      ({ status: "REMEMBERED_ANSWER", answerId, answer, answerKey: answer.toLowerCase(), answerKind });
+    const basis = { kind: "question_answer", answerId };
+    const typeAhead = control({ tag: "input", type: "text", id: "office", label: "Preferred office", widget: "autocomplete", required: true });
+    const optionalTypeAhead = control({ tag: "input", type: "text", id: "office-optional", label: "Preferred office", widget: "autocomplete" });
+    const reactSelect = control({ tag: "select", id: "school", label: "Which school do you attend?", widget: "autocomplete", options: [], required: true });
+    const result = plan([typeAhead, optionalTypeAhead, reactSelect], new Map([
+      ["office", saved("Seattle", "text")], ["office-optional", saved("Seattle", "text")], ["school", saved("University of Washington", "option")]
+    ]));
+    expect(result.decisions.map((decision) => [decision.fieldId, decision.action, decision.value])).toEqual([
+      ["office", "choose", "Seattle"], ["office-optional", "choose", "Seattle"], ["school", "choose", "University of Washington"]
+    ]);
+    expect(result.decisions.every((decision) => JSON.stringify(decision.basis) === JSON.stringify(basis))).toBe(true);
+    expect(result.decisions[0]!.reason).toBe("Your saved answer, typed into the site's suggestion list.");
+    expect(result.pauses).toEqual([]);
+
+    const group = control({ tag: "input", type: "checkbox", id: "tools", label: "Which tools do you use?", required: true, options: ["Git", "Docker"] });
+    const chosen = plan([group], new Map([["tools", saved("git", "option")]]));
+    expect(chosen.decisions[0]).toMatchObject({ action: "choose", value: "Git", basis });
+    const unmatched = plan([group], new Map([["tools", saved("Kubernetes", "option")]]));
+    expect(unmatched.decisions[0]!.action).toBe("pause");
+    expect(unmatched.decisions[0]!.pause?.question).toBe('Your saved answer to "Which tools do you use?" is not one of its options. How should it be answered?');
+    expect(JSON.stringify(unmatched)).not.toContain("Kubernetes");
+
+    const consent = plan([control({ tag: "input", type: "checkbox", id: "consent", label: "I consent to the processing of my personal data", required: true })],
+      new Map([["consent", saved("Yes", "option")]]));
+    expect(consent.decisions[0]!.action).toBe("pause");
+    expect(consent.pauses.map((pause) => pause.question)).toEqual([CONSENT_QUESTION]);
+  });
+
+  it("records the field kind and options on the pause for a field the page would not take", () => {
+    const [select] = recognizeFields([control({ tag: "select", id: "auth", label: "Work authorization", required: true, options: ["Yes", "No"] })]);
+    const held = unfilledPause(select!, "the field did not respond in time");
+    expect(held.pause).toMatchObject({ fieldId: "auth", fieldKind: "select", options: ["Yes", "No"], status: "open" });
+    const [text] = recognizeFields([control({ tag: "input", type: "text", id: "editor", label: "Favorite editor" })]);
+    const plain = unfilledPause(text!, "the page did not accept the value");
+    expect(plain.pause.fieldKind).toBe("text");
+    expect(plain.pause.options).toBeUndefined();
+  });
+});
+
+describe("real-form question coverage (education block, country, city, preferred name, buttons, Ashby confirmation)", () => {
+  const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  const graduation = (date: string) => ({ date, basis: { kind: "fact" as const, key: "graduation_date", scope: "global" } });
+  const educationForm = (overrides: { endRequired?: boolean; degreeOptions?: string[] } = {}): RawControl[] => [
+    control({ tag: "select", id: "school--0", label: "School*", required: true, widget: "autocomplete", options: ["Aalto University"] }),
+    control({ tag: "select", id: "degree--0", label: "Degree*", required: true, options: overrides.degreeOptions ?? ["Associate's Degree", "Bachelor’s Degree", "Master's Degree"] }),
+    control({ tag: "select", id: "start-month--0", label: "Start date month", options: MONTHS }),
+    control({ tag: "input", type: "number", id: "start-year--0", label: "Start date year" }),
+    control({ tag: "select", id: "end-month--0", label: "End date month", required: overrides.endRequired ?? true, options: MONTHS }),
+    control({ tag: "input", type: "number", id: "end-year--0", label: "End date year", required: overrides.endRequired ?? true }),
+    control({ tag: "select", id: "country", label: "Country*", required: true, options: ["Canada +1", "United States +1"] })
+  ];
+  type Inputs = Parameters<typeof planAutofill>[1];
+  const plan = (controls: RawControl[], education: Inputs["education"], profile: Inputs["profile"] = { addressCountry: "USA" }) =>
+    planAutofill(recognizeForm("https://job-boards.greenhouse.io/fixture/jobs/1", "Apply", controls), {
+      profile, resolutions: new Map(), packageAnswers: [], variantId: null, education
+    });
+  const actions = (result: ReturnType<typeof planAutofill>) =>
+    Object.fromEntries(result.decisions.map((decision) => [decision.fieldId, [decision.action, decision.value]]));
+  const education = { school: "Example State University", degree: "B.A. Computer Science", startMonth: "2024-08", graduation: graduation("2028-05-15") };
+
+  it("fills the education block and the phone country from the profile and the run's graduation date", () => {
+    const result = plan(educationForm(), education);
+    expect(actions(result)).toEqual({
+      "school--0": ["choose", "Example State University"], "degree--0": ["choose", "Bachelor’s Degree"],
+      "start-month--0": ["choose", "August"], "start-year--0": ["fill", "2024"], "end-month--0": ["choose", "May"],
+      "end-year--0": ["fill", "2028"], country: ["choose", "United States +1"]
+    });
+    expect(result.pauses).toEqual([]);
+    const byId = (id: string) => result.decisions.find((decision) => decision.fieldId === id)!;
+    expect(byId("end-year--0").basis).toEqual({ kind: "fact", key: "graduation_date", scope: "global" });
+    expect(byId("start-month--0").basis).toEqual({ kind: "profile", field: "educationStartMonth" });
+    expect(byId("degree--0").basis).toEqual({ kind: "profile", field: "degree" });
+
+    const transcript = plan(educationForm(), { ...education, graduation: { date: "2029-05-15", basis: { kind: "fact", key: "graduation_date", scope: "channel:handshake_internal" } } });
+    expect(actions(transcript)["end-year--0"]).toEqual(["fill", "2029"]);
+    expect(actions(transcript)["end-month--0"]).toEqual(["choose", "May"]);
+  });
+
+  it("pauses or skips the end date with no graduation date for the run's profile, and never derives one", () => {
+    const required = plan(educationForm(), { ...education, graduation: undefined });
+    expect(actions(required)["end-month--0"]![0]).toBe("pause");
+    expect(actions(required)["end-year--0"]![0]).toBe("pause");
+    const optional = plan(educationForm({ endRequired: false }), { ...education, graduation: undefined });
+    expect(actions(optional)["end-month--0"]).toEqual(["skip", null]);
+    expect(actions(optional)["end-year--0"]).toEqual(["skip", null]);
+  });
+
+  it("never fills Greenhouse's employment block dates from education data, though they share the education labels", () => {
+    const employment = (required: boolean): RawControl[] => [
+      control({ tag: "select", id: "start-date-month--0", label: "Start date month", required, options: MONTHS }),
+      control({ tag: "input", type: "number", id: "start-date-year--0", label: "Start date year", required }),
+      control({ tag: "select", id: "end-date-month--0", label: "End date month", required, options: MONTHS }),
+      control({ tag: "input", type: "number", id: "end-date-year--0", label: "End date year", required })
+    ];
+    const optional = actions(plan([...educationForm(), ...employment(false)], education));
+    expect(optional).toMatchObject({
+      "start-month--0": ["choose", "August"], "start-year--0": ["fill", "2024"], "end-month--0": ["choose", "May"], "end-year--0": ["fill", "2028"],
+      "start-date-month--0": ["skip", null], "start-date-year--0": ["skip", null], "end-date-month--0": ["skip", null], "end-date-year--0": ["skip", null]
+    });
+    const required = actions(plan([...educationForm(), ...employment(true)], education));
+    for (const id of ["start-date-month--0", "start-date-year--0", "end-date-month--0", "end-date-year--0"]) {
+      expect(required[id]![0]).toBe("pause");
+    }
+    expect(required["end-year--0"]).toEqual(["fill", "2028"]);
+  });
+
+  it("pauses the degree when it is missing or no option fits, and never picks a B.S. for a B.A.", () => {
+    expect(actions(plan(educationForm(), { ...education, degree: undefined }))["degree--0"]![0]).toBe("pause");
+    const mismatch = plan(educationForm({ degreeOptions: ["Bachelor of Science", "Master's Degree"] }), education);
+    expect(actions(mismatch)["degree--0"]![0]).toBe("pause");
+    expect(mismatch.pauses.find((pause) => pause.fieldId === "degree--0")!.question)
+      .toBe('Your profile degree "B.A. Computer Science" matches none of the options for "Degree". Which option should be chosen?');
+  });
+
+  it("chooses the school by name from a native list, types its full name into a searched one, and pauses when it is missing", () => {
+    const native = [control({ tag: "select", id: "school", label: "School", required: true, options: ["University of California, Berkeley Extension", "University of California, Berkeley"] })];
+    expect(actions(plan(native, { school: "UC Berkeley" }))).toEqual({ school: ["choose", "University of California, Berkeley"] });
+    const absent = [control({ tag: "select", id: "school", label: "School", required: true, options: ["Stanford University", "Other"] })];
+    expect(actions(plan(absent, { school: "UC Berkeley" }))["school"]![0]).toBe("pause");
+    expect(actions(plan(absent, {}))["school"]![0]).toBe("pause");
+    const searched = [control({ tag: "select", id: "school--0", label: "School", required: true, widget: "autocomplete", options: [] })];
+    expect(actions(plan(searched, { school: "UC Berkeley" }))).toEqual({ "school--0": ["choose", "University of California, Berkeley"] });
+  });
+
+  it("matches country options across US spellings and dialing codes", () => {
+    expect(matchCountryOption("USA", ["Canada +1", "United States +1"])).toBe("United States +1");
+    expect(matchCountryOption("United States", ["United States of America", "Canada"])).toBe("United States of America");
+    expect(matchCountryOption("US", ["US", "Canada"])).toBe("US");
+    expect(matchCountryOption("United States", ["United States", "USA"])).toBeNull();
+    expect(matchCountryOption("Canada", ["Canada +1"])).toBe("Canada +1");
+    expect(matchCountryOption("Mexico", ["Canada", "United States"])).toBeNull();
+  });
+
+  it("matches a City, ST value against spelled-out states and the reverse, never guessing", () => {
+    expect(matchSuggestion("Springfield, IL", ["Springfield, Illinois, United States", "Springfield, Missouri, United States"])).toBe("Springfield, Illinois, United States");
+    expect(matchSuggestion("Springfield, Illinois", ["Springfield, IL, USA", "Springfield, MO, USA"])).toBe("Springfield, IL, USA");
+    expect(matchSuggestion("Springfield, IL", ["Springfield, Illinois, United States", "Springfield, Illinois (Sangamon County), United States"])).toBeNull();
+  });
+
+  it("matches a catalog's dash spelling by the same words, never between two", () => {
+    expect(matchSuggestion("University of Example, Springfield", ["University of Example - Springfield", "University of Example - Shelbyville"]))
+      .toBe("University of Example - Springfield");
+    expect(matchSuggestion("University of Example, Springfield", ["University of Example - Springfield", "University of Example: Springfield"])).toBeNull();
+  });
+
+  it("names a control with no id or name by its adapter tag", () => {
+    expect(recognizeFields([control({ tag: "input", type: "text", ref: "ia-control-3", label: "Location" })])[0]!.id).toBe("ia-control-3");
+  });
+
+  it("answers a state-of-residence list from the profile region, by name or code, and never a distance question", () => {
+    const stateList = [control({ tag: "select", id: "question_1", label: "What state do you currently reside in?*", required: true, options: ["Alabama", "Illinois", "Missouri"] })];
+    const code = plan(stateList, undefined, { addressRegion: "IL" });
+    expect(actions(code)).toEqual({ question_1: ["choose", "Illinois"] });
+    expect(code.decisions[0]!.basis).toEqual({ kind: "profile", field: "addressRegion" });
+    expect(actions(plan(stateList, undefined, { addressRegion: "Illinois" }))).toEqual({ question_1: ["choose", "Illinois"] });
+    const foreign = plan(stateList, undefined, { addressRegion: "ON" });
+    expect(actions(foreign)).toEqual({ question_1: ["pause", null] });
+    expect(foreign.pauses[0]!.question).toContain('Your profile says "ON"');
+    const distance = [control({ tag: "select", id: "question_2", label: "Do you currently reside within 50 miles from Fixture City, California?*", required: true, options: ["Yes", "No"] })];
+    expect(actions(plan(distance, undefined, { addressRegion: "CA", addressCity: "Fixture City" }))).toEqual({ question_2: ["pause", null] });
+  });
+
+  it("answers a current-university list with the school or its campus, never Other", () => {
+    const universities = [control({ tag: "select", id: "question_3", label: "Which university are you currently attending?*", required: true, options: ["Springfield", "Stanford", "UC Davis", "Other"] })];
+    expect(actions(plan(universities, { school: "University of Example, Springfield" }))).toEqual({ question_3: ["choose", "Springfield"] });
+    expect(actions(plan(universities, { school: "UC Davis" }))).toEqual({ question_3: ["choose", "UC Davis"] });
+    expect(actions(plan(universities, { school: "Example State University" }))).toEqual({ question_3: ["pause", null] });
+  });
+
+  it("pauses a required preferred first name with no saved value, under its own label", () => {
+    const required = [control({ tag: "input", type: "text", id: "preferred_name", label: "Preferred First Name*", required: true })];
+    const paused = plan(required, undefined, { legalFirstName: "Jordan" });
+    expect(actions(paused)).toEqual({ preferred_name: ["pause", null] });
+    expect(paused.pauses.map((pause) => pause.label)).toEqual(["Preferred First Name"]);
+  });
+
+  it("fills a preferred name only from the profile's own preferred name", () => {
+    const optional = [control({ tag: "input", type: "text", id: "preferred_name", label: "Preferred First Name" })];
+    const required = [control({ tag: "input", type: "text", id: "preferred_name", label: "Preferred name*", required: true })];
+    expect(actions(plan(optional, undefined, { preferredName: "Jo", legalFirstName: "Jordan" }))).toEqual({ preferred_name: ["fill", "Jo"] });
+    expect(actions(plan(optional, undefined, { legalFirstName: "Jordan" }))).toEqual({ preferred_name: ["skip", null] });
+    const paused = plan(required, undefined, { legalFirstName: "Jordan", fullName: "Jordan Rivera" });
+    expect(actions(paused)).toEqual({ preferred_name: ["pause", null] });
+    expect(JSON.stringify(paused.decisions)).not.toContain("Jordan");
+  });
+
+  it("never reads a button as a field", () => {
+    const fields = recognizeFields([
+      control({ tag: "input", type: "button", id: "discard", label: "Discard" }),
+      control({ tag: "input", type: "reset", id: "back", label: "Back" }),
+      control({ tag: "input", type: "datetime-local", id: "submit-like", label: "Submit" }),
+      control({ tag: "input", type: "datetime-local", id: "availability", label: "Interview availability" }),
+      control({ tag: "input", type: "email", id: "email", label: "Email Address" })
+    ]);
+    expect(fields.map((field) => field.label)).toEqual(["Interview availability", "Email Address"]);
+  });
+
+  it("reads more confirmation phrasings", () => {
+    expect(readNewConfirmation("form text", "Thanks for applying!")).toBeTruthy();
+    expect(readNewConfirmation("form text", "Your application has been submitted.")).toBeTruthy();
+  });
+
+  describe("a site's own success container", () => {
+    const stubPage = (successBefore: string, successAfter: string | null): BrowserPage => {
+      let clicked = false;
+      const page: BrowserPage = {
+        url: () => "https://jobs.ashbyhq.com/fixture/1/application",
+        title: async () => "Apply",
+        collectControls: async () => [],
+        bodyText: async () => "Robotics Software Intern Submit Application",
+        fillField: async () => {},
+        chooseOption: async () => {},
+        setChecked: async () => {},
+        uploadFile: async () => {},
+        clickSubmit: async () => { clicked = true; },
+        screenshot: async () => {},
+        close: async () => {}
+      };
+      if (successAfter !== null) page.successText = async () => (clicked ? successAfter : successBefore);
+      return page;
+    };
+
+    it("counts a success container that appears after the click", async () => {
+      await expect(submitAndConfirm(stubPage("", "Success We got it!"), { timeoutMs: 200, pollMs: 1 })).resolves.toBe("Success We got it!");
+    });
+
+    it("fails closed when the container was already there, or when nothing is recognized", async () => {
+      await expect(submitAndConfirm(stubPage("Success We got it!", "Success We got it!"), { timeoutMs: 20, pollMs: 1 }))
+        .rejects.toThrow(/no new confirmation appeared/);
+      await expect(submitAndConfirm(stubPage("", ""), { timeoutMs: 20, pollMs: 1 })).rejects.toThrow(/not marked submitted/);
+      await expect(submitAndConfirm(stubPage("", null), { timeoutMs: 20, pollMs: 1 })).rejects.toThrow(/no new confirmation appeared/);
+    });
+  });
+});
+
+describe("post-submit outcomes", () => {
+  const GREENHOUSE = "https://job-boards.greenhouse.io/fixturerobotics/jobs/1000001";
+
+  it("counts the longer confirmation phrases apart from a description's thank you", () => {
+    expect(readNewConfirmation("Thank you for your interest in Fixture Robotics.", "Thank you for your interest in Fixture Robotics.\nThank you for applying."))
+      .toBe("Thank you for applying");
+    expect(readNewConfirmation("Thank you for your interest.", "We’ve received your application and will be in touch.")).toBe("We’ve received your application");
+    expect(readNewConfirmation("Thank you for your interest.", "We've received your application.")).toBe("We've received your application");
+    expect(readNewConfirmation("Thank you for your interest.", "We have received your application.")).toBe("We have received your application");
+    expect(readNewConfirmation("Thank you for applying.", "Thank you for applying.")).toBe(null);
+  });
+
+  it("recognizes Greenhouse and Lever confirmation URLs, only when new after the click", () => {
+    expect(isConfirmationUrl(`${GREENHOUSE}/confirmation`)).toBe(true);
+    expect(isConfirmationUrl(`${GREENHOUSE}/confirmation/`)).toBe(true);
+    expect(isConfirmationUrl(`${GREENHOUSE}?confirmation=true`)).toBe(true);
+    expect(isConfirmationUrl(GREENHOUSE)).toBe(false);
+    expect(isConfirmationUrl("https://boards.greenhouse.io/fixturerobotics/jobs/1000001/confirmation")).toBe(true);
+    expect(isConfirmationUrl("https://jobs.lever.co/fixturerobotics/00000000-0000-4000-8000-0000000000b1/thanks")).toBe(true);
+    expect(isConfirmationUrl("https://jobs.lever.co/fixturerobotics/00000000-0000-4000-8000-0000000000b1/apply")).toBe(false);
+    expect(isConfirmationUrl("https://example.com/jobs/1/confirmation")).toBe(false);
+    expect(isConfirmationUrl("https://example.com/jobs/1?confirmation=1")).toBe(false);
+    expect(isConfirmationUrl("not a url")).toBe(false);
+    expect(readNewConfirmationUrl(GREENHOUSE, `${GREENHOUSE}/confirmation?token=abc#top`)).toBe(`${GREENHOUSE}/confirmation`);
+    expect(readNewConfirmationUrl(`${GREENHOUSE}/confirmation`, `${GREENHOUSE}/confirmation`)).toBe(null);
+    expect(readNewConfirmationUrl(GREENHOUSE, GREENHOUSE)).toBe(null);
+    expect(readNewConfirmationUrl(GREENHOUSE, `${GREENHOUSE}?confirmation=true`)).toBe(GREENHOUSE);
+  });
+
+  it("strips a URL's query and fragment", () => {
+    expect(stripUrlQuery(`${GREENHOUSE}?a=1#b`)).toBe(GREENHOUSE);
+    expect(stripUrlQuery("::nonsense")).toBe("");
+  });
+
+  it("classifies an unconfirmed click deterministically", () => {
+    const school: InvalidField = { ref: "school--0", label: "School", error: "This field is required." };
+    expect(classifyUnconfirmed({ invalidBefore: [], invalidAfter: [school], submitShown: true, alertText: "" })).toBe("field-errors");
+    expect(classifyUnconfirmed({ invalidBefore: [], invalidAfter: [school], submitShown: true, alertText: "This field is required." })).toBe("field-errors");
+    expect(classifyUnconfirmed({ invalidBefore: [], invalidAfter: [school], submitShown: false, alertText: "" })).toBe("unknown");
+    expect(classifyUnconfirmed({ invalidBefore: [], invalidAfter: [school], submitShown: false, alertText: "There was a problem" })).toBe("refused");
+    expect(classifyUnconfirmed({ invalidBefore: [school], invalidAfter: [school], submitShown: true, alertText: "" })).toBe("unknown");
+    expect(classifyUnconfirmed({ invalidBefore: [school], invalidAfter: [school], submitShown: true, alertText: "There was a problem" })).toBe("refused");
+    expect(classifyUnconfirmed({ invalidBefore: [], invalidAfter: [], submitShown: true, alertText: "There was a problem" })).toBe("refused");
+    expect(classifyUnconfirmed({ invalidBefore: [], invalidAfter: [], submitShown: true, alertText: "  " })).toBe("unknown");
+  });
+
+  type OutcomePage = {
+    urlAfter?: string;
+    bodyAfter?: string;
+    throwOnce?: boolean;
+    invalidBefore?: InvalidField[];
+    invalidAfter?: InvalidField[];
+    submitShown?: boolean;
+    alertAfter?: string;
+    challengeAfter?: boolean;
+    dialogOpen?: boolean;
+  };
+  const outcomePage = (options: OutcomePage): BrowserPage => {
+    let clicked = false;
+    let thrown = false;
+    const page: BrowserPage = {
+      url: () => (clicked && options.urlAfter ? options.urlAfter : `${GREENHOUSE}?gh_src=fixture`),
+      title: async () => "Apply",
+      collectControls: async () => [],
+      bodyText: async () => {
+        if (clicked && options.throwOnce && !thrown) {
+          thrown = true;
+          throw new Error("Execution context was destroyed");
+        }
+        return clicked && options.bodyAfter !== undefined ? options.bodyAfter : "Robotics Software Intern. Thank you for your interest. Submit application";
+      },
+      fillField: async () => {},
+      chooseOption: async () => {},
+      setChecked: async () => {},
+      uploadFile: async () => {},
+      clickSubmit: async () => { clicked = true; },
+      screenshot: async () => {},
+      close: async () => {},
+      invalidFields: async () => (clicked ? options.invalidAfter ?? [] : options.invalidBefore ?? []),
+      submitControlShown: async () => options.submitShown ?? true,
+      alertText: async () => (clicked ? options.alertAfter ?? "" : ""),
+      visibleChallenge: async () => (clicked && options.challengeAfter ? { kind: "recaptcha", detail: "a reCAPTCHA image challenge" } : null)
+    };
+    if (options.dialogOpen !== undefined) page.applicationDialogOpen = async () => options.dialogOpen!;
+    return page;
+  };
+  const fast = { timeoutMs: 20, pollMs: 1 };
+
+  it("confirms by a new Greenhouse confirmation URL", async () => {
+    await expect(submitAndConfirm(outcomePage({ urlAfter: `${GREENHOUSE}/confirmation`, bodyAfter: "" }), fast))
+      .resolves.toBe(`Confirmation page: ${GREENHOUSE}/confirmation`);
+    await expect(submitAndConfirm(outcomePage({ urlAfter: `${GREENHOUSE}/confirmation`, bodyAfter: "Thank you for your interest." }), fast))
+      .resolves.toBe("Thank you for your interest.");
+  });
+
+  it("keeps waiting when a read fails during navigation", async () => {
+    await expect(submitAndConfirm(outcomePage({ throwOnce: true, bodyAfter: "Application submitted" }), { timeoutMs: 500, pollMs: 1 }))
+      .resolves.toContain("Application submitted");
+  });
+
+  it("holds new field errors for input, without page text in the message", async () => {
+    const school: InvalidField = { ref: "school--0", label: "School", error: "This field is required." };
+    const error = await submitAndConfirm(outcomePage({ invalidAfter: [school], alertAfter: "This field is required." }), fast).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SubmissionNeedsInput);
+    expect(error).toBeInstanceOf(SubmissionHeld);
+    const held = error as SubmissionNeedsInput;
+    expect(held.invalidFields).toEqual([school]);
+    expect(held.evidence?.outcome).toBe("field-errors");
+    expect(held.evidence?.url).toBe(GREENHOUSE);
+    expect(held.message).toContain("marked 1 field(s) invalid");
+    expect(held.message).not.toContain("This field is required");
+    expect(held.message).not.toContain("School");
+  });
+
+  it("does not treat invalid fields that were already there as field errors", async () => {
+    const school: InvalidField = { ref: "school--0", label: "School", error: "This field is required." };
+    const error = await submitAndConfirm(outcomePage({ invalidBefore: [school], invalidAfter: [school] }), fast).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SubmissionUnconfirmed);
+    expect((error as SubmissionUnconfirmed).evidence.outcome).toBe("unknown");
+    const gone = await submitAndConfirm(outcomePage({ invalidAfter: [school], submitShown: false }), fast).catch((caught: unknown) => caught);
+    expect(gone).toBeInstanceOf(SubmissionUnconfirmed);
+  });
+
+  it("refuses on a banner and holds a challenge after the click, with evidence", async () => {
+    const refused = await submitAndConfirm(outcomePage({ alertAfter: "There was a problem submitting your application." }), fast).catch((caught: unknown) => caught);
+    expect(refused).toBeInstanceOf(SubmissionRefused);
+    expect((refused as SubmissionRefused).message).toBe("The site did not accept the submission (\"There was a problem submitting your application.\"). The run is not marked submitted; check the application on the site before retrying.");
+    expect((refused as SubmissionRefused).evidence?.outcome).toBe("refused");
+    expect((refused as SubmissionRefused).evidence?.alertText).toBe("There was a problem submitting your application.");
+    const challenged = await submitAndConfirm(outcomePage({ challengeAfter: true }), fast).catch((caught: unknown) => caught);
+    expect(challenged).toBeInstanceOf(SubmissionChallenged);
+    expect((challenged as SubmissionChallenged).evidence?.outcome).toBe("challenged");
+    expect((challenged as SubmissionChallenged).evidence?.challenge).toBe("a reCAPTCHA image challenge");
+  });
+
+  it("fails closed on nothing, with the same messages and query-stripped evidence", async () => {
+    const closed = await submitAndConfirm(outcomePage({ dialogOpen: false }), fast).catch((caught: unknown) => caught);
+    expect(closed).toBeInstanceOf(SubmissionUnconfirmed);
+    expect(closed).not.toBeInstanceOf(SubmissionHeld);
+    expect((closed as Error).message).toBe("The submit button was clicked and the application dialog closed, but no confirmation text was recognized. Check the application on the site before retrying; the run is not marked submitted.");
+    const evidence = postSubmitEvidenceOf(closed);
+    expect(evidence?.outcome).toBe("unknown");
+    expect(evidence?.url).toBe(GREENHOUSE);
+    expect(evidence?.bodyText).toContain("Submit application");
+    const open = await submitAndConfirm(outcomePage({}), fast).catch((caught: unknown) => caught);
+    expect(open).toBeInstanceOf(SubmissionUnconfirmed);
+    expect((open as Error).message).toBe("The submit button was clicked but no new confirmation appeared. Check the application on the site before retrying; the run is not marked submitted.");
+  });
+
+  describe("Greenhouse's emailed security code", () => {
+    // Fictional codes; the step's wording follows third-party descriptions, not a capture.
+    const CODE = "K7QPZXMW";
+    const STEP_TEXT = "Robotics Software Intern. We sent an 8-character security code to your email address. Enter it below, then submit your application again.";
+    const BEFORE_TEXT = "Robotics Software Intern. Thank you for your interest. Submit application";
+
+    it("recognizes the step only from new code inputs plus text about a code sent by email", () => {
+      expect(isSecurityCodeStep({ codeInputsBefore: 0, codeInputsAfter: 8, bodyText: STEP_TEXT })).toBe(true);
+      expect(isSecurityCodeStep({ codeInputsBefore: 0, codeInputsAfter: 1, bodyText: "Check your inbox for the verification code." })).toBe(true);
+      expect(isSecurityCodeStep({ codeInputsBefore: 8, codeInputsAfter: 8, bodyText: STEP_TEXT })).toBe(false);
+      expect(isSecurityCodeStep({ codeInputsBefore: 0, codeInputsAfter: 0, bodyText: STEP_TEXT })).toBe(false);
+      expect(isSecurityCodeStep({ codeInputsBefore: 0, codeInputsAfter: 8, bodyText: "Robotics Software Intern. Submit application" })).toBe(false);
+    });
+
+    it("scrubs the code from every text, in any case, and marks the evidence", () => {
+      expect(scrubSecret(`Code ${CODE} and ${CODE.toLowerCase()}.`, CODE)).toBe("Code [code] and [code].");
+      expect(scrubSecret("a.b+c", "a.b+c")).toBe("[code]");
+      expect(scrubSecret("axb", "a.b")).toBe("axb");
+      expect(scrubSecret(`keep ${CODE}`, null)).toBe(`keep ${CODE}`);
+      const evidence: PostSubmitEvidence = {
+        outcome: "unknown", url: `${GREENHOUSE}/${CODE}`, bodyText: `Typed ${CODE}`, alertText: `Wrong ${CODE}`, challenge: `a ${CODE}`,
+        invalidFields: [{ ref: `ref-${CODE}`, label: `Label ${CODE}`, error: `Error ${CODE}` }, { ref: null, label: "Plain", error: "Plain" }]
+      };
+      const scrubbed = withoutSecret(evidence, CODE);
+      expect(JSON.stringify(scrubbed)).not.toContain(CODE);
+      expect(scrubbed).toMatchObject({ securityCodeEntered: true, url: `${GREENHOUSE}/[code]`, bodyText: "Typed [code]", alertText: "Wrong [code]", challenge: "a [code]" });
+      expect(scrubbed.invalidFields).toEqual([{ ref: "ref-[code]", label: "Label [code]", error: "Error [code]" }, { ref: null, label: "Plain", error: "Plain" }]);
+      expect(withoutSecret({ ...evidence, challenge: null }, CODE).challenge).toBe(null);
+    });
+
+    it("knows Greenhouse's job-board hosts", () => {
+      expect(isGreenhouseBoardUrl(GREENHOUSE)).toBe(true);
+      expect(isGreenhouseBoardUrl("https://boards.greenhouse.io/fixturerobotics/jobs/1")).toBe(true);
+      expect(isGreenhouseBoardUrl("https://job-boards.eu.greenhouse.io/fixturerobotics/jobs/1")).toBe(true);
+      expect(isGreenhouseBoardUrl("https://jobs.lever.co/fixturerobotics/1/apply")).toBe(false);
+      expect(isGreenhouseBoardUrl("https://greenhouse.io.example.test/jobs/1")).toBe(false);
+      expect(isGreenhouseBoardUrl("not a url")).toBe(false);
+    });
+
+    type CodeStepOptions = {
+      /** Code inputs already on the page before the click. */
+      inputsBefore?: number;
+      /** The confirmation echoes the typed code (to prove scrubbing). */
+      echo?: boolean;
+      /** The step stays after the code was typed. */
+      stillAsks?: boolean;
+      throwNotEntered?: boolean;
+      /** submitSecurityCode throws a plain error; the confirmation still appears. */
+      throwPlain?: boolean;
+    };
+    const codeStepPage = (options: CodeStepOptions = {}) => {
+      let clicked = false;
+      let typed: string | null = null;
+      const record = { calls: 0, matched: false };
+      const accepted = () => typed !== null && !options.stillAsks;
+      const page: BrowserPage = {
+        url: () => `${GREENHOUSE}?gh_src=fixture`,
+        title: async () => "Apply",
+        collectControls: async () => [],
+        bodyText: async () => {
+          if (accepted()) return `Thank you for applying. Your application has been received.${options.echo ? ` Reference ${typed}.` : ""}`;
+          if (clicked) return `${STEP_TEXT}${typed !== null && options.echo ? ` You typed ${typed}.` : ""}`;
+          return BEFORE_TEXT;
+        },
+        fillField: async () => {},
+        chooseOption: async () => {},
+        setChecked: async () => {},
+        uploadFile: async () => {},
+        clickSubmit: async () => { clicked = true; },
+        screenshot: async () => {},
+        close: async () => {},
+        invalidFields: async () => [],
+        submitControlShown: async () => true,
+        alertText: async () => "",
+        visibleChallenge: async () => null,
+        securityCodeInputs: async () => (accepted() ? 0 : clicked ? 8 : options.inputsBefore ?? 0),
+        submitSecurityCode: async (code) => {
+          record.calls += 1;
+          record.matched = code === CODE;
+          if (options.throwNotEntered) throw new SecurityCodeNotEntered("The security code field did not take the code.");
+          typed = code;
+          if (options.throwPlain) throw new Error("The security code's submit click failed.");
+        }
+      };
+      return { page, record };
+    };
+    const lookupOf = (result: SecurityCodeLookupResult) => {
+      const requests: Array<{ url: string; clickedAt: Date }> = [];
+      const lookup: SecurityCodeLookup = async (request) => { requests.push(request); return result; };
+      return { lookup, requests };
+    };
+
+    it("enters the one emailed code, clicks the step's submit, and returns the confirmation without the code", async () => {
+      const { page, record } = codeStepPage({ echo: true });
+      const { lookup, requests } = lookupOf({ kind: "found", code: CODE });
+      const confirmation = await submitAndConfirm(page, { ...fast, securityCode: lookup });
+      expect(confirmation).toContain("Thank you for applying");
+      expect(confirmation).toContain("Reference [code].");
+      expect(confirmation.includes(CODE)).toBe(false);
+      expect(record).toEqual({ calls: 1, matched: true });
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.url).toBe(GREENHOUSE);
+      expect(requests[0]!.clickedAt).toBeInstanceOf(Date);
+    });
+
+    it.each<[string, SecurityCodeLookupResult, SecurityCodeHoldKind]>([
+      ["none", { kind: "none" }, "none"],
+      ["ambiguous", { kind: "ambiguous" }, "ambiguous"],
+      ["no-mailbox", { kind: "no-mailbox" }, "no-mailbox"],
+      ["unavailable", { kind: "unavailable" }, "unavailable"],
+      ["unsupported", { kind: "unsupported" }, "unsupported"]
+    ])("holds the run when the lookup finds %s, without touching the step", async (_name, result, kind) => {
+      const { page, record } = codeStepPage();
+      const error = await submitAndConfirm(page, { ...fast, securityCode: lookupOf(result).lookup }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(SubmissionCodeNotFound);
+      expect(error).toBeInstanceOf(SubmissionHeld);
+      expect((error as Error).message).toBe(securityCodeHoldMessage(kind));
+      const evidence = postSubmitEvidenceOf(error);
+      expect(evidence?.outcome).toBe("verification-code");
+      expect(evidence?.url).toBe(GREENHOUSE);
+      expect(evidence?.securityCodeEntered).toBeFalsy();
+      expect(record.calls).toBe(0);
+    });
+
+    it("holds as no-mailbox without a lookup, and as unavailable when the lookup rejects", async () => {
+      const bare = codeStepPage();
+      const noLookup = await submitAndConfirm(bare.page, fast).catch((caught: unknown) => caught);
+      expect(noLookup).toBeInstanceOf(SubmissionCodeNotFound);
+      expect((noLookup as Error).message).toBe(securityCodeHoldMessage("no-mailbox"));
+      expect(bare.record.calls).toBe(0);
+      const rejecting = codeStepPage();
+      const rejected = await submitAndConfirm(rejecting.page, { ...fast, securityCode: async () => { throw new Error("mail server text"); } }).catch((caught: unknown) => caught);
+      expect(rejected).toBeInstanceOf(SubmissionCodeNotFound);
+      expect((rejected as Error).message).toBe(securityCodeHoldMessage("unavailable"));
+      expect((rejected as Error).message).not.toContain("mail server text");
+    });
+
+    it("holds as not-entered when the field does not take the code, with scrubbed evidence", async () => {
+      const { page, record } = codeStepPage({ throwNotEntered: true });
+      const error = await submitAndConfirm(page, { ...fast, securityCode: lookupOf({ kind: "found", code: CODE }).lookup }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(SubmissionCodeNotFound);
+      expect((error as Error).message).toBe(securityCodeHoldMessage("not-entered"));
+      expect(postSubmitEvidenceOf(error)).toMatchObject({ outcome: "verification-code", securityCodeEntered: true });
+      expect(JSON.stringify(postSubmitEvidenceOf(error)).includes(CODE)).toBe(false);
+      expect(record.calls).toBe(1);
+    });
+
+    it("keeps waiting after a plain error from the step's submit and recognizes the confirmation", async () => {
+      const { page, record } = codeStepPage({ throwPlain: true });
+      await expect(submitAndConfirm(page, { ...fast, securityCode: lookupOf({ kind: "found", code: CODE }).lookup })).resolves.toContain("Thank you for applying");
+      expect(record.calls).toBe(1);
+    });
+
+    it("fails closed when the step is still shown after the code was typed, without the code in the evidence", async () => {
+      const { page, record } = codeStepPage({ stillAsks: true, echo: true });
+      const error = await submitAndConfirm(page, { ...fast, securityCode: lookupOf({ kind: "found", code: CODE }).lookup }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(SubmissionUnconfirmed);
+      expect(error).not.toBeInstanceOf(SubmissionHeld);
+      expect((error as Error).message).toBe(SECURITY_CODE_STILL_ASKED);
+      const evidence = postSubmitEvidenceOf(error);
+      expect(evidence?.outcome).toBe("verification-code");
+      expect(evidence?.securityCodeEntered).toBe(true);
+      expect(evidence?.bodyText).toContain("You typed [code].");
+      expect(JSON.stringify(evidence).includes(CODE)).toBe(false);
+      expect(record.calls).toBe(1);
+    });
+
+    it("is not a code step when the inputs were there before the click", async () => {
+      const { page, record } = codeStepPage({ inputsBefore: 8 });
+      const { lookup, requests } = lookupOf({ kind: "found", code: CODE });
+      const error = await submitAndConfirm(page, { ...fast, securityCode: lookup }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(SubmissionUnconfirmed);
+      expect(postSubmitEvidenceOf(error)?.outcome).toBe("unknown");
+      expect(requests).toHaveLength(0);
+      expect(record.calls).toBe(0);
+    });
+  });
+
+  describe("pauses for invalid fields", () => {
+    const form = recognizeForm(GREENHOUSE, "Apply", [
+      control({ tag: "input", type: "email", id: "email", label: "Email *" }),
+      control({ tag: "select", id: "school--0", label: "School", options: ["Fixture State University"] }),
+      control({ tag: "input", type: "text", id: "start-month-0", label: "Start date" }),
+      control({ tag: "input", type: "text", id: "end-month-0", label: "Start date" }),
+      control({ tag: "select", id: "gender", label: "Gender", options: ["Decline to self-identify"] })
+    ]);
+    const decision = (fieldId: string) => ({ fieldId, action: "fill" as const, value: "x", basis: null, reason: "planned", pause: null });
+
+    it("pauses a field found by id, carrying the site's error text", () => {
+      const held = invalidFieldPauses(form, [decision("school--0"), decision("email")], [], [{ ref: "school--0", label: "School", error: "This field is required." }]);
+      expect(held.pauses).toEqual([expect.objectContaining({
+        fieldId: "school--0", label: "School", question: "School: This field is required.", safeguard: false, sensitive: false,
+        status: "open", fieldKind: "select", options: ["Fixture State University"]
+      })]);
+      expect(held.decisions.find((entry) => entry.fieldId === "school--0")).toMatchObject({ action: "pause", reason: "School: This field is required." });
+      expect(held.decisions.find((entry) => entry.fieldId === "email")).toMatchObject({ action: "fill" });
+      expect(held.decisions).toHaveLength(2);
+    });
+
+    it("matches a unique label ignoring case and required markers", () => {
+      const held = invalidFieldPauses(form, [], [], [{ ref: null, label: "EMAIL ✱", error: "Enter a valid email." }]);
+      expect(held.pauses[0]).toMatchObject({ fieldId: "email", question: "Email: Enter a valid email.", safeguard: false });
+      expect(held.decisions).toEqual([expect.objectContaining({ fieldId: "email", action: "pause" })]);
+    });
+
+    it("turns an ambiguous or missing field into a site-error safeguard", () => {
+      const held = invalidFieldPauses(form, [], [], [
+        { ref: null, label: "Start date", error: "Required." },
+        { ref: "portfolio", label: "Portfolio", error: "This field is required." }
+      ]);
+      expect(held.pauses.map((pause) => [pause.fieldId, pause.safeguard])).toEqual([["site-error-1", true], ["site-error-2", true]]);
+      expect(held.pauses[1]!.question).toBe("Portfolio: This field is required.. The agent could not find this field on the form; fix it in your browser.");
+      expect(held.decisions.every((entry) => entry.pause?.safeguard === true)).toBe(true);
+    });
+
+    it("marks an EEO field sensitive and replaces an existing pause for the field", () => {
+      const existing = {
+        fieldId: "gender", label: "Gender", question: "Old", suggestedKey: null, suggestedScope: null, safeguard: false,
+        sensitive: true, upload: false, status: "answered" as const, answer: "Decline to self-identify", draft: null
+      };
+      const other = { ...existing, fieldId: "other", label: "Other" };
+      const held = invalidFieldPauses(form, [], [existing, other], [{ ref: "gender", label: "Gender", error: "Please select an option." }]);
+      expect(held.pauses).toHaveLength(2);
+      expect(held.pauses.find((pause) => pause.fieldId === "other")).toEqual(other);
+      expect(held.pauses.find((pause) => pause.fieldId === "gender")).toMatchObject({ status: "open", answer: null, sensitive: true, question: "Gender: Please select an option." });
+    });
+  });
+});

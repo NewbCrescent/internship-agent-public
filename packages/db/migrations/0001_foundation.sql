@@ -1,0 +1,9 @@
+CREATE TABLE IF NOT EXISTS jobs (
+  id TEXT PRIMARY KEY,
+  company_name TEXT NOT NULL,
+  title TEXT NOT NULL,
+  location TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('DISCOVERED', 'ANALYZING', 'NOT_QUALIFIED', 'QUALIFIED')),
+  created_at TEXT NOT NULL
+);

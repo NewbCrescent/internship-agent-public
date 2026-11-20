@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture Aerospace Careers</title></head>
+<body>
+  <!-- A fictional Workday-style career site. Markers mirror Workday's data-automation-id attributes. -->
+  <button data-automation-id="utilityButtonSignIn">Sign In</button>
+  <main id="app">
+    <section data-automation-id="jobPostingPage">
+      <h2>Software Engineering Intern</h2>
+      <a href="#" data-automation-id="adventureButton">Apply</a>
+    </section>
+  </main>
+  <div id="popup"></div>
+  <script>
+    const params = new URLSearchParams(location.search);
+    // Candidate accounts (?account=create|verify|captcha|exists|sms|double|silent|lost|banner|signin-after|notice|quiet):
+    // accounts live in localStorage (shared by the context's tabs), the signed-in session in
+    // sessionStorage (per tab, so every new tab starts signed out).
+    //   create: the account is created and the application opens; verify: Workday asks to verify
+    //   the email; captcha: a challenge frame; exists: "already exists" and nothing is stored;
+    //   sms: a text-message code; double: the account is stored, then "already exists" shows;
+    //   silent: the account is stored and nothing changes on screen; lost: nothing is stored and
+    //   nothing changes; banner: nothing is stored and an error banner shows; signin-after: the
+    //   account is stored verified and the sign-in form shows with no session (the real sites'
+    //   observed flow after a create); notice: the account is stored unverified and the sign-in
+    //   form shows, and signing in to it writes a plain-text "not been verified" notice (not an
+    //   error element) and keeps the form; quiet: the same, but signing in to the unverified
+    //   account changes nothing on screen.
+    // ?header=filter (synthetic, not seen on a capture: the 2026-11-20 read-only capture of
+    // employer-g.wd5's /login showed only the form's own "Sign In" filter, beside
+    // signInSubmitButton in noCaptchaWrapper): the header's Sign In is drawn under its own
+    // click_filter labelled "Sign In", earlier on the page than the form's; clicking it only counts.
+    // Save and Continue validation draws Workday-style errors: an errorMessage alert inside each
+    // missing field's formField-* container, an errorBanner listing them, and a plain
+    // errorMessage for missing items that have no container (history rows, Resume/CV).
+    const ACCOUNTS_KEY = "fixture-workday-accounts";
+    const SESSION_KEY = "fixture-workday-session";
+    const readAccounts = () => JSON.parse(localStorage.getItem(ACCOUNTS_KEY) || "{}");
+    const writeAccounts = (accounts) => localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(accounts));
+    // An activation link from the verification email: /<site>/activate/<token>.
+    const activation = /\/activate\/([A-Za-z0-9]+)/.exec(location.pathname);
+    if (activation) {
+      const accounts = readAccounts();
+      for (const account of Object.values(accounts)) if (account.token === activation[1]) account.verified = true;
+      writeAccounts(accounts);
+      document.getElementById("app").innerHTML = "<h2>Your account has been verified.</h2>";
+    }
+    const accountMode = params.get("account");
+    window.fixtureAccount = { honeypotTyped: false, termsChecked: false, creates: 0, signIns: 0, headerClicks: 0 };
+    if (params.get("header") === "filter") {
+      document.querySelector('[data-automation-id="utilityButtonSignIn"]').outerHTML = `<div data-automation-id="utilityMenu"><div style="position:relative;display:inline-block"><div aria-label="Sign In" role="button" tabindex="0" data-automation-id="click_filter" style="position:absolute;inset:0;z-index:1"></div><button data-automation-id="utilityButtonSignIn" tabindex="-2" aria-hidden="true">Sign In</button></div></div>`;
+    }
+    const steps = ["My Information", "My Experience", "Application Questions", "Voluntary Disclosures", "Review"];
+    const state = { step: 0, values: {}, submitted: false, resumes: [], transcript: null, work: [], education: [] };
+    // ?parsed=1: Workday already shows a row parsed from a resume that is not the candidate's.
+    if (params.get("parsed") === "1") state.work.push({ title: "Analyst", company: "Resume Parse Corp", location: "", current: false, fromM: "01", fromY: "2020", toM: "02", toY: "2020", description: "" });
+    const schools = ["University of California, Berkeley", "University of California, Los Angeles", "Berkeley City College", "Northwind High School"];
+    const fields = ["Computer Science", "Computer Engineering", "Economics"];
+    const degrees = ["High School Diploma", "Associate's Degree", "Bachelor of Science (BS)", "Bachelor of Arts (BA)", "Bachelor's Degree", "Master's Degree"];
+    window.fixture = state;
+
+    const listbox = (id, label, options, selected) => `
+      <div data-automation-id="${id}">
+        <label for="${id}-button">${label}</label>
+        <button type="button" id="${id}-button" aria-haspopup="listbox" data-listbox="${id}" data-options="${options.join("|")}">${selected || "Select One"}</button>
+      </div>`;
+    // Search-and-pick prompt: a chip list plus an input; selected chips also carry promptOption, as on Workday.
+    const prompt = (id, label, selected) => `
+      <div data-automation-id="${id}">
+        <label for="${id}-input">${label}</label>
+        <div data-automation-id="multiSelectContainer">
+          <div data-automation-id="multiselectInputContainer"><input id="${id}-input" data-prompt="${id}"></div>
+          <ul data-automation-id="selectedItemList">${selected ? `<li data-automation-id="selectedItem"><span data-automation-id="promptOption">${selected}</span></li>` : ""}</ul>
+        </div>
+      </div>`;
+    const sourceTree = {
+      "A Fixture Employee Referred me": ["Employee Referral"],
+      "LinkedIn, Monster, Indeed or other Job Board": ["Dice", "Indeed", "LinkedIn"],
+      "Social Networks": ["Facebook", "X"]
+    };
+    const text = (id, label, type = "text") => `
+      <div data-automation-id="${id}"><label for="${id}-input">${label}</label><input id="${id}-input" type="${type}" value="${state.values[id] || ""}"></div>`;
+
+    const pages = [
+      () => `
+        ${text("formField-legalName--firstName", "First Name*")}
+        ${text("formField-legalName--lastName", "Last Name*")}
+        ${listbox("formField-country", "Country / Territory*", ["Canada", "United States of America"], state.values["formField-country"] || "United States of America")}
+        ${listbox("formField-countryRegion", "State*", ["Oregon", "Washington"], state.values["formField-countryRegion"])}
+        ${text("formField-city", "City*")}
+        ${prompt("formField-source", "How Did You Hear About Us?*", state.values["formField-source"])}
+        ${listbox("formField-phoneType", "Phone Device Type*", ["Home", "Mobile", "Work"], state.values["formField-phoneType"])}
+        ${prompt("formField-countryPhoneCode", "Country Phone Code*", "United States of America (+1)")}
+        <div data-automation-id="formField-candidateIsPreviousWorker">
+          <label>Have you previously worked for Fixture Aerospace?*</label>
+          <input type="radio" id="prev-yes" name="prev" value="true"><label for="prev-yes">Yes</label>
+          <input type="radio" id="prev-no" name="prev" value="false"><label for="prev-no">No</label>
+        </div>`,
+      () => `
+        <div data-automation-id="workExperienceSection">
+          <h3>Work Experience</h3>
+          ${state.work.map(workPanel).join("")}
+          <button type="button" data-add="work">Add</button>
+        </div>
+        <section>
+          <h3>Education</h3>
+          ${state.education.map(educationPanel).join("")}
+          <button type="button" data-add="education">Add Another</button>
+        </section>
+        <h3>Resume/CV</h3>
+        <input type="file" data-automation-id="file-upload-input-ref" style="display:none">
+        ${resumeStatus()}`,
+      () => `
+        <div data-automation-id="formField-whyUs"><label for="why">Why do you want to work at Fixture Aerospace?*</label><textarea id="why"></textarea></div>
+        ${text("formField-gradYear", "Graduation year*", "number")}
+        ${params.get("transcript") === "1" ? `<div data-automation-id="formField-transcript"><label for="transcript">Unofficial Transcript*</label><input type="file" id="transcript"></div>` : ""}`,
+      () => `
+        ${listbox("formField-gender", "Gender*", ["Female", "Male", "Decline to self-identify"], null)}
+        <div data-automation-id="formField-agreement"><label for="agree">I have read and agree to the terms*</label><input type="checkbox" id="agree"></div>`,
+      () => `<p data-automation-id="reviewSummary">Please review your application.</p>`
+    ];
+
+    // Repeating My Experience rows, marked like Workday's panels.
+    const historyInput = (kind, index, key) => `data-h="${kind}" data-i="${index}" data-k="${key}"`;
+    const workPanel = (row, index) => `
+      <div role="group" data-automation-id="workExperience-${index + 1}">
+        <h4>Work Experience ${index + 1}</h4>
+        <button type="button" data-automation-id="panel-set-delete-button" data-delete="work" data-index="${index}">Delete</button>
+        <div data-automation-id="formField-jobTitle"><label for="w${index}t">Job Title*</label><input id="w${index}t" ${historyInput("work", index, "title")} value="${row.title || ""}"></div>
+        <div data-automation-id="formField-companyName"><label for="w${index}c">Company*</label><input id="w${index}c" ${historyInput("work", index, "company")} value="${row.company || ""}"></div>
+        <div data-automation-id="formField-location"><label for="w${index}l">Location</label><input id="w${index}l" ${historyInput("work", index, "location")} value="${row.location || ""}"></div>
+        <div data-automation-id="formField-currentlyWorkHere"><label for="w${index}n">I currently work here</label><input type="checkbox" id="w${index}n" ${historyInput("work", index, "current")} ${row.current ? "checked" : ""}></div>
+        <div data-automation-id="formField-startDate"><label>From*</label>
+          <input data-automation-id="dateSectionMonth-input" ${historyInput("work", index, "fromM")} value="${row.fromM || ""}">
+          <input data-automation-id="dateSectionYear-input" ${historyInput("work", index, "fromY")} value="${row.fromY || ""}"></div>
+        <div data-automation-id="formField-endDate"><label>To*</label>
+          <input data-automation-id="dateSectionMonth-input" ${historyInput("work", index, "toM")} value="${row.toM || ""}">
+          <input data-automation-id="dateSectionYear-input" ${historyInput("work", index, "toY")} value="${row.toY || ""}"></div>
+        <div data-automation-id="formField-roleDescription"><label for="w${index}d">Role Description</label><textarea id="w${index}d" ${historyInput("work", index, "description")}>${row.description || ""}</textarea></div>
+      </div>`;
+    const educationPanel = (row, index) => `
+      <div role="group" aria-label="Education ${index + 1}">
+        <h4>Education ${index + 1}</h4>
+        <button type="button" data-delete="education" data-index="${index}">Delete</button>
+        <div data-automation-id="formField-school"><label for="e${index}s">School or University*</label>
+          <div data-automation-id="multiselectInputContainer"><input id="e${index}s" data-prompt="history:education:${index}:school"></div>
+          <ul data-automation-id="selectedItemList">${row.school ? `<li data-automation-id="selectedItem">${row.school}</li>` : ""}</ul></div>
+        <div data-automation-id="formField-degree"><label for="e${index}g">Degree*</label>
+          <button type="button" id="e${index}g" aria-haspopup="listbox" data-listbox="history:education:${index}:degree" data-options="${degrees.join("|")}">${row.degree || "Select One"}</button></div>
+        <div data-automation-id="formField-fieldOfStudy"><label for="e${index}f">Field of Study</label>
+          <div data-automation-id="multiselectInputContainer"><input id="e${index}f" data-prompt="history:education:${index}:field"></div>
+          <ul data-automation-id="selectedItemList">${row.field ? `<li data-automation-id="selectedItem">${row.field}</li>` : ""}</ul></div>
+        <div data-automation-id="formField-gradeAverage"><label for="e${index}a">Overall Result (GPA)</label><input id="e${index}a" ${historyInput("education", index, "gpa")} value="${row.gpa || ""}"></div>
+        <div data-automation-id="formField-firstYearAttended"><label>From</label><input data-automation-id="dateSectionYear-input" ${historyInput("education", index, "fromY")} value="${row.fromY || ""}"></div>
+        <div data-automation-id="formField-lastYearAttended"><label>To (Actual or Expected)*</label><input data-automation-id="dateSectionYear-input" ${historyInput("education", index, "toY")} value="${row.toY || ""}"></div>
+      </div>`;
+    const resumeStatus = () => `<div id="resume-status">${state.resumes.map((name, index) =>
+      `<div data-automation-id="file-upload-item">${name} <button type="button" data-automation-id="delete-file" data-file="${index}">Delete</button></div>`).join("") || "No file"}</div>`;
+
+    /** Saves typed history values before any re-render, as Workday keeps them. */
+    function syncHistory() {
+      for (const input of document.querySelectorAll("[data-h]")) {
+        const row = state[input.dataset.h][Number(input.dataset.i)];
+        if (row) row[input.dataset.k] = input.type === "checkbox" ? input.checked : input.value;
+      }
+    }
+
+    /** Missing history rows, by label; they have no field container of their own. */
+    function historyMissing() {
+      const missing = [];
+      state.work.forEach((row, index) => {
+        for (const key of ["title", "company", "fromM", "fromY"]) if (!row[key]) missing.push(`Work Experience ${index + 1} ${key}`);
+        if (!row.current && (!row.toM || !row.toY)) missing.push(`Work Experience ${index + 1} To`);
+      });
+      state.education.forEach((row, index) => {
+        for (const key of ["school", "degree", "toY"]) if (!row[key]) missing.push(`Education ${index + 1} ${key}`);
+      });
+      return missing;
+    }
+
+    function render() {
+      if (state.submitted) {
+        document.getElementById("app").innerHTML = `<h2>Application Submitted</h2><p>Thank you for applying to Fixture Aerospace.</p>`;
+        return;
+      }
+      const bar = steps.map((name, index) => index === state.step
+        ? `<li data-automation-id="progressBarActiveStep">current step ${index + 1} of ${steps.length}${name}</li>`
+        : `<li data-automation-id="progressBarInactiveStep">step ${index + 1} of ${steps.length}${name}</li>`).join("");
+      document.getElementById("app").innerHTML = `
+        <div data-automation-id="applyFlowPage">
+          <ol data-automation-id="progressBar">${bar}</ol>
+          <div id="errors"></div>
+          <div id="fields">${pages[state.step]()}</div>
+          <div data-automation-id="pageFooter">${state.step > 0 ? `<button type="button" data-automation-id="pageFooterBackButton">Back</button>` : ""}<button type="button" data-automation-id="pageFooterNextButton">${state.step === steps.length - 1 ? "Submit" : "Save and Continue"}</button></div>
+        </div>`;
+    }
+
+    /** Workday's account panel: the submit buttons sit under a click filter, as on Workday. */
+    function renderAccount(kind) {
+      if (params.get("markup") === "real") return renderRealAccount(kind);
+      const covered =(id, label) => `<div style="position:relative;display:inline-block"><button type="button" data-automation-id="${id}">${label}</button><div data-automation-id="click_filter" aria-label="${label}" style="position:absolute;inset:0"></div></div>`;
+      const captcha = accountMode === "captcha" ? `<div data-automation-id="noCaptchaWrapper"><iframe title="reCAPTCHA challenge" src="about:blank"></iframe></div>` : "";
+      const form = kind === "create" ? `
+          <label for="acct-email">Email Address*</label><input id="acct-email" type="text" data-automation-id="email">
+          <label for="acct-password">Password*</label><input id="acct-password" type="password" data-automation-id="password">
+          <label for="acct-verify">Verify New Password*</label><input id="acct-verify" type="password" data-automation-id="verifyPassword">
+          <input type="text" data-automation-id="beecatcher" name="website" aria-label="This input is for robots only" style="position:absolute;left:-9999px">
+          <input type="checkbox" id="acct-terms" data-automation-id="createAccountCheckbox"><label for="acct-terms">Yes, I have read and consent to the Terms and Conditions</label>
+          ${covered("createAccountSubmitButton", "Create Account")}
+          <button type="button" data-automation-id="signInLink">Sign In</button>` : `
+          <label for="acct-email">Email Address*</label><input id="acct-email" type="text" data-automation-id="email">
+          <label for="acct-password">Password*</label><input id="acct-password" type="password" data-automation-id="password">
+          ${covered("signInSubmitButton", "Sign In")}
+          <button type="button" data-automation-id="createAccountLink">Create Account</button>`;
+      document.getElementById("app").innerHTML = `
+        <div data-automation-id="applyFlowPage">
+          <ol data-automation-id="progressBar"><li data-automation-id="progressBarActiveStep">current step 1 of 6Create Account/Sign In</li></ol>
+          <div data-automation-id="signInContent">
+            <h2>${kind === "create" ? "Create Account" : "Sign In"}</h2>
+            ${captcha}
+            <div id="account-errors"></div>
+            <div id="account-notice"></div>
+            ${form}
+          </div>
+        </div>`;
+    }
+
+    /**
+     * ?markup=real: the account screen as employer-a.wd115 and employer-b.wd3 draw it (captured 2026-11-19, reduced):
+     * the apply flow and its "Create Account/Sign In" step come first with an empty account area, the
+     * form ~800 ms later; every input sits in a formField-* container; the create button is wrapped in
+     * noCaptchaWrapper (no challenge inside) and covered by a click filter; the honeypot sits outside;
+     * the invisible reCAPTCHA Enterprise badge (an iframe titled "reCAPTCHA", size=invisible) is on the page.
+     */
+    function renderRealAccount(kind) {
+      const field = (id, label, type) => `
+        <div data-automation-id="formField-${id}"><label for="input-${id}"><span>${label}<abbr aria-hidden="true">*</abbr></span></label>
+          <div><div><input type="${type}" data-automation-id="${id}" id="input-${id}" aria-required="true" autocomplete="${type === "password" ? "new-password" : "email"}"></div></div></div>`;
+      const covered = (id, label) => `
+        <div data-automation-id="noCaptchaWrapper"><div style="position:relative;display:inline-block">
+          <div aria-label="${label}" role="button" tabindex="0" data-automation-id="click_filter" style="position:absolute;inset:0;z-index:1"></div>
+          <button type="submit" data-automation-id="${id}" tabindex="-2" aria-hidden="true">${label}</button></div></div>`;
+      const allSteps = ["Create Account/Sign In", "My Information", "My Experience", "Application Questions 1 of 2", "Application Questions 2 of 2", "Voluntary Disclosures", "Review"];
+      const bar = allSteps.map((name, index) => index === 0
+        ? `<li data-automation-id="progressBarActiveStep"><div></div><label aria-live="polite">current step 1 of ${allSteps.length}</label><label>${name}</label></li>`
+        : `<li data-automation-id="progressBarInactiveStep"><div></div><label aria-live="polite">step ${index + 1} of ${allSteps.length}</label><label>${name}</label></li>`).join("");
+      document.getElementById("app").innerHTML = `
+        <div data-automation-id="applyFlowPage">
+          <h2 data-automation-id="jobTitleHeading">Software Engineering Intern</h2>
+          <ol data-automation-id="progressBar">${bar}</ol>
+          <div data-automation-id="signInContent"></div>
+          <div><label for="input-website">Enter website. This input is for robots only, do not enter if you're human.</label>
+            <input data-automation-id="beecatcher" id="input-website" name="website" type="text" style="position:absolute;left:-9999px"></div>
+        </div>
+        <div class="grecaptcha-badge" style="position:fixed;bottom:14px;right:14px;width:256px;height:60px">
+          <iframe title="reCAPTCHA" width="256" height="60" src="https://www.google.com/recaptcha/enterprise/anchor?k=FIXTURE&size=invisible"></iframe></div>`;
+      const form = kind === "create" ? `
+        <h3 id="authViewTitle">Create Account</h3>
+        <div id="account-notice"></div>
+        <div data-automation-id="passwordRulesList"><div data-automation-id="richText"><p>Password Requirements:</p><ul><li>A minimum of 8 characters</li><li>A special character</li></ul></div></div>
+        <div id="account-errors"></div>
+        <form data-automation-id="signInFormo" onsubmit="return false">
+          ${field("email", "Email Address", "text")}
+          ${field("password", "Password", "password")}
+          ${field("verifyPassword", "Verify New Password", "password")}
+          <div><button type="button" data-automation-id="createAccountExpandButton">Read More</button></div>
+          <div data-automation-id="formField-"><div><div><input id="input-9" type="checkbox" aria-checked="false" data-automation-id="createAccountCheckbox">
+            <label for="input-9">Yes, I have read and consent to the Terms and Conditions</label></div></div></div>
+          ${covered("createAccountSubmitButton", "Create Account")}
+        </form>
+        <div>Already have an account?<button type="button" data-automation-id="signInLink">Sign In</button></div>
+        <div><button type="button" data-automation-id="forgotPasswordLink">Forgot your password?</button></div>` : `
+        <h3 id="authViewTitle">Sign In</h3>
+        <div id="account-errors"></div>
+        <div id="account-notice"></div>
+        <form data-automation-id="signInFormo" onsubmit="return false">
+          ${field("email", "Email Address", "text")}
+          ${field("password", "Password", "password")}
+          ${covered("signInSubmitButton", "Sign In")}
+        </form>
+        <div>Don't have an account yet?<button type="button" data-automation-id="createAccountLink">Create Account</button></div>`;
+      setTimeout(() => { document.querySelector('[data-automation-id="signInContent"]').innerHTML = form; }, 800);
+    }
+
+    /** Account inputs by Workday's own markers, in both the synthetic and the real-style markup. */
+    function accountInput(id) {
+      return document.querySelector(`[data-automation-id="signInContent"] [data-automation-id="${id}"]`);
+    }
+
+    function accountError(text) {
+      document.getElementById("account-errors").innerHTML = `<p data-automation-id="errorMessage">${text}</p>`;
+    }
+
+    function accountNotice(html) {
+      document.querySelector('[data-automation-id="signInContent"]').innerHTML = html;
+    }
+
+    function createAccount() {
+      const email = accountInput("email").value.trim().toLowerCase();
+      const password = accountInput("password").value;
+      const verify = accountInput("verifyPassword").value;
+      const terms = accountInput("createAccountCheckbox").checked;
+      if (document.querySelector('[data-automation-id="beecatcher"]').value) {
+        window.fixtureAccount.honeypotTyped = true;
+        return accountError("Something went wrong.");
+      }
+      window.fixtureAccount.termsChecked = terms;
+      window.fixtureAccount.creates += 1;
+      if (!terms) return accountError("You must accept the terms and conditions.");
+      if (password !== verify) return accountError("The passwords do not match.");
+      if (password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/[0-9]/.test(password) || !/[^A-Za-z0-9]/.test(password)) {
+        return accountError("Password must contain at least 8 characters, an uppercase letter, a lowercase letter, a number and a special character.");
+      }
+      const accounts = readAccounts();
+      if (accountMode === "exists" || accounts[email]) return accountError("An account already exists for this email address.");
+      if (accountMode === "lost") return;
+      if (accountMode === "banner") {
+        document.getElementById("account-errors").innerHTML =
+          `<div data-automation-id="errorBanner" role="alert"><ul><li>We could not create your account right now. Try again later.</li></ul></div>`;
+        return;
+      }
+      const unverified = accountMode === "verify" || accountMode === "notice" || accountMode === "quiet";
+      accounts[email] = { password, verified: !unverified, token: Math.random().toString(36).slice(2) };
+      writeAccounts(accounts);
+      if (accountMode === "double") return accountError("An account already exists for this email address.");
+      if (accountMode === "signin-after" || accountMode === "notice" || accountMode === "quiet") return renderAccount("sign-in");
+      if (accountMode === "silent") return;
+      if (accountMode === "verify") return accountNotice("<p>We sent an email to verify your account. Open it, then sign in.</p>");
+      if (accountMode === "sms") return accountNotice(`<p>Enter the code we sent by text message to your phone.</p><input data-automation-id="verificationCode">`);
+      sessionStorage.setItem(SESSION_KEY, email);
+      render();
+    }
+
+    function signIn() {
+      window.fixtureAccount.signIns += 1;
+      const email = accountInput("email").value.trim().toLowerCase();
+      const password = accountInput("password").value;
+      const account = readAccounts()[email];
+      if (!account || account.password !== password) return accountError("Wrong email address or password.");
+      if (!account.verified && accountMode === "notice") {
+        document.getElementById("account-notice").innerHTML = "<p>Your account has not been verified. Check your email for the verification link.</p>";
+        return;
+      }
+      if (!account.verified && accountMode === "quiet") return;
+      if (!account.verified) return accountError("Please verify your account before signing in.");
+      sessionStorage.setItem(SESSION_KEY, email);
+      render();
+    }
+
+    /** Missing required fields as { label, container }. */
+    function missingRequired() {
+      const missing = [];
+      for (const container of document.querySelectorAll('[data-automation-id^="formField-"]')) {
+        if (container.querySelector("[data-h], [data-prompt^='history:'], [data-listbox^='history:']")) continue;
+        const label = container.querySelector("label").textContent;
+        if (!label.endsWith("*")) continue;
+        const input = container.querySelector("input:not([type=radio]):not([type=checkbox]), textarea");
+        const button = container.querySelector("button[aria-haspopup]");
+        if (container.querySelector('[data-automation-id="selectedItemList"]')) {
+          if (!container.querySelector('[data-automation-id="selectedItem"]')) missing.push({ label: label.replace("*", ""), container });
+          continue;
+        }
+        const radios = container.querySelectorAll("input[type=radio]");
+        const box = container.querySelector("input[type=checkbox]");
+        const empty = button ? button.textContent === "Select One"
+          : radios.length ? ![...radios].some((radio) => radio.checked)
+          : box ? !box.checked
+          : !input.value;
+        if (empty) missing.push({ label: label.replace("*", ""), container });
+      }
+      return missing;
+    }
+
+    document.addEventListener("change", (event) => {
+      if (event.target.matches('input[data-automation-id="file-upload-input-ref"]') && event.target.files[0]) {
+        // Workday lists every attached file; a second upload sits beside the first.
+        state.resumes.push(event.target.files[0].name);
+        document.getElementById("resume-status").outerHTML = resumeStatus();
+      } else if (event.target.matches("#transcript")) {
+        state.transcript = event.target.files[0]?.name ?? null;
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || !event.target.matches("input[data-prompt^='history:']")) return;
+      const id = event.target.dataset.prompt;
+      const words = event.target.value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+      const source = id.endsWith(":school") ? schools : fields;
+      const found = source.filter((option) => words.every((word) => option.toLowerCase().includes(word)));
+      document.getElementById("popup").innerHTML = `<div data-prompt-popup="${id}">${found.map((option) => `<div data-automation-id="promptOption">${option}</div>`).join("")}</div>`;
+    });
+    document.addEventListener("click", (event) => {
+      const target = event.target;
+      if (target.matches('[data-automation-id="adventureButton"]')) {
+        event.preventDefault();
+        document.getElementById("popup").innerHTML = `<div data-automation-id="wd-popup-frame">
+          <a href="#" data-automation-id="applyManually">Apply Manually</a></div>`;
+      } else if (target.matches('[data-automation-id="applyManually"]')) {
+        event.preventDefault();
+        document.getElementById("popup").innerHTML = "";
+        if (params.get("signin") === "1") {
+          document.getElementById("app").innerHTML = `<label for="email">Email Address</label><input id="email" type="email">
+            <label for="password">Password</label><input id="password" type="password"><button>Sign In</button>`;
+          return;
+        }
+        if (accountMode && !sessionStorage.getItem(SESSION_KEY)) { renderAccount("create"); return; }
+        render();
+      } else if (target.matches('[data-automation-id="signInLink"]')) {
+        renderAccount("sign-in");
+      } else if (target.matches('[data-automation-id="createAccountLink"]')) {
+        renderAccount("create");
+      } else if (target.matches('[data-automation-id="utilityMenu"] [data-automation-id="click_filter"]')) {
+        // ?header=filter: the header's covered Sign In button; a click on it is only counted.
+        window.fixtureAccount.headerClicks += 1;
+      } else if (target.matches('[data-automation-id="click_filter"]')) {
+        // Only the click filter is clickable, as on Workday; the test may watch the moment of submit.
+        const label = target.getAttribute("aria-label");
+        Promise.resolve(window.onFixtureAccountSubmit?.(label)).then(() => (label === "Create Account" ? createAccount() : signIn()));
+      } else if (target.matches("[data-add]")) {
+        syncHistory();
+        state[target.dataset.add].push({});
+        render();
+      } else if (target.matches("[data-delete]")) {
+        syncHistory();
+        state[target.dataset.delete].splice(Number(target.dataset.index), 1);
+        render();
+      } else if (target.matches('[data-automation-id="delete-file"]')) {
+        state.resumes.splice(Number(target.dataset.file), 1);
+        target.closest('[data-automation-id="file-upload-item"]').remove();
+      } else if (target.matches('[data-automation-id="pageFooterBackButton"]')) {
+        syncHistory();
+        state.step -= 1;
+        render();
+      } else if (target.matches("input[data-prompt^='history:']")) {
+        document.getElementById("popup").innerHTML = "";
+      } else if (target.matches("input[data-prompt]")) {
+        const id = target.dataset.prompt;
+        const options = id === "formField-source" ? Object.keys(sourceTree) : ["United States of America (+1)", "Canada (+1)"];
+        document.getElementById("popup").innerHTML = `<div data-prompt-popup="${id}">${options.map((option) => `<div data-automation-id="promptOption" data-level="top">${option}</div>`).join("")}</div>`;
+      } else if (target.matches('#popup [data-automation-id="promptOption"]')) {
+        const popup = target.closest("[data-prompt-popup]");
+        const id = popup.dataset.promptPopup;
+        if (id.startsWith("history:")) {
+          const [, kind, index, key] = id.split(":");
+          syncHistory();
+          state[kind][Number(index)][key] = target.textContent;
+          document.getElementById("popup").innerHTML = "";
+          render();
+          return;
+        }
+        const children = id === "formField-source" && target.dataset.level === "top" ? sourceTree[target.textContent] : null;
+        if (children) {
+          popup.innerHTML = children.map((option) => `<div data-automation-id="promptOption" data-level="sub">${option}</div>`).join("");
+          return;
+        }
+        state.values[id] = target.textContent;
+        document.getElementById("popup").innerHTML = "";
+        // Update the chip in place, as Workday does, so typed fields keep their values.
+        document.querySelector(`[data-automation-id="${id}"] [data-automation-id="selectedItemList"]`).innerHTML =
+          `<li data-automation-id="selectedItem"><span data-automation-id="promptOption">${target.textContent}</span></li>`;
+      } else if (target.matches("button[aria-haspopup=listbox]")) {
+        const id = target.dataset.listbox;
+        const options = target.dataset.options.split("|").map((option) => `<li role="option">${option}</li>`).join("");
+        document.getElementById("popup").innerHTML = `<ul role="listbox" data-for="${id}">${options}</ul>`;
+      } else if (target.matches('[role="option"]')) {
+        const id = target.parentElement.dataset.for;
+        state.values[id] = target.textContent;
+        if (id.startsWith("history:")) {
+          const [, kind, index, key] = id.split(":");
+          state[kind][Number(index)][key] = target.textContent;
+        }
+        document.querySelector(`[data-listbox="${id}"]`).textContent = target.textContent;
+        document.getElementById("popup").innerHTML = "";
+      } else if (target.matches('[data-automation-id="pageFooterNextButton"]')) {
+        if (state.step === steps.length - 1) { state.submitted = true; render(); return; }
+        for (const input of document.querySelectorAll("#fields input[type=text], #fields input[type=number]")) {
+          state.values[input.closest("[data-automation-id]").getAttribute("data-automation-id")] = input.value;
+        }
+        syncHistory();
+        for (const earlier of document.querySelectorAll("[data-fixture-error]")) earlier.remove();
+        const missing = missingRequired();
+        if (state.step === 1) missing.push(...historyMissing().map((label) => ({ label, container: null })));
+        if (state.step === 1 && state.resumes.length === 0) missing.push({ label: "Resume/CV", container: null });
+        if (missing.length) {
+          const required = (label) => `The field ${label} is required and must have a value.`;
+          const inline = missing.filter((entry) => entry.container);
+          for (const entry of inline) {
+            entry.container.insertAdjacentHTML("beforeend",
+              `<div data-automation-id="errorMessage" role="alert" data-fixture-error><p>Error: ${required(entry.label)}</p></div>`);
+          }
+          const banner = inline.length
+            ? `<div data-automation-id="errorBanner"><button type="button">Errors Found</button><ul>${inline.map((entry) => `<li>${entry.label}: ${required(entry.label)}</li>`).join("")}</ul></div>`
+            : "";
+          document.getElementById("errors").innerHTML = banner + missing.filter((entry) => !entry.container)
+            .map((entry) => `<p data-automation-id="errorMessage">Error: ${entry.label} is required</p>`).join("");
+          return;
+        }
+        state.step += 1;
+        render();
+      }
+    });
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") document.getElementById("popup").innerHTML = ""; });
+  </script>
+</body>
+</html>

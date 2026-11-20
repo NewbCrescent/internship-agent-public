@@ -1,0 +1,70 @@
+node_modules/
+.pnpm-store/
+.next/
+.next-verify/
+**/.next-*/
+.turbo/
+coverage/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+data/*
+!data/.gitkeep
+playwright-report/
+test-results/
+.DS_Store
+
+# Secrets and local environment files (only .env.example is tracked).
+.envrc
+*.pem
+*.key
+*.p12
+
+# Workspace data stays local wherever it ends up: SQLite databases and their
+# WAL/SHM files, backups, application artifacts, browser profiles and logs.
+*.sqlite
+*.sqlite-*
+*.sqlite.*
+*.db
+*.db-*
+browser-profile/
+pipeline-logs/
+mail-logs/
+
+# Claude Code worktrees and local settings.
+.claude/
+
+# Build output and caches.
+build/
+out/
+.cache/
+.eslintcache
+blob-report/
+playwright/.cache/
+
+# Logs.
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editors and operating systems.
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+desktop.ini
+
+# Syncthing conflict copies and scratch directories.
+*.sync-conflict-*
+.stfolder/
+.stversions/
+scratch/
+scratchpad/
+tmp/
+.tmp/

@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture Robotics - Software Engineer Intern</title>
+<style>
+  .hidden, .resume-upload-working, .resume-upload-success, .resume-upload-failure { display: none; }
+  .invisible-resume-upload { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .dropdown-results { border: 1px solid #888; width: 320px; }
+  .dropdown-results:empty { display: none; }
+  .dropdown-location { padding: 4px; cursor: pointer; }
+  .h-captcha { width: 0; height: 0; }
+</style>
+</head>
+<body>
+  <!--
+    A fictional Lever application page ("Fixture Robotics"), DERIVED rather than captured: Lever
+    pages were not loaded by this run. The markup follows Lever's public apply form as read from an
+    unrelated public posting's HTML: each question an li.application-question whose label wraps a
+    div.application-label (with a "✱" span.required) and the control; the Resume/CV upload with an
+    "ATTACH RESUME/CV" button label and hidden parser status spans; the "Current location" type-ahead
+    (input.location-input, a hidden selectedLocation input, and a dropdown-container whose
+    no-results and loading texts sit inside the question's label); "LinkedIn URL" as urls[LinkedIn];
+    multiple-choice custom questions as radios named cards[<uuid>][field0] wrapped in labels; a
+    data-retention consent checkbox; and the hidden h-captcha-response field. The location results
+    markup (div.dropdown-location inside .dropdown-results, ~300 ms after typing) is an assumption.
+  -->
+  <div class="content">
+    <h2>Software Engineer Intern</h2>
+    <form id="application-form" onsubmit="return false">
+      <div class="section page-centered application-form">
+        <h4>Submit your application</h4>
+        <ul>
+          <li class="application-question resume">
+            <label><div class="application-label">Resume/CV <span class="required">✱</span></div>
+              <div class="application-field">
+                <a class="postings-btn template-btn-utility visible-resume-upload"><span class="default-label">ATTACH RESUME/CV</span><span class="filename"></span></a>
+                <input class="application-file-input invisible-resume-upload" id="resume-upload-input" name="resume" type="file">
+                <span class="resume-upload-working">Analyzing resume...</span>
+                <span class="resume-upload-success">Success!</span>
+                <span class="resume-upload-failure">Couldn't auto-read resume.</span>
+              </div></label>
+          </li>
+          <li class="application-question">
+            <label><div class="application-label">Full name<span class="required">✱</span></div>
+              <div class="application-field"><input type="text" data-qa="name-input" name="name" required></div></label>
+          </li>
+          <li class="application-question">
+            <label><div class="application-label">Email<span class="required">✱</span></div>
+              <div class="application-field"><input type="email" data-qa="email-input" name="email" required></div></label>
+          </li>
+          <li class="application-question">
+            <label><div class="application-label">Phone <span class="required">✱</span></div>
+              <div class="application-field"><input type="text" data-qa="phone-input" name="phone" required></div></label>
+          </li>
+          <li class="application-question" data-qa="structured-contact-location-question">
+            <label><div class="application-label">Current location <span class="required">✱</span></div>
+              <div class="application-field">
+                <input class="location-input" data-qa="location-input" id="location-input" type="text" maxlength="100" name="location" required autocomplete="off">
+                <input id="selected-location" type="hidden" name="selectedLocation">
+                <div class="dropdown-container">
+                  <div class="dropdown-results"></div>
+                  <div class="dropdown-no-results hidden">No location found. Try entering a different location</div>
+                  <div class="dropdown-loading-results hidden"><span>Loading</span></div>
+                </div>
+              </div></label>
+          </li>
+        </ul>
+      </div>
+      <div class="section page-centered application-form">
+        <h4>Links</h4>
+        <ul>
+          <li class="application-question">
+            <label><div class="application-label">LinkedIn URL</div>
+              <div class="application-field"><input type="text" name="urls[LinkedIn]"></div></label>
+          </li>
+        </ul>
+      </div>
+      <div class="section page-centered application-form">
+        <ul>
+          <li class="application-question custom-question">
+            <div><div class="application-label full-width multiple-choice"><div class="text">What is your nationality status for this role?<span class="required">✱</span></div></div>
+              <div class="application-field full-width required-field">
+                <ul data-qa="multiple-choice">
+                  <li><label><input type="radio" name="cards[0b1c2d3e-0000-4000-8000-000000000001][field0]" value="I hold a valid work permit" required><span class="application-answer-alternative">I hold a valid work permit</span></label></li>
+                  <li><label><input type="radio" name="cards[0b1c2d3e-0000-4000-8000-000000000001][field0]" value="I need a work permit" required><span class="application-answer-alternative">I need a work permit</span></label></li>
+                  <li><label><input type="radio" name="cards[0b1c2d3e-0000-4000-8000-000000000001][field0]" value="Non Applicable I am a national of a Member State of the European Union" required><span class="application-answer-alternative">Non Applicable I am a national of a Member State of the European Union</span></label></li>
+                </ul>
+              </div></div>
+          </li>
+          <li class="application-question custom-question">
+            <div><div class="application-label full-width multiple-choice"><div class="text">Are you legally authorized to work in the United States?<span class="required">✱</span></div></div>
+              <div class="application-field full-width required-field">
+                <ul data-qa="multiple-choice">
+                  <li><label><input type="radio" name="cards[0b1c2d3e-0000-4000-8000-000000000001][field1]" value="Yes" required><span class="application-answer-alternative">Yes</span></label></li>
+                  <li><label><input type="radio" name="cards[0b1c2d3e-0000-4000-8000-000000000001][field1]" value="No" required><span class="application-answer-alternative">No</span></label></li>
+                </ul>
+              </div></div>
+          </li>
+          <li class="application-question custom-question">
+            <label><input type="checkbox" name="consent[store]" value="1"><span class="application-answer-alternative">I agree that Fixture Robotics has my consent to retain my data and contact me about future roles for up to 3 years.</span></label>
+          </li>
+        </ul>
+      </div>
+      <input type="hidden" name="h-captcha-response">
+      <div class="h-captcha"></div>
+      <button type="submit" class="postings-btn template-btn-submit">Submit application</button>
+    </form>
+  </div>
+  <script>
+    const state = { uploads: {}, location: null, radios: {}, consent: false };
+    window.fixture = state;
+    const PLACES = ["Berkeley, California, United States", "Berkeley, Missouri, United States", "Paris, Île-de-France, France"];
+    const input = document.getElementById("location-input");
+    const results = document.querySelector(".dropdown-results");
+    let timer = null;
+    input.addEventListener("input", () => {
+      document.getElementById("selected-location").value = "";
+      state.location = null;
+      clearTimeout(timer);
+      results.innerHTML = "";
+      const city = input.value.split(",")[0].trim().toLowerCase();
+      if (!city) return;
+      timer = setTimeout(() => {
+        results.innerHTML = PLACES.filter((place) => place.toLowerCase().startsWith(city))
+          .map((place) => `<div class="dropdown-location">${place}</div>`).join("");
+        document.querySelector(".dropdown-no-results").classList.toggle("hidden", results.children.length > 0);
+      }, 300);
+    });
+    results.addEventListener("click", (event) => {
+      const option = event.target.closest(".dropdown-location");
+      if (!option) return;
+      event.preventDefault();
+      input.value = option.textContent;
+      document.getElementById("selected-location").value = JSON.stringify({ name: option.textContent });
+      state.location = option.textContent;
+      results.innerHTML = "";
+    });
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") results.innerHTML = ""; });
+    document.addEventListener("change", (event) => {
+      const target = event.target;
+      if (target.type === "file") state.uploads[target.id] = target.files[0]?.name ?? null;
+      if (target.type === "radio") state.radios[target.name] = target.value;
+      if (target.type === "checkbox") state.consent = target.checked;
+    });
+    // ?confirm=thanks: the submit goes to Lever's /thanks page (lever-thanks.html). The click, not the
+    // form's submit event, since the browser's required-field check would stop that event first.
+    document.querySelector(".template-btn-submit").addEventListener("click", () => {
+      if (new URLSearchParams(location.search).get("confirm") === "thanks") {
+        location.assign(location.pathname.replace(/\/apply$/, "/thanks"));
+      }
+    });
+  </script>
+</body>
+</html>

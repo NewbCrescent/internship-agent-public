@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Handshake-style application (fixture)</title>
+</head>
+<body>
+<h1>Software Engineering Intern application</h1>
+<form id="application" action="#submitted">
+  <label>Full name <input type="text" name="fullName" required></label>
+  <label>Email address <input type="email" name="email" required></label>
+  <label>Why do you want this role? <textarea name="interest" required></textarea></label>
+  <label>Are you authorized to work?
+    <select name="auth" required>
+      <option value="">Choose…</option>
+      <option>Yes</option>
+      <option>No</option>
+    </select>
+  </label>
+  <label><input type="checkbox" name="agree" required> I agree to the terms</label>
+  <label>Resume <input type="file" name="resume" required></label>
+  <label>Unofficial transcript <input type="file" name="transcript" required></label>
+  <label>Favorite color? <input type="text" name="color"></label>
+  <button type="submit">Submit application</button>
+</form>
+<div id="done" hidden>
+  <h2>Thank you! Your application was received.</h2>
+  <p>Confirmation #FIXTURE-001. We received your application.</p>
+</div>
+<script>
+document.getElementById("application").addEventListener("submit", (event) => {
+  event.preventDefault();
+  document.getElementById("application").hidden = true;
+  document.getElementById("done").hidden = false;
+  document.title = "Application submitted";
+});
+</script>
+</body>
+</html>

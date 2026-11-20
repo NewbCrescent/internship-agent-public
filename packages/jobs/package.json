@@ -1,0 +1,23 @@
+{
+  "name": "@internship-agent/jobs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest --root ../.. run testing-harness/jobs",
+    "test:fast": "vitest --root ../.. run testing-harness/jobs/normalization-contracts.test.ts testing-harness/jobs/discovery-contracts.test.ts testing-harness/jobs/github-list-source.test.ts testing-harness/jobs/model-throughput.test.ts testing-harness/jobs/job-list.test.ts testing-harness/jobs/posting-sources.test.ts",
+    "test:local": "vitest --root ../.. run testing-harness/jobs/ingestion.integration.test.ts testing-harness/jobs/discovery.integration.test.ts testing-harness/jobs/job-list.integration.test.ts testing-harness/jobs/extraction-backfill.integration.test.ts"
+  },
+  "dependencies": {
+    "@internship-agent/db": "workspace:*",
+    "@internship-agent/domain": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.11"
+  }
+}

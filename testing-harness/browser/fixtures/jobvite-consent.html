@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture Robotics Careers - Software Intern</title></head>
+<body class="jv-desktop jv-page-consentform">
+  <!--
+    The page Jobvite's Apply reaches (jobs.jobvite.com/fixturerobotics/job/oFixture1/apply), reduced
+    from a read-only 2026-11-20 capture of a public Jobvite apply page: a "Data Consent" step with a
+    "Location of Residence and Language:" select (#jv-country-select) and accept/decline controls,
+    before any application form. The agent never gives consent. Policy ids were stripped; the
+    option texts are fictional.
+  -->
+  <article class="jv-page-body" role="main">
+    <h3>Data Consent</h3>
+    <form name="consentForm" class="jv-form" method="POST" action="/fixturerobotics/job/oFixture1/apply/consent">
+      <label for="jv-country-select">Location of Residence and Language:</label>
+      <select id="jv-country-select" name="consentPolicyId" required>
+        <option value="">Select your location of residence and language</option>
+        <option value="fixture-us">US Based Applicants (English)</option>
+        <option value="fixture-other">Other (English)</option>
+      </select>
+      <p>Fixture Robotics processes your application data under the policy shown here.</p>
+      <button type="submit" class="jv-button jv-button-primary">Accept</button>
+      <a class="jv-button" href="/fixturerobotics/job/oFixture1">Decline</a>
+    </form>
+  </article>
+  <footer class="jv-footer"><p>Powered by Jobvite</p></footer>
+</body>
+</html>

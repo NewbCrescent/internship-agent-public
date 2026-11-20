@@ -1,0 +1,12 @@
+{
+  "id": "3f2a9c1e-5b7d-4e8a-9c0f-1a2b3c4d5e6f",
+  "client_name": "Harbor Kite",
+  "title": "Software Engineering Intern",
+  "location": null,
+  "user_provided_description": "<p>Harbor Kite builds scheduling software for marine logistics teams across the United States.</p><p>Requirements: current enrollment in a computer science or related degree program, with an expected graduation in 2028.</p><p>You will ship production features with mentorship from senior engineers.</p><ul><li>Python experience</li><li>Comfort writing automated tests</li></ul>",
+  "locations": [{ "location_option": { "display_name": "Mountain View, CA", "city": "Mountain View", "state": "California", "country": "US" } }],
+  "workplace_type": "ONSITE",
+  "active": true,
+  "is_private": false,
+  "created": "2025-11-03T17:00:00Z"
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@internship-agent/writer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest --root ../.. run testing-harness/writer",
+    "test:fast": "vitest --root ../.. run testing-harness/writer/package-builder.test.ts testing-harness/writer/resume-variant.test.ts",
+    "test:local": "vitest --root ../.. run testing-harness/writer/package-persistence.integration.test.ts"
+  },
+  "dependencies": {
+    "@internship-agent/domain": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.11"
+  }
+}

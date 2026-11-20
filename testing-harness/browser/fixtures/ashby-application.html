@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Robotics Software Intern @ Fixture Robotics</title>
+<style>
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .ashby-application-form-input-file input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  ._input_yesno { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+  ._pending[data-state="hidden"], ._drag[data-state="hidden"] { display: none; }
+  ._inputContainer { position: relative; display: flex; width: 320px; }
+  ._toggleButton { width: 24px; }
+  .ashby-application-form-input-autocomplete-popup { border: 1px solid #888; width: 320px; }
+  .ashby-application-form-input-autocomplete-popup:empty { display: none; }
+  .ashby-application-form-input-yesno-option[aria-pressed="true"] { font-weight: bold; }
+  .grecaptcha-badge { width: 256px; height: 60px; position: fixed; bottom: 14px; right: -186px; overflow: hidden; }
+</style>
+</head>
+<body>
+  <!--
+    A fictional Ashby application page ("Fixture Robotics"), hand-reduced from the structure of two
+    jobs.ashbyhq.com /application pages captured read-only on 2026-11-19 (Brightlane "Software
+    Intern - Hybrid" and Lumora "Full-Stack Software Engineering Intern"): the "Autofill from resume"
+    parser box with its own unlabeled file input, field entries whose question title is a
+    label[for] (the required star is CSS only), the resume and an optional cover letter as file
+    inputs, LinkedIn as an input[type=url], a Yes/No question drawn as two buttons over a hidden
+    checkbox whose label[for] names no element, the hidden g-recaptcha-response textarea and the
+    invisible reCAPTCHA Enterprise badge, and a "Powered by" footer link to ashbyhq.com.
+    From a read-only capture of the Fernwave Sciences application page on 2026-11-20 (structure only;
+    every text here is fictional): the "Start typing..." location box is an input with NO id, NO
+    name, no aria-controls, and no required attribute, inside a `_inputContainer` with a textless
+    toggle button; its question title's label[for="_systemfield_location"] names no element, and
+    the required star is the title's `_required` class. Yes/No questions (one optional, one
+    required) are `ashby-application-form-input-yesno` button pairs over a hidden checkbox that
+    has only a name. A radio question is a fieldset field entry whose `_required` question title
+    label (for= a uuid naming nothing) sits inside the fieldset next to its options' own labels.
+    Every question sits in a `_fieldEntry ashby-application-form-field-entry` wrapper.
+    DERIVED from the bundle's class names, structure assumed (not observed): location suggestions
+    drawn ~300 ms after typing as `ashby-application-form-input-autocomplete-popup-result` rows (no
+    role=option) in a sibling `ashby-application-form-input-autocomplete-popup`.
+    DERIVED, not captured: the post-submit success state, from Ashby's public front-end bundle
+    (read 2026-11-20, no submission made): a `.ashby-application-form-success-container` holding a
+    role=status live region with a "Success" heading and either the default text or the employer's
+    custom message (the theme's applicationSubmittedSuccessMessage). Query switch ?submitted=default
+    shows the default text after the submit click, ?submitted=custom a custom message with no
+    usual confirmation phrase; without it the click does nothing.
+  -->
+  <div id="root">
+    <h1 class="ashby-job-posting-heading">Robotics Software Intern</h1>
+    <div tabindex="0" role="tabpanel" aria-labelledby="job-application-form" id="form">
+      <div class="_autofillPane ashby-application-form-autofill-pane">
+        <div role="presentation" class="_root" data-state="default">
+          <input accept="application/pdf,.pdf,.doc,.docx" type="file" tabindex="-1" class="visually-hidden">
+          <div class="_base"><div class="_content">
+            <div class="_header"><h3 class="_title">Autofill from resume</h3></div>
+            <p class="_description">Upload your resume here to autofill key application fields.</p>
+            <div class="_cta"><button class="_button _ctaButton" type="button">Upload file</button></div>
+          </div></div>
+          <div class="_drag" data-state="hidden"><span>Drop your resume here!</span></div>
+          <div class="_pending" data-state="hidden"><span aria-label="Loading..." role="progressbar"></span><span>Parsing your resume. Autofilling key fields...</span></div>
+        </div>
+      </div>
+      <div class="_jobPostingForm ashby-application-form-container">
+        <div class="_section">
+          <div class="_fieldEntry ashby-application-form-field-entry" data-field-path="_systemfield_name">
+            <label class="_heading _required _label ashby-application-form-question-title" for="_systemfield_name">Name</label>
+            <div><input placeholder="Type here..." name="_systemfield_name" required id="_systemfield_name" type="text" class="_input ashby-application-form-input-text"></div>
+          </div>
+          <div class="_fieldEntry ashby-application-form-field-entry" data-field-path="_systemfield_email">
+            <label class="_heading _required _label ashby-application-form-question-title" for="_systemfield_email">Email</label>
+            <div><input placeholder="hello@example.com..." name="_systemfield_email" required id="_systemfield_email" type="email" class="_input ashby-application-form-input-text"></div>
+          </div>
+          <div class="_fieldEntry ashby-application-form-field-entry" data-field-path="_systemfield_resume">
+            <label class="_heading _required _label ashby-application-form-question-title" for="_systemfield_resume">Resume</label>
+            <div role="presentation" class="_container ashby-application-form-input-file">
+              <input accept="application/pdf,.pdf,.doc,.docx" type="file" tabindex="-1" id="_systemfield_resume" required>
+              <div class="_instructions"><button class="_button" type="button"><span><span>Upload File</span></span></button><p class="_dragInstructions">or drag and drop here</p></div>
+            </div>
+          </div>
+          <div class="_fieldEntry ashby-application-form-field-entry" data-field-path="_systemfield_location">
+            <label class="_heading _required _label ashby-application-form-question-title" for="_systemfield_location">Location</label>
+            <div><div class="_inputContainer"><input class="_input ashby-application-form-input-autocomplete" placeholder="Start typing..." aria-autocomplete="list" aria-expanded="false" aria-haspopup="listbox" role="combobox" autocomplete="off" type="text"><button type="button" class="_toggleButton"></button></div>
+              <div class="ashby-application-form-input-autocomplete-popup"></div></div>
+          </div>
+          <div class="_fieldEntry ashby-application-form-field-entry" data-field-path="69b84b61-6c7b-4e52-a917-ec37e23bc2f6">
+            <label class="_heading _required _label ashby-application-form-question-title" for="69b84b61-6c7b-4e52-a917-ec37e23bc2f6">LinkedIn</label>
+            <div><input placeholder="https://example.com..." name="69b84b61-6c7b-4e52-a917-ec37e23bc2f6" required id="69b84b61-6c7b-4e52-a917-ec37e23bc2f6" type="url" class="_input ashby-application-form-input-text"></div>
+          </div>
+          <div class="_fieldEntry ashby-application-form-field-entry" data-field-path="29feadea-5d99-43a2-a604-5b95598bceea">
+            <label class="_heading _label ashby-application-form-question-title" for="29feadea-5d99-43a2-a604-5b95598bceea">Cover Letter&nbsp;</label>
+            <div role="presentation" class="_container ashby-application-form-input-file">
+              <input accept="application/pdf,.pdf,.doc,.docx" type="file" tabindex="-1" id="29feadea-5d99-43a2-a604-5b95598bceea">
+              <div class="_instructions"><button class="_button" type="button"><span><span>Upload File</span></span></button><p class="_dragInstructions">or drag and drop here</p></div>
+            </div>
+          </div>
+          <div class="_fieldEntry ashby-application-form-field-entry" data-field-path="1323b323-1e0c-45e7-bcf7-b49e37897e1d">
+            <label class="_heading _label ashby-application-form-question-title" for="1323b323-1e0c-45e7-bcf7-b49e37897e1d">Do you have work authorization to work in that country?</label>
+            <div class="_container _yesno ashby-application-form-input-yesno">
+              <button class="_option ashby-application-form-input-yesno-option" type="button" aria-pressed="false" data-option="yes">Yes</button>
+              <button class="_option ashby-application-form-input-yesno-option" type="button" aria-pressed="false" data-option="no">No</button>
+              <input type="checkbox" class="_input_yesno" tabindex="-1" name="1323b323-1e0c-45e7-bcf7-b49e37897e1d">
+            </div>
+          </div>
+          <div class="_fieldEntry ashby-application-form-field-entry" data-field-path="5c1d2e3f-0000-4000-8000-0000000000c2">
+            <label class="_heading _required _label ashby-application-form-question-title" for="5c1d2e3f-0000-4000-8000-0000000000c2">Will you now or in the future require visa sponsorship to work in that country?</label>
+            <div class="_container _yesno ashby-application-form-input-yesno">
+              <button class="_option ashby-application-form-input-yesno-option" type="button" aria-pressed="false" data-option="yes">Yes</button>
+              <button class="_option ashby-application-form-input-yesno-option" type="button" aria-pressed="false" data-option="no">No</button>
+              <input type="checkbox" class="_input_yesno" tabindex="-1" name="5c1d2e3f-0000-4000-8000-0000000000c2">
+            </div>
+          </div>
+          <fieldset class="_fieldEntry ashby-application-form-field-entry" data-field-path="7d2e3f40-0000-4000-8000-0000000000c3">
+            <label class="_heading _required _label ashby-application-form-question-title" for="7d2e3f40-0000-4000-8000-0000000000c3">This role is based in our Fixture City office and involves working primarily in person. Are you willing and able to work from this location?</label>
+            <div class="_option"><input type="radio" id="7d2e3f40-0000-4000-8000-0000000000c3_8e3f4051-0000-4000-8000-0000000000c4-labeled-radio-0" name="7d2e3f40-0000-4000-8000-0000000000c3_8e3f4051-0000-4000-8000-0000000000c4" value="Yes"><label for="7d2e3f40-0000-4000-8000-0000000000c3_8e3f4051-0000-4000-8000-0000000000c4-labeled-radio-0">Yes</label></div>
+            <div class="_option"><input type="radio" id="7d2e3f40-0000-4000-8000-0000000000c3_8e3f4051-0000-4000-8000-0000000000c4-labeled-radio-1" name="7d2e3f40-0000-4000-8000-0000000000c3_8e3f4051-0000-4000-8000-0000000000c4" value="Yes, but I would need to relocate"><label for="7d2e3f40-0000-4000-8000-0000000000c3_8e3f4051-0000-4000-8000-0000000000c4-labeled-radio-1">Yes, but I would need to relocate</label></div>
+            <div class="_option"><input type="radio" id="7d2e3f40-0000-4000-8000-0000000000c3_8e3f4051-0000-4000-8000-0000000000c4-labeled-radio-2" name="7d2e3f40-0000-4000-8000-0000000000c3_8e3f4051-0000-4000-8000-0000000000c4" value="No"><label for="7d2e3f40-0000-4000-8000-0000000000c3_8e3f4051-0000-4000-8000-0000000000c4-labeled-radio-2">No</label></div>
+          </fieldset>
+        </div>
+        <button class="_button _primary _submitButton ashby-application-form-submit-button" type="button"><span>Submit Application</span></button>
+      </div>
+    </div>
+    <footer><a href="https://www.ashbyhq.com" aria-label="Learn more about Ashby"><span>Powered by&nbsp;</span></a></footer>
+  </div>
+  <div>
+    <div class="grecaptcha-badge" data-style="bottomright"><div class="grecaptcha-logo">
+      <iframe title="reCAPTCHA" role="presentation" width="256" height="60" src="https://www.recaptcha.net/recaptcha/enterprise/anchor?k=FIXTURE&size=invisible"></iframe></div>
+      <textarea id="g-recaptcha-response-100000" name="g-recaptcha-response" class="g-recaptcha-response" style="display:none"></textarea></div>
+  </div>
+  <script>
+    const state = { uploads: {}, location: null, typed: [], yesno: {}, radio: null };
+    window.fixture = state;
+    const PLACES = ["Berkeley, California, United States", "Berkeley Heights, New Jersey, United States", "South San Francisco, California, United States"];
+    // The location box has no id or name, as on the captured page: found by its class.
+    const input = document.querySelector(".ashby-application-form-input-autocomplete");
+    const listbox = document.querySelector(".ashby-application-form-input-autocomplete-popup");
+    let timer = null;
+    input.addEventListener("input", () => {
+      state.location = null;
+      clearTimeout(timer);
+      listbox.innerHTML = "";
+      const typed = input.value.trim().toLowerCase();
+      if (!typed) return;
+      state.typed.push(input.value);
+      // Suggestions arrive from a search request, a moment after typing stops.
+      timer = setTimeout(() => {
+        listbox.innerHTML = PLACES.filter((place) => place.toLowerCase().includes(typed))
+          .map((place) => `<div class="ashby-application-form-input-autocomplete-popup-result">${place}</div>`).join("");
+        input.setAttribute("aria-expanded", listbox.children.length ? "true" : "false");
+      }, 300);
+    });
+    listbox.addEventListener("click", (event) => {
+      const option = event.target.closest(".ashby-application-form-input-autocomplete-popup-result");
+      if (!option) return;
+      input.value = option.textContent;
+      state.location = option.textContent;
+      listbox.innerHTML = "";
+      input.setAttribute("aria-expanded", "false");
+    });
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") listbox.innerHTML = ""; });
+    // Yes/No: the pressed button is marked, the hidden checkbox ticked for yes.
+    document.addEventListener("click", (event) => {
+      const button = event.target.closest(".ashby-application-form-input-yesno-option");
+      if (!button) return;
+      const container = button.closest(".ashby-application-form-input-yesno");
+      for (const other of container.querySelectorAll("button")) other.setAttribute("aria-pressed", other === button ? "true" : "false");
+      const box = container.querySelector('input[type="checkbox"]');
+      box.checked = button.dataset.option === "yes";
+      state.yesno[box.name] = button.dataset.option;
+    });
+    // The success state Ashby draws in place of the form once a submission is accepted.
+    const MESSAGES = {
+      default: "Your application was successfully submitted. We'll contact you if there are next steps.",
+      custom: "We got it! The Fixture Robotics team reviews every application."
+    };
+    document.querySelector(".ashby-application-form-submit-button").addEventListener("click", () => {
+      const message = MESSAGES[new URLSearchParams(location.search).get("submitted")];
+      if (!message) return;
+      setTimeout(() => {
+        document.getElementById("form").innerHTML = `<div class="ashby-application-form-success-container"><div role="status" aria-live="polite" tabindex="-1"><h2>Success</h2><p>${message}</p></div></div>`;
+      }, 200);
+    });
+    document.addEventListener("change", (event) => {
+      if (event.target.type === "file") state.uploads[event.target.id || "autofill"] = event.target.files[0]?.name ?? null;
+      if (event.target.type === "radio") state.radio = document.querySelector(`label[for="${CSS.escape(event.target.id)}"]`).textContent;
+    });
+  </script>
+</body>
+</html>

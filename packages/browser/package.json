@@ -1,0 +1,25 @@
+{
+  "name": "@internship-agent/browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest --root ../.. run testing-harness/browser-worker",
+    "test:fast": "vitest --root ../.. run testing-harness/browser-worker/recognition-planner.test.ts testing-harness/browser-worker/self-identification.test.ts testing-harness/browser-worker/ats-classification.test.ts testing-harness/browser-worker/handshake-session.test.ts testing-harness/browser-worker/workday.test.ts",
+    "test:local": "vitest --root ../.. run testing-harness/browser-worker/run-lifecycle.integration.test.ts testing-harness/browser-worker/self-identification.integration.test.ts testing-harness/browser-worker/workday-session.integration.test.ts testing-harness/browser-worker/manual-application.integration.test.ts"
+  },
+  "dependencies": {
+    "@internship-agent/db": "workspace:*",
+    "@internship-agent/domain": "workspace:*",
+    "pdf-lib": "1.17.1",
+    "playwright-core": "1.63.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.11"
+  }
+}

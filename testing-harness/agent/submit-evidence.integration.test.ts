@@ -1,0 +1,430 @@
+import { randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import { createDatabase, listApplicationEvents, persistNormalizedPosting, saveBrowserRun } from "@internship-agent/db";
+import type { BrowserRun } from "@internship-agent/domain";
+import { submitEvidenceRoot, type BrowserPage, type PostSubmitEvidence } from "@internship-agent/browser";
+import {
+  readJobEvidence,
+  readSubmitEvidence,
+  redactEvidenceText,
+  runEvidenceCommand,
+  savePostSubmitEvidence,
+  savePostSubmitEvidenceQuietly,
+  submitEvidenceFileSchema
+} from "@internship-agent/agent";
+
+/**
+ * Post-submit evidence (submit-evidence.ts) against a disposable SQLite
+ * database and data directory: private files, redaction, the timeline event,
+ * quiet failure, reads, and `pnpm run:evidence`, including Workday stops
+ * saved for the job before any run existed. Fictional data only; fake pages;
+ * no browser, no network, no model, nothing sent to Discord.
+ */
+
+const temporaryDirectories: string[] = [];
+
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
+});
+
+function disposableDirectory(prefix: string): string {
+  const directory = mkdtempSync(join(tmpdir(), prefix));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
+function disposableDatabase(): DatabaseSync {
+  return createDatabase(join(disposableDirectory("internship-agent-evidence-"), "test.sqlite"));
+}
+
+/** A synthetic applying posting with one failed run (fictional company). */
+function syntheticRun(database: DatabaseSync, company = "Fixture Robotics"): BrowserRun {
+  const title = "Software Engineering Intern";
+  const sourceUrl = `https://example.test/internships/${company.toLowerCase().replace(/\W+/g, "-")}`;
+  const { jobId } = persistNormalizedPosting(database, {
+    companyName: company, title, employmentType: "INTERNSHIP", applicationType: "EXTERNAL_ATS",
+    sourceUrl, externalApplicationUrl: null, companyCareersUrl: null, contentHash: `hash-${sourceUrl}`,
+    normalizedText: `${title}\nFixture posting for post-submit evidence.`, locations: [], compensation: null, requirements: [], technologies: [],
+    constraints: { graduation: null, authorization: null, sponsorship: null, availability: null }
+  });
+  database.prepare("UPDATE jobs SET status = 'APPLYING' WHERE id = ?").run(jobId);
+  const packageId = randomUUID();
+  database.prepare("INSERT INTO application_packages (id, job_id, created_at, package_json) VALUES (?, ?, ?, ?)")
+    .run(packageId, jobId, new Date().toISOString(), "{}");
+  const now = new Date().toISOString();
+  return saveBrowserRun(database, {
+    id: randomUUID(), jobId, applicationUrl: sourceUrl, status: "failed", packageId, variantId: null,
+    baseResumeId: null, applicationProfile: "default", atsKind: "greenhouse", atsConfidence: 1, suggestedAtsKind: null, atsConfirmed: true,
+    decisions: [], pauses: [], submittedAnswers: null, confirmationText: null, submissionApprovedAt: now, createdAt: now, updatedAt: now
+  });
+}
+
+const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function stubPage(screenshot: "write" | "throw" = "write"): BrowserPage & { shots: Array<{ path: string; fullPage: boolean | undefined }> } {
+  const shots: Array<{ path: string; fullPage: boolean | undefined }> = [];
+  return {
+    shots,
+    url: () => "https://job-boards.greenhouse.io/fixturerobotics/jobs/1000001",
+    title: async () => "Apply",
+    collectControls: async () => [],
+    bodyText: async () => "",
+    fillField: async () => {},
+    chooseOption: async () => {},
+    setChecked: async () => {},
+    uploadFile: async () => {},
+    clickSubmit: async () => { throw new Error("must not click"); },
+    screenshot: async (path, options) => {
+      shots.push({ path, fullPage: options?.fullPage });
+      if (screenshot === "throw") throw new Error("Target page, context or browser has been closed");
+      writeFileSync(path, PNG_BYTES);
+    },
+    close: async () => {}
+  };
+}
+
+function evidence(overrides: Partial<PostSubmitEvidence> = {}): PostSubmitEvidence {
+  return {
+    outcome: "field-errors",
+    url: "https://job-boards.greenhouse.io/fixturerobotics/jobs/1000001",
+    bodyText: [
+      "Apply for Software Engineering Intern",
+      "",
+      "Email: jordan@example.test",
+      "Student number 12345678",
+      "Resume link https://files.example.test/resume.pdf?signature=abc#page",
+      "This field is required."
+    ].join("\n"),
+    invalidFields: [
+      { ref: "email", label: "Email", error: "This field is required." },
+      { ref: "school--0", label: "School", error: "This field is required." }
+    ],
+    alertText: "This field is required. Contact jordan@example.test",
+    challenge: null,
+    ...overrides
+  };
+}
+
+const mode = (path: string) => statSync(path).mode & 0o777;
+const EVENT = /^Post-submit evidence saved \(field-errors\): applications\/[0-9a-f-]{36}\/submit-evidence\/[0-9TZ-]+-[0-9a-f-]{36}; view it with pnpm run:evidence --run [0-9a-f]{8}\.$/;
+
+describe("post-submit evidence files", () => {
+  it("writes a private folder with a full-page screenshot and redacted evidence, and logs only a relative path", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    const page = stubPage();
+    const saved = await savePostSubmitEvidence({ database, dataDir, run, page, evidence: evidence(), now: new Date("2026-11-20T10:15:00.123Z") });
+    expect(saved.screenshotSaved).toBe(true);
+    expect(saved.relativeDir).toBe(`applications/${run.jobId}/submit-evidence/2026-11-20T10-15-00-123Z-${run.id}`);
+    const root = submitEvidenceRoot(dataDir, run.jobId);
+    const dir = join(dataDir, saved.relativeDir);
+    expect(mode(root)).toBe(0o700);
+    expect(mode(dir)).toBe(0o700);
+    expect(mode(join(dir, "evidence.json"))).toBe(0o600);
+    expect(mode(join(dir, "screenshot.png"))).toBe(0o600);
+    expect(page.shots).toEqual([{ path: join(dir, "screenshot.png"), fullPage: true }]);
+    expect(readdirSync(dir).sort()).toEqual(["evidence.json", "screenshot.png"]);
+
+    const raw = readFileSync(join(dir, "evidence.json"), "utf8");
+    const stored = submitEvidenceFileSchema.parse(JSON.parse(raw));
+    expect(stored).toMatchObject({
+      version: 1, runId: run.id, jobId: run.jobId, capturedAt: "2026-11-20T10:15:00.123Z", outcome: "field-errors",
+      url: "https://job-boards.greenhouse.io/fixturerobotics/jobs/1000001", screenshot: "screenshot.png", challenge: null
+    });
+    expect(stored.invalidFields).toEqual(evidence().invalidFields);
+    expect(stored.alertText).toBe("This field is required. Contact [email]");
+    expect(stored.text).toBe([
+      "Apply for Software Engineering Intern",
+      "Email: [email]",
+      "Student number [number]",
+      "Resume link https://files.example.test/resume.pdf",
+      "This field is required."
+    ].join("\n"));
+    expect(raw).not.toContain("jordan@example.test");
+    expect(raw).not.toContain("12345678");
+    expect(raw).not.toContain("signature=");
+
+    const events = listApplicationEvents(database, run.jobId).map((event) => event.detail ?? "");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatch(EVENT);
+    expect(events[0]).not.toContain(dataDir);
+    expect(events[0]).not.toContain(tmpdir());
+    database.close();
+  });
+
+  it("caps the visible text at 20,000 characters", () => {
+    expect(redactEvidenceText("a".repeat(30_000))).toHaveLength(20_000);
+    expect(redactEvidenceText("one\r\n\r\n two  words \nthree")).toBe("one\ntwo words\nthree");
+  });
+
+  it("keeps evidence.json without a screenshot when the screenshot fails", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    const saved = await savePostSubmitEvidence({ database, dataDir, run, page: stubPage("throw"), evidence: evidence({ outcome: "unknown", invalidFields: [] }) });
+    expect(saved.screenshotSaved).toBe(false);
+    const dir = join(dataDir, saved.relativeDir);
+    expect(readdirSync(dir)).toEqual(["evidence.json"]);
+    expect(JSON.parse(readFileSync(join(dir, "evidence.json"), "utf8")).screenshot).toBeNull();
+    database.close();
+  });
+
+  it("fails quietly with a plain event when the folder cannot be written", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    // A file where the applications folder should be.
+    writeFileSync(join(dataDir, "applications"), "not a folder");
+    await expect(savePostSubmitEvidenceQuietly({ database, dataDir, run, page: stubPage(), evidence: evidence() })).resolves.toBeUndefined();
+    expect(listApplicationEvents(database, run.jobId).map((event) => event.detail)).toEqual(["Post-submit evidence not saved."]);
+    database.close();
+  });
+
+  it("reads a run's evidence newest first and skips other runs and damaged files", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    await savePostSubmitEvidence({ database, dataDir, run, page: stubPage(), evidence: evidence({ outcome: "unknown" }), now: new Date("2026-11-20T09:00:00.000Z") });
+    await savePostSubmitEvidence({ database, dataDir, run, page: stubPage(), evidence: evidence({ outcome: "refused" }), now: new Date("2026-11-20T11:00:00.000Z") });
+    await savePostSubmitEvidence({ database, dataDir, run: { ...run, id: randomUUID() }, page: stubPage(), evidence: evidence(), now: new Date("2026-11-20T12:00:00.000Z") });
+    const damaged = join(submitEvidenceRoot(dataDir, run.jobId), "damaged");
+    mkdirSync(damaged);
+    writeFileSync(join(damaged, "evidence.json"), "{ not json");
+    const read = readSubmitEvidence(dataDir, run);
+    expect(read.map((entry) => entry.outcome)).toEqual(["refused", "unknown"]);
+    expect(readSubmitEvidence(dataDir, { id: run.id, jobId: randomUUID() })).toEqual([]);
+    database.close();
+  });
+
+  it("takes no screenshot once an emailed security code was typed, and stores the verification-code outcome", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    const page = stubPage();
+    const saved = await savePostSubmitEvidence({
+      database, dataDir, run, page,
+      evidence: evidence({ outcome: "verification-code", invalidFields: [], alertText: "", bodyText: "Security code [code]", securityCodeEntered: true })
+    });
+    expect(saved.screenshotSaved).toBe(false);
+    expect(page.shots).toEqual([]);
+    const dir = join(dataDir, saved.relativeDir);
+    expect(readdirSync(dir)).toEqual(["evidence.json"]);
+    const stored = submitEvidenceFileSchema.parse(JSON.parse(readFileSync(join(dir, "evidence.json"), "utf8")));
+    expect(stored).toMatchObject({ outcome: "verification-code", screenshot: null, text: "Security code [code]" });
+    // Before a code is typed, the hold's screenshot is taken as usual.
+    const before = await savePostSubmitEvidence({ database, dataDir, run, page, evidence: evidence({ outcome: "verification-code" }), now: new Date("2026-11-20T08:00:00.000Z") });
+    expect(before.screenshotSaved).toBe(true);
+    expect(page.shots).toHaveLength(1);
+    database.close();
+  });
+
+  it("saves a Workday account-step stop for the job, with no run and every secret redacted", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    const password = "Fixture-Pass-9876!";
+    const saved = await savePostSubmitEvidence({
+      database, dataDir, run: { id: null, jobId: run.jobId }, page: stubPage(), now: new Date("2026-11-20T08:31:00.000Z"),
+      secrets: ["Jordan@Example.test", password, ""],
+      evidence: evidence({
+        outcome: "workday-account",
+        url: "https://fixture.wd5.myworkdayjobs.com/External/job/x/apply",
+        bodyText: `Create Account\nEmail Address jordan@example.test\nPassword ${password}`,
+        invalidFields: [{ ref: "formField-email", label: "Email Address", error: `Unknown user JORDAN@EXAMPLE.TEST` }],
+        alertText: `Workday could not create the account for jordan@example.test`,
+        detail: "Workday fixture.wd5.myworkdayjobs.com: Workday did not answer the create-account submit within 60 seconds."
+      })
+    });
+    expect(saved.relativeDir).toBe(`applications/${run.jobId}/submit-evidence/2026-11-20T08-31-00-000Z-workday-account`);
+    const raw = readFileSync(join(dataDir, saved.relativeDir, "evidence.json"), "utf8");
+    expect(raw).not.toContain(password);
+    expect(raw.toLocaleLowerCase("en-US")).not.toContain("jordan@example.test");
+    const stored = submitEvidenceFileSchema.parse(JSON.parse(raw));
+    expect(stored).toMatchObject({
+      runId: null, jobId: run.jobId, outcome: "workday-account",
+      detail: "Workday fixture.wd5.myworkdayjobs.com: Workday did not answer the create-account submit within 60 seconds.",
+      text: "Create Account\nEmail Address [redacted]\nPassword [redacted]",
+      alertText: "Workday could not create the account for [redacted]",
+      invalidFields: [{ ref: "formField-email", label: "Email Address", error: "Unknown user [redacted]" }]
+    });
+    expect(listApplicationEvents(database, run.jobId).map((event) => event.detail)).toEqual([
+      `Workday evidence saved (workday-account): ${saved.relativeDir}; view it with pnpm run:evidence --job ${run.jobId.slice(0, 8)}.`
+    ]);
+    expect(readJobEvidence(dataDir, run.jobId).map((entry) => entry.outcome)).toEqual(["workday-account"]);
+    expect(readSubmitEvidence(dataDir, run)).toEqual([]);
+    database.close();
+  });
+
+  it("names the run on a Workday errors capture and reads old files without a detail", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    const saved = await savePostSubmitEvidence({
+      database, dataDir, run, page: stubPage(), evidence: evidence({ outcome: "workday-errors", detail: "Workday could not save My Information." })
+    });
+    expect(listApplicationEvents(database, run.jobId).map((event) => event.detail)).toEqual([
+      `Workday evidence saved (workday-errors): ${saved.relativeDir}; view it with pnpm run:evidence --run ${run.id.slice(0, 8)}.`
+    ]);
+    const old = submitEvidenceFileSchema.parse({
+      version: 1, runId: run.id, jobId: run.jobId, capturedAt: "2026-11-19T10:00:00.000Z", outcome: "unknown", url: "", invalidFields: [],
+      alertText: "", challenge: null, text: "", screenshot: null
+    });
+    expect(old.detail).toBeNull();
+    database.close();
+  });
+});
+
+describe("pnpm run:evidence", () => {
+  function deps(database: DatabaseSync, dataDir: string) {
+    const lines: string[] = [];
+    const closed: string[] = [];
+    return {
+      lines,
+      closed,
+      io: {
+        open: () => database,
+        close: (profile: string) => { closed.push(profile); },
+        dataDir: () => dataDir,
+        log: (line: string) => { lines.push(line); }
+      }
+    };
+  }
+
+  it("prints usage for missing, unknown, or repeated flags", async () => {
+    const database = disposableDatabase();
+    const { io, lines } = deps(database, "/nonexistent/evidence-test");
+    for (const argv of [[], ["--run"], ["--run", "abc", "--run", "def"], ["--run", "abc", "--all", "--all"], ["--run", "abc", "--profile", "other"], ["--bogus"],
+      ["--run", "abc", "--job", "def"], ["--job"], ["--job", "abc", "--job", "def"]]) {
+      expect(await runEvidenceCommand(argv, io)).toBe(2);
+    }
+    expect(new Set(lines)).toEqual(new Set(["Usage: pnpm run:evidence (--run <id or 8-character prefix> | --job <id or 8-character prefix>) [--all] [--profile real|demo]"]));
+    database.close();
+  });
+
+  it("names a run it cannot find, and says when a run has no evidence", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    const missing = deps(database, dataDir);
+    expect(await runEvidenceCommand(["--run", "ffffffff"], missing.io)).toBe(1);
+    expect(missing.lines).toEqual(['No browser run matches "ffffffff".']);
+    const none = deps(database, dataDir);
+    expect(await runEvidenceCommand(["--run", run.id.slice(0, 8), "--profile", "demo"], none.io)).toBe(0);
+    expect(none.lines).toEqual([
+      `Run ${run.id.slice(0, 8)}: Fixture Robotics — Software Engineering Intern (failed)`,
+      "No post-submit evidence is stored for this run."
+    ]);
+    expect(none.closed).toEqual(["demo"]);
+    database.close();
+  });
+
+  it("prints the newest evidence, or all of it with --all, never an email", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    const older = await savePostSubmitEvidence({
+      database, dataDir, run, page: stubPage("throw"), now: new Date("2026-11-20T09:00:00.000Z"),
+      evidence: evidence({ outcome: "challenged", invalidFields: [], alertText: "", challenge: "a reCAPTCHA image challenge", bodyText: "Verify you are human" })
+    });
+    const newer = await savePostSubmitEvidence({ database, dataDir, run, page: stubPage(), evidence: evidence(), now: new Date("2026-11-20T10:15:00.000Z") });
+
+    const latest = deps(database, dataDir);
+    expect(await runEvidenceCommand(["--run", run.id], latest.io)).toBe(0);
+    expect(latest.lines).toEqual([
+      `Run ${run.id.slice(0, 8)}: Fixture Robotics — Software Engineering Intern (failed)`,
+      "Evidence 1 of 2, captured 2026-11-20T10:15:00.000Z: field-errors (the site marked fields invalid)",
+      "URL: https://job-boards.greenhouse.io/fixturerobotics/jobs/1000001",
+      "Invalid fields:",
+      "  - Email: This field is required.",
+      "  - School: This field is required.",
+      "Site error text: This field is required. Contact [email]",
+      `Screenshot: ${join(dataDir, newer.relativeDir, "screenshot.png")}`,
+      "Visible text (redacted):",
+      "Apply for Software Engineering Intern\nEmail: [email]\nStudent number [number]\nResume link https://files.example.test/resume.pdf\nThis field is required."
+    ]);
+    expect(latest.closed).toEqual(["real"]);
+
+    const all = deps(database, dataDir);
+    expect(await runEvidenceCommand(["--run", run.id.slice(0, 8), "--all"], all.io)).toBe(0);
+    expect(all.lines.filter((line) => line.startsWith("Evidence "))).toEqual([
+      "Evidence 1 of 2, captured 2026-11-20T10:15:00.000Z: field-errors (the site marked fields invalid)",
+      "Evidence 2 of 2, captured 2026-11-20T09:00:00.000Z: challenged (a CAPTCHA appeared after the click)"
+    ]);
+    expect(all.lines).toContain("Invalid fields: none");
+    expect(all.lines).toContain("Challenge: a reCAPTCHA image challenge");
+    expect(all.lines).toContain("Screenshot: not saved");
+    expect(older.screenshotSaved).toBe(false);
+    expect(all.lines.join("\n")).not.toMatch(/[^\s@]+@[^\s@]+\.[^\s@]+/);
+    database.close();
+  });
+
+  it("names the verification-code outcome and the skipped screenshot", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    await savePostSubmitEvidence({
+      database, dataDir, run, page: stubPage(), now: new Date("2026-11-20T10:09:00.000Z"),
+      evidence: evidence({ outcome: "verification-code", invalidFields: [], alertText: "", bodyText: "Security code", securityCodeEntered: true })
+    });
+    const shown = deps(database, dataDir);
+    expect(await runEvidenceCommand(["--run", run.id], shown.io)).toBe(0);
+    expect(shown.lines).toContain("Evidence 1 of 1, captured 2026-11-20T10:09:00.000Z: verification-code (the site asked for a security code it emailed)");
+    expect(shown.lines).toContain("Screenshot: not saved");
+    database.close();
+  });
+
+  it("prints a job's evidence, naming the run or its absence and the agent's detail", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    const detail = "Workday fixture.wd5.myworkdayjobs.com: Workday did not answer the create-account submit within 60 seconds.";
+    await savePostSubmitEvidence({
+      database, dataDir, run: { id: null, jobId: run.jobId }, page: stubPage("throw"), now: new Date("2026-11-20T08:31:00.000Z"),
+      evidence: evidence({ outcome: "workday-account", invalidFields: [], alertText: "", bodyText: "Create Account", detail })
+    });
+    await savePostSubmitEvidence({ database, dataDir, run, page: stubPage("throw"), evidence: evidence({ outcome: "unknown" }), now: new Date("2026-11-20T07:00:00.000Z") });
+
+    const latest = deps(database, dataDir);
+    expect(await runEvidenceCommand(["--job", run.jobId.slice(0, 8)], latest.io)).toBe(0);
+    expect(latest.lines.slice(0, 5)).toEqual([
+      `Job ${run.jobId.slice(0, 8)}: Fixture Robotics — Software Engineering Intern (APPLYING)`,
+      "Evidence 1 of 2, captured 2026-11-20T08:31:00.000Z: workday-account (the Workday account step stopped)",
+      "Run: none (the account step stopped before a run was saved)",
+      "URL: https://job-boards.greenhouse.io/fixturerobotics/jobs/1000001",
+      `Detail: ${detail}`
+    ]);
+    const all = deps(database, dataDir);
+    expect(await runEvidenceCommand(["--job", run.jobId, "--all"], all.io)).toBe(0);
+    expect(all.lines).toContain(`Run: ${run.id.slice(0, 8)}`);
+    expect(all.lines.filter((line) => line.startsWith("Detail: "))).toEqual([`Detail: ${detail}`]);
+    // The run's own view leaves out the job-level capture.
+    const byRun = deps(database, dataDir);
+    expect(await runEvidenceCommand(["--run", run.id, "--all"], byRun.io)).toBe(0);
+    expect(byRun.lines.filter((line) => line.startsWith("Evidence "))).toEqual(["Evidence 1 of 1, captured 2026-11-20T07:00:00.000Z: unknown (no confirmation was recognized)"]);
+
+    const missing = deps(database, dataDir);
+    expect(await runEvidenceCommand(["--job", "ffffffff"], missing.io)).toBe(1);
+    expect(missing.lines).toEqual(['No job matches "ffffffff".']);
+    database.close();
+  });
+
+  it("says when a job has no evidence", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    const none = deps(database, dataDir);
+    expect(await runEvidenceCommand(["--job", run.jobId.slice(0, 8)], none.io)).toBe(0);
+    expect(none.lines).toEqual([
+      `Job ${run.jobId.slice(0, 8)}: Fixture Robotics — Software Engineering Intern (APPLYING)`,
+      "No evidence is stored for this job."
+    ]);
+    database.close();
+  });
+});

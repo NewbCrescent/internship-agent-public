@@ -1,0 +1,150 @@
+<!doctype html>
+<!--
+  Dover application form, reduced from read-only captures of 2026-11-20 (two
+  jobs.dover.com application pages; scripts removed, names fictional). Kept
+  from the captures: the "Autofill from resume" drop zone (a role="button" box
+  with a display:none file input) at the top; each question's visible label in
+  a sibling div with class styles__FormLabel-jrYQKG; MUI outlined inputs whose
+  notched-outline legend holds only U+200B; the Resume drop zone; the
+  relocation radio group with MUI option labels; custom questions named by
+  UUIDs; the hidden Turnstile token; the Apply submit; and the footer.
+  The script below stands in for Dover's: the submit draws "Thanks for
+  applying!" in place of the form, and uploads are recorded on window.fixture.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply for Software Engineering Intern at Fixture Robotics</title>
+<style>
+  body { font-family: sans-serif; max-width: 640px; margin: 24px auto; }
+  .MuiBox-root { margin: 8px 0; }
+  .css-1f3vrmt { display: flex; gap: 8px; }
+  [role="button"] { border: 1px dashed #888; padding: 8px; }
+  .MuiOutlinedInput-notchedOutline { position: absolute; inset: 0; margin: 0; padding: 0 8px; border: 1px solid #888; pointer-events: none; }
+  /* MUI's legend for an outline with no floating label: shown, holding only U+200B. */
+  .MuiOutlinedInput-notchedOutline legend { float: unset; width: auto; overflow: hidden; padding: 0; line-height: 11px; }
+  .MuiInputBase-root { position: relative; }
+  .MuiInputBase-input { width: 100%; padding: 6px; border: 0; }
+</style>
+</head>
+<body>
+  <h1>Software Engineering Intern</h1>
+  <div id="application">
+    <form novalidate="">
+      <div class="MuiBox-root css-1qm1lh">
+        <div class="MuiBox-root css-drv4fw" role="button" tabindex="0">
+          <input accept=".pdf" multiple="" type="file" autocomplete="off" tabindex="-1" style="display: none;">
+          <div class="css-1iwoqsn"><div class="css-1owb4mx">
+            <div class="typography__BaseType-kTfPqE typography__Body-heZbRN">Autofill from resume</div>
+            <div class="typography__BaseType-kTfPqE typography__BodySmall-gAkqce">Drag &amp; drop or upload to autofill your application.</div>
+          </div></div>
+          <button class="MuiButtonBase-root MuiButton-root MuiButton-outlined" tabindex="0" type="button">Upload file</button>
+        </div>
+      </div>
+      <div class="css-1f3vrmt">
+        <div class="MuiBox-root css-i9gxme">
+          <div class="typography__BaseType-kTfPqE typography__BodySmall-gAkqce styles__FormLabel-jrYQKG">First Name *</div>
+          <div class="MuiFormControl-root MuiFormControl-fullWidth MuiTextField-root"><div class="MuiInputBase-root MuiOutlinedInput-root">
+            <input aria-invalid="false" id=":r4:" name="firstName" required="" type="text" class="MuiInputBase-input MuiOutlinedInput-input" value="">
+            <fieldset aria-hidden="true" class="MuiOutlinedInput-notchedOutline"><legend><span class="notranslate">&#8203;</span></legend></fieldset>
+          </div></div>
+        </div>
+        <div class="MuiBox-root css-i9gxme">
+          <div class="typography__BaseType-kTfPqE typography__BodySmall-gAkqce styles__FormLabel-jrYQKG">Last Name *</div>
+          <div class="MuiFormControl-root MuiFormControl-fullWidth MuiTextField-root"><div class="MuiInputBase-root MuiOutlinedInput-root">
+            <input aria-invalid="false" id=":r5:" name="lastName" required="" type="text" class="MuiInputBase-input MuiOutlinedInput-input" value="">
+            <fieldset aria-hidden="true" class="MuiOutlinedInput-notchedOutline"><legend><span class="notranslate">&#8203;</span></legend></fieldset>
+          </div></div>
+        </div>
+      </div>
+      <div class="MuiBox-root css-1qm1lh">
+        <div class="typography__BaseType-kTfPqE typography__BodySmall-gAkqce styles__FormLabel-jrYQKG">Email *</div>
+        <div class="MuiFormControl-root MuiFormControl-fullWidth MuiTextField-root"><div class="MuiInputBase-root MuiOutlinedInput-root">
+          <input aria-invalid="false" id=":r6:" name="email" required="" type="email" class="MuiInputBase-input MuiOutlinedInput-input" value="">
+          <fieldset aria-hidden="true" class="MuiOutlinedInput-notchedOutline"><legend><span class="notranslate">&#8203;</span></legend></fieldset>
+        </div></div>
+      </div>
+      <div class="MuiBox-root css-1qm1lh">
+        <div class="typography__BaseType-kTfPqE typography__BodySmall-gAkqce styles__FormLabel-jrYQKG">Resume *</div>
+        <div class="MuiBox-root css-1djycu2" role="button" tabindex="0">
+          <input accept=".pdf" multiple="" type="file" autocomplete="off" tabindex="-1" style="display: none;">
+          <div class="css-1r5r8g9">
+            <div class="typography__BaseType-kTfPqE typography__BodySmall-gAkqce">Drag and drop file or <span class="MuiBox-root">browse computer</span></div>
+            <div class="typography__BaseType-kTfPqE typography__BodySmall-gAkqce">(PDF, 5 MB maximum)</div>
+          </div>
+        </div>
+      </div>
+      <div class="MuiBox-root css-1qm1lh">
+        <div class="typography__BaseType-kTfPqE typography__BodySmall-gAkqce styles__FormLabel-jrYQKG">LinkedIn Profile URL</div>
+        <div class="MuiFormControl-root MuiFormControl-fullWidth MuiTextField-root"><div class="MuiInputBase-root MuiOutlinedInput-root">
+          <input aria-invalid="false" id=":r7:" name="linkedinUrl" type="text" class="MuiInputBase-input MuiOutlinedInput-input" value="">
+          <fieldset aria-hidden="true" class="MuiOutlinedInput-notchedOutline"><legend><span class="notranslate">&#8203;</span></legend></fieldset>
+        </div></div>
+      </div>
+      <div class="MuiBox-root css-1qm1lh">
+        <div class="typography__BaseType-kTfPqE typography__BodySmall-gAkqce styles__FormLabel-jrYQKG">Phone Number </div>
+        <div class="MuiFormControl-root MuiFormControl-fullWidth MuiTextField-root"><div class="MuiInputBase-root MuiOutlinedInput-root">
+          <input aria-invalid="false" id=":r8:" name="phoneNumber" type="text" class="MuiInputBase-input MuiOutlinedInput-input" value="">
+          <fieldset aria-hidden="true" class="MuiOutlinedInput-notchedOutline"><legend><span class="notranslate">&#8203;</span></legend></fieldset>
+        </div></div>
+      </div>
+      <div class="MuiBox-root css-1qm1lh">
+        <div class="css-l5c1s3">
+          <div class="typography__BaseType-kTfPqE typography__BodySmall-gAkqce styles__FormLabel-jrYQKG">Are you open to relocation? *</div>
+          <div class="MuiFormControl-root"><div class="MuiFormGroup-root" role="radiogroup">
+            <label class="MuiFormControlLabel-root MuiFormControlLabel-labelPlacementEnd">
+              <span class="MuiButtonBase-root MuiRadio-root PrivateSwitchBase-root"><input class="PrivateSwitchBase-input" name="00000000-0000-4000-8000-00000000d0a0" required="" type="radio" value="Yes"></span>
+              <span class="MuiTypography-root MuiTypography-body1 MuiFormControlLabel-label">Yes</span>
+            </label>
+            <label class="MuiFormControlLabel-root MuiFormControlLabel-labelPlacementEnd">
+              <span class="MuiButtonBase-root MuiRadio-root PrivateSwitchBase-root"><input class="PrivateSwitchBase-input" name="00000000-0000-4000-8000-00000000d0a0" required="" type="radio" value="No"></span>
+              <span class="MuiTypography-root MuiTypography-body1 MuiFormControlLabel-label">No</span>
+            </label>
+          </div></div>
+        </div>
+      </div>
+      <div class="MuiBox-root css-1qm1lh">
+        <div class="css-l5c1s3">
+          <div class="typography__BaseType-kTfPqE typography__BodySmall-gAkqce styles__FormLabel-jrYQKG">What is your Visa Status? *</div>
+          <div class="MuiFormControl-root MuiFormControl-fullWidth MuiTextField-root"><div class="MuiInputBase-root MuiOutlinedInput-root">
+            <input aria-invalid="false" id=":ra:" name="00000000-0000-4000-8000-00000000d0a1" required="" type="text" class="MuiInputBase-input MuiOutlinedInput-input" value="">
+            <fieldset aria-hidden="true" class="MuiOutlinedInput-notchedOutline"><legend><span class="notranslate">&#8203;</span></legend></fieldset>
+          </div></div>
+        </div>
+      </div>
+      <div class="MuiBox-root css-1qm1lh">
+        <div class="css-l5c1s3">
+          <div class="typography__BaseType-kTfPqE typography__BodySmall-gAkqce styles__FormLabel-jrYQKG">Why do you want to join Fixture Robotics?</div>
+          <div class="MuiFormControl-root MuiFormControl-fullWidth MuiTextField-root"><div class="MuiInputBase-root MuiOutlinedInput-root">
+            <input aria-invalid="false" id=":rb:" name="00000000-0000-4000-8000-00000000d0a2" type="text" class="MuiInputBase-input MuiOutlinedInput-input" value="">
+            <fieldset aria-hidden="true" class="MuiOutlinedInput-notchedOutline"><legend><span class="notranslate">&#8203;</span></legend></fieldset>
+          </div></div>
+        </div>
+      </div>
+      <div class="MuiBox-root css-1qm1lh"><div><div><div></div><input type="hidden" name="cf-turnstile-response" id="cf-chl-widget-fixture_response" value=""></div></div></div>
+      <button class="MuiButtonBase-root MuiButton-root MuiButton-contained MuiButton-containedPrimary MuiButton-fullWidth" tabindex="0" type="submit">Apply</button>
+    </form>
+  </div>
+  <div class="css-1cri6wz">
+    <a href="https://dover.com"><div class="css-9e6j7t"><div class="typography__BaseType-kTfPqE typography__BodySmall-gAkqce">Jobs powered by </div><img alt="Dover Logo" style="width: 60px;"></div></a>
+    <div class="typography__BaseType-kTfPqE typography__BodySmall-gAkqce">By applying you agree to Dover's <a href="/FixtureRobotics/careers/00000000-0000-4000-8000-00000000d0ff/audit">terms</a>.</div>
+  </div>
+  <script>
+    const state = { uploads: {}, submitted: false };
+    window.fixture = state;
+    // Which drop zone a file went to: the autofill box at the top, or the Resume question.
+    document.addEventListener("change", (event) => {
+      if (event.target.type !== "file") return;
+      const zone = event.target.closest('[role="button"]');
+      const key = /autofill/i.test(zone?.textContent ?? "") ? "autofill" : "resume";
+      state.uploads[key] = event.target.files[0]?.name ?? null;
+    });
+    // Dover draws its thank-you message in place of the form once the application is accepted.
+    document.querySelector("form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      state.submitted = true;
+      setTimeout(() => {
+        document.getElementById("application").innerHTML = "<h2>Thanks for applying!</h2>";
+      }, 200);
+    });
+  </script>
+</body>
+</html>

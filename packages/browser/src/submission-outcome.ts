@@ -1,0 +1,410 @@
+import type { BrowserField, FillDecision, PauseRecord, RecognizedForm } from "@internship-agent/domain";
+
+import { classifyFieldRole, isSensitiveRole } from "./ats/field-roles";
+import { SubmissionHeld } from "./challenge";
+import { stripRequiredMarker } from "./form-recognition";
+import type { BrowserPage } from "./handshake-executor";
+
+/**
+ * What a submit click led to when no confirmation was recognized. Read from
+ * the page deterministically; no model participates.
+ *
+ * - `field-errors`: the site marked fields invalid that were not invalid
+ *   before the click, and the submit control is still shown, so nothing was
+ *   sent. The run waits for the candidate with the approval withdrawn.
+ * - `refused`: the site showed an error banner instead of a confirmation.
+ * - `challenged`: a CAPTCHA the candidate would see appeared after the click.
+ * - `verification-code`: the site asked for a security code it emailed
+ *   (Greenhouse's step); the agent reads it from the candidate's mailbox,
+ *   else the run waits for the candidate.
+ * - `unknown`: nothing recognizable; the run fails closed.
+ *
+ * Two outcomes are Workday stops, not submit clicks:
+ * - `workday-account`: the Workday account step (sign-in or create account) held the host.
+ * - `workday-errors`: Workday would not save an application step and showed errors.
+ */
+export type PostSubmitOutcome = "field-errors" | "refused" | "challenged" | "verification-code" | "unknown" | "workday-account" | "workday-errors";
+
+/** A field the page marks invalid: the control's id (else name, else data-ia-control tag), its label, and the site's error text. */
+export type InvalidField = { ref: string | null; label: string; error: string };
+
+/**
+ * What the page showed after an unconfirmed submit click, kept in memory
+ * until the agent writes it to the run's local evidence folder. Never sent to
+ * Discord or a model.
+ */
+export type PostSubmitEvidence = {
+  outcome: PostSubmitOutcome;
+  /** The final URL with its query and fragment removed. */
+  url: string;
+  /** Raw visible text, capped at 20,000 characters; the writer redacts it. */
+  bodyText: string;
+  invalidFields: InvalidField[];
+  alertText: string;
+  /** The visible challenge's detail, when one appeared. */
+  challenge: string | null;
+  /** What the agent says happened (a fixed or agent-written phrase, such as a Workday hold reason). */
+  detail?: string | null;
+  /**
+   * True once an emailed security code was typed into the page: the evidence
+   * writer then takes no screenshot, and every text was scrubbed of the code.
+   */
+  securityCodeEntered?: boolean;
+};
+
+const MAX_BODY_TEXT = 20_000;
+
+/** The URL without its query and fragment; "" when it does not parse. */
+export function stripUrlQuery(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
+
+const GREENHOUSE_HOSTS = new Set(["job-boards.greenhouse.io", "job-boards.eu.greenhouse.io", "boards.greenhouse.io", "boards.eu.greenhouse.io"]);
+const LEVER_HOSTS = new Set(["jobs.lever.co", "jobs.eu.lever.co"]);
+
+/** A Greenhouse job-board page (new or classic board, US or EU). */
+export function isGreenhouseBoardUrl(url: string): boolean {
+  try {
+    return GREENHOUSE_HOSTS.has(new URL(url).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A site's own confirmation address: Greenhouse's `/confirmation` path or
+ * `?confirmation` parameter, Lever's `/thanks` path. Any other host is never
+ * a confirmation by URL.
+ */
+export function isConfirmationUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const host = parsed.hostname.toLowerCase();
+  const path = parsed.pathname.replace(/\/+$/, "").toLowerCase();
+  if (GREENHOUSE_HOSTS.has(host)) return path.endsWith("/confirmation") || parsed.searchParams.has("confirmation");
+  if (LEVER_HOSTS.has(host)) return path.endsWith("/thanks");
+  return false;
+}
+
+/** A confirmation URL reached because of the click (the page before it was not one), query stripped; null otherwise. */
+export function readNewConfirmationUrl(before: string, after: string): string | null {
+  return !isConfirmationUrl(before) && isConfirmationUrl(after) ? stripUrlQuery(after) : null;
+}
+
+export function invalidFieldKey(field: InvalidField): string {
+  return `${field.ref ?? ""}|${field.label}|${field.error}`;
+}
+
+/**
+ * The outcome of a click that showed no confirmation and no challenge by the
+ * deadline. Field errors need at least one invalid field that was not invalid
+ * before the click and a submit control still shown; otherwise an alert means
+ * refused, and nothing means unknown.
+ */
+export function classifyUnconfirmed(input: {
+  invalidBefore: InvalidField[];
+  invalidAfter: InvalidField[];
+  submitShown: boolean;
+  alertText: string;
+}): "field-errors" | "refused" | "unknown" {
+  const before = new Set(input.invalidBefore.map(invalidFieldKey));
+  const fresh = input.invalidAfter.some((field) => !before.has(invalidFieldKey(field)));
+  if (fresh && input.submitShown) return "field-errors";
+  if (input.alertText.trim()) return "refused";
+  return "unknown";
+}
+
+/** The site marked fields invalid after the click, so nothing was sent: the run waits for the candidate. */
+export class SubmissionNeedsInput extends SubmissionHeld {
+  constructor(message: string, evidence: PostSubmitEvidence, readonly invalidFields: InvalidField[]) {
+    super(message, evidence);
+  }
+}
+
+/** The click showed nothing recognizable. Not a hold: the pipeline lists it under errors, and it is never retried. */
+export class SubmissionUnconfirmed extends Error {
+  constructor(message: string, readonly evidence: PostSubmitEvidence) {
+    super(message);
+  }
+}
+
+export type SecurityCodeLookupResult =
+  | { kind: "found"; code: string }
+  /** No matching code in time. */
+  | { kind: "none" }
+  /** More than one distinct code. */
+  | { kind: "ambiguous" }
+  /** No mailbox is set up. */
+  | { kind: "no-mailbox" }
+  /** The mailbox could not be opened or read. */
+  | { kind: "unavailable" }
+  /** Not a Greenhouse page. */
+  | { kind: "unsupported" };
+
+/**
+ * Finds the code a site emailed after the submit click; never throws for a
+ * missing code. Implemented in packages/agent: the browser package never
+ * reads mail.
+ */
+export type SecurityCodeLookup = (request: { url: string; clickedAt: Date }) => Promise<SecurityCodeLookupResult>;
+
+/**
+ * The site asked for a security code it emailed and the agent could not
+ * enter one, so nothing was sent: the run waits for the candidate with the
+ * approval withdrawn.
+ */
+export class SubmissionCodeNotFound extends SubmissionHeld {}
+
+/**
+ * Thrown by the page adapter before any click when the code field would not
+ * take the code; its messages are fixed phrases and never contain the code.
+ */
+export class SecurityCodeNotEntered extends Error {}
+
+const CODE_HOLD_TAIL = " The run waits for you with the approval withdrawn; it is not marked submitted.";
+
+export type SecurityCodeHoldKind = "none" | "ambiguous" | "no-mailbox" | "unavailable" | "unsupported" | "not-entered";
+
+const CODE_HOLD_TEXT: Record<SecurityCodeHoldKind, string> = {
+  none: "Greenhouse emailed a security code; it was not found in your mailbox in time, so nothing was sent.",
+  ambiguous: "Greenhouse emailed a security code; it was not found unambiguously (more than one code arrived), so nothing was sent.",
+  "no-mailbox": "Greenhouse emailed a security code; it was not found because no mailbox is set up (INTERNSHIP_AGENT_GMAIL_ADDRESS and _APP_PASSWORD), so nothing was sent.",
+  unavailable: "Greenhouse emailed a security code; it was not found because the mailbox could not be read, so nothing was sent.",
+  "not-entered": "Greenhouse emailed a security code; it was found but the code field did not take it, so nothing was sent.",
+  unsupported: "The site asked for a security code it emailed; the agent reads only Greenhouse's security-code emails, so nothing was sent."
+};
+
+/** The fixed hold message for a security code the agent could not enter; it never contains the code. */
+export function securityCodeHoldMessage(kind: SecurityCodeHoldKind): string {
+  return CODE_HOLD_TEXT[kind] + CODE_HOLD_TAIL;
+}
+
+export const SECURITY_CODE_STILL_ASKED = "The agent entered the security code Greenhouse emailed, but the site still asks for it. Check the application on the site before retrying; the run is not marked submitted.";
+
+const CODE_SENT = /\bcode\b[\s\S]{0,120}\b(?:sent|emailed|e-mailed|email|inbox)\b|\b(?:sent|emailed|e-mailed|email|inbox)\b[\s\S]{0,120}\bcode\b/i;
+
+/**
+ * The emailed security-code step: code inputs that were not there before the
+ * click appeared after it, and the page says a code was sent by email. The
+ * inputs are the strict signal; the text is a deliberately broad guard (the
+ * real page's wording is not captured).
+ */
+export function isSecurityCodeStep(input: { codeInputsBefore: number; codeInputsAfter: number; bodyText: string }): boolean {
+  if (input.codeInputsBefore !== 0 || input.codeInputsAfter <= 0) return false;
+  return CODE_SENT.test(input.bodyText.replace(/\s+/g, " "));
+}
+
+/** The text with every case-insensitive occurrence of the secret replaced by "[code]"; unchanged when there is no secret. */
+export function scrubSecret(text: string, secret: string | null): string {
+  if (!secret) return text;
+  return text.replace(new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "[code]");
+}
+
+/** A copy of the evidence with every text scrubbed of the secret, marked as taken after the code was typed. */
+export function withoutSecret(evidence: PostSubmitEvidence, secret: string): PostSubmitEvidence {
+  return {
+    ...evidence,
+    url: scrubSecret(evidence.url, secret),
+    bodyText: scrubSecret(evidence.bodyText, secret),
+    alertText: scrubSecret(evidence.alertText, secret),
+    challenge: evidence.challenge === null ? null : scrubSecret(evidence.challenge, secret),
+    ...(typeof evidence.detail === "string" ? { detail: scrubSecret(evidence.detail, secret) } : {}),
+    invalidFields: evidence.invalidFields.map((field) => ({
+      ref: field.ref === null ? null : scrubSecret(field.ref, secret),
+      label: scrubSecret(field.label, secret),
+      error: scrubSecret(field.error, secret)
+    })),
+    securityCodeEntered: true
+  };
+}
+
+export const SECURITY_CODE_FIELD_ID = "site-security-code";
+
+/**
+ * The safeguard pause for a security code the agent could not enter. The
+ * candidate never answers it (an answer would store the code) and the run is
+ * never re-approved: it is retried or finished on the site by hand.
+ */
+export function securityCodePause(message: string, runRef: string): { decision: FillDecision; pause: PauseRecord } {
+  const question = clip(`${message} Retry it with pnpm pipeline:retry --run ${runRef}, or finish the application on the site yourself.`, 500);
+  return {
+    decision: {
+      fieldId: SECURITY_CODE_FIELD_ID,
+      action: "pause",
+      value: null,
+      basis: null,
+      reason: question,
+      pause: { question, key: null, scope: null, safeguard: true }
+    },
+    pause: {
+      fieldId: SECURITY_CODE_FIELD_ID,
+      label: "Emailed security code",
+      question,
+      suggestedKey: null,
+      suggestedScope: null,
+      safeguard: true,
+      sensitive: false,
+      upload: false,
+      status: "open",
+      answer: null,
+      draft: null
+    }
+  };
+}
+
+/** The post-submit evidence a submit error carries, if any. */
+export function postSubmitEvidenceOf(error: unknown): PostSubmitEvidence | null {
+  if (error instanceof SubmissionHeld || error instanceof SubmissionUnconfirmed) return error.evidence ?? null;
+  return null;
+}
+
+/**
+ * Reads what the page shows after the click. Never throws: a piece the page
+ * cannot give is left empty. Values the caller already read are reused.
+ */
+export async function capturePostSubmitEvidence(
+  page: BrowserPage,
+  outcome: PostSubmitOutcome,
+  known: { bodyText?: string; invalidFields?: InvalidField[]; alertText?: string; challenge?: string | null; detail?: string | null } = {}
+): Promise<PostSubmitEvidence> {
+  let url = "";
+  try {
+    url = stripUrlQuery(page.url());
+  } catch {
+    url = "";
+  }
+  let bodyText = known.bodyText;
+  if (bodyText === undefined) {
+    try {
+      bodyText = await page.bodyText();
+    } catch {
+      bodyText = "";
+    }
+  }
+  let invalidFields = known.invalidFields;
+  if (invalidFields === undefined) {
+    try {
+      invalidFields = page.invalidFields ? await page.invalidFields() : [];
+    } catch {
+      invalidFields = [];
+    }
+  }
+  let alertText = known.alertText;
+  if (alertText === undefined) {
+    try {
+      alertText = page.alertText ? (await page.alertText()).trim() : "";
+    } catch {
+      alertText = "";
+    }
+  }
+  return {
+    outcome,
+    url,
+    bodyText: bodyText.slice(0, MAX_BODY_TEXT),
+    invalidFields,
+    alertText,
+    challenge: known.challenge ?? null,
+    detail: known.detail ?? null
+  };
+}
+
+function clip(value: string, max: number): string {
+  return value.length <= max ? value : value.slice(0, max - 1).trimEnd() + "…";
+}
+
+function normalizedLabel(label: string): string {
+  return stripRequiredMarker(label.toLocaleLowerCase("en-US").replace(/\s+/g, " ").trim()).label;
+}
+
+function fieldFor(form: RecognizedForm, invalid: InvalidField): BrowserField | null {
+  if (invalid.ref) {
+    const byId = form.fields.find((field) => field.id === invalid.ref);
+    if (byId) return byId;
+  }
+  const wanted = normalizedLabel(invalid.label);
+  if (!wanted) return null;
+  const byLabel = form.fields.filter((field) => normalizedLabel(field.label) === wanted);
+  return byLabel.length === 1 ? byLabel[0]! : null;
+}
+
+/**
+ * A pause per field the site marked invalid after the click, carrying the
+ * site's error text ("School: This field is required."). A field found on the
+ * form (by id, else by a unique label) pauses on its own id; one the agent
+ * cannot find becomes a `site-error-<n>` safeguard the candidate fixes in the
+ * browser. Existing pauses for the same field are replaced.
+ */
+export function invalidFieldPauses(
+  form: RecognizedForm,
+  decisions: FillDecision[],
+  pauses: PauseRecord[],
+  invalid: InvalidField[]
+): { decisions: FillDecision[]; pauses: PauseRecord[] } {
+  let nextDecisions = decisions;
+  let nextPauses = pauses;
+  let unmatched = 0;
+  for (const entry of invalid) {
+    const error = entry.error.trim() || "The site marked this field invalid.";
+    const field = fieldFor(form, entry);
+    let pause: PauseRecord;
+    if (field) {
+      const question = clip(`${field.label}: ${error}`, 500);
+      pause = {
+        fieldId: field.id,
+        label: field.label,
+        question,
+        suggestedKey: null,
+        suggestedScope: null,
+        safeguard: false,
+        sensitive: isSensitiveRole(classifyFieldRole(field)),
+        upload: field.kind === "file",
+        status: "open",
+        answer: null,
+        draft: null,
+        fieldKind: field.kind,
+        ...(field.options?.length ? { options: field.options } : {})
+      };
+    } else {
+      unmatched += 1;
+      const label = clip(entry.label.trim() || "Unnamed field", 300);
+      const question = clip(`${label}: ${error}. The agent could not find this field on the form; fix it in your browser.`, 500);
+      pause = {
+        fieldId: `site-error-${unmatched}`,
+        label,
+        question,
+        suggestedKey: null,
+        suggestedScope: null,
+        safeguard: true,
+        sensitive: false,
+        upload: false,
+        status: "open",
+        answer: null,
+        draft: null
+      };
+    }
+    const decision: FillDecision = {
+      fieldId: pause.fieldId,
+      action: "pause",
+      value: null,
+      basis: null,
+      reason: pause.question,
+      pause: { question: pause.question, key: null, scope: null, safeguard: pause.safeguard }
+    };
+    nextDecisions = nextDecisions.some((existing) => existing.fieldId === decision.fieldId)
+      ? nextDecisions.map((existing) => (existing.fieldId === decision.fieldId ? decision : existing))
+      : [...nextDecisions, decision];
+    nextPauses = [...nextPauses.filter((existing) => existing.fieldId !== pause.fieldId), pause];
+  }
+  return { decisions: nextDecisions, pauses: nextPauses };
+}

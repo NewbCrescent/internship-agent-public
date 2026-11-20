@@ -1,0 +1,22 @@
+{
+  "name": "@internship-agent/verifier",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest --root ../.. run testing-harness/verifier",
+    "test:local": "vitest --root ../.. run testing-harness/verifier/verification.test.ts"
+  },
+  "dependencies": {
+    "@internship-agent/db": "workspace:*",
+    "@internship-agent/domain": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.11"
+  }
+}
