@@ -1,4 +1,4 @@
-import type { Locator, Page } from "playwright-core";
+import type { Frame, Locator, Page } from "playwright-core";
 
 import { findVisibleChallengeIn } from "../challenge";
 import { ensureNameShim } from "../handshake-executor";
@@ -9,8 +9,10 @@ import { classifyWorkdayAccountMessage, WORKDAY_ACCOUNT_PATTERNS, type WorkdayAc
  * email-first step, the create-profile form, the password screen of an
  * existing account, an email-verification notice or code, a CAPTCHA, and the
  * application behind them. Only visible controls are touched, and nothing is
- * typed until the whole screen is understood. This module stores nothing and
- * logs nothing; credentials pass through only.
+ * typed until the whole screen is understood. The screens are read and
+ * driven in iCIMS's same-host content frame when the page draws one (career-site
+ * wrappers), else in the page; a frame on another host is never driven. This
+ * module stores nothing and logs nothing; credentials pass through only.
  */
 export type IcimsAccountScreen = "email" | "sign-in" | "create" | "verify-email" | "code" | "captcha" | "application" | "other";
 
@@ -151,26 +153,69 @@ function inspectIcimsIn(mark: string): Inspection {
   return inspection;
 }
 
-const visible = (page: Page, selector: string): Locator => page.locator(selector).filter({ visible: true });
+const visible = (scope: Page | Frame, selector: string): Locator => scope.locator(selector).filter({ visible: true });
 const collapse = (text: string) => text.replace(/\s+/g, " ").trim();
+const NAME_SHIM = "globalThis.__name = globalThis.__name || ((target) => target);";
 
-async function inspect(page: Page): Promise<Inspection> {
-  await ensureNameShim(page);
-  return page.evaluate(inspectIcimsIn, MARK);
+const hostOf = (page: Page) => {
+  try { return new URL(page.url()).hostname; } catch { return ""; }
+};
+
+const CONTENT_FRAME = "icims_content_iframe";
+
+/** iCIMS's content frame: a direct, same-host child of the top document named icims_content_iframe or loaded with in_iframe=1. */
+function contentFrameState(frame: Frame, main: Frame, pageHost: string): "yes" | "no" | "loading" {
+  if (frame === main || frame.parentFrame() !== main || frame.isDetached()) return "no";
+  const named = frame.name() === CONTENT_FRAME;
+  let url: URL;
+  try { url = new URL(frame.url()); } catch { return named ? "loading" : "no"; }
+  if (url.protocol === "about:") return named ? "loading" : "no";
+  if (url.hostname.toLowerCase() !== pageHost) return "no";
+  return named || url.searchParams.get("in_iframe") === "1" ? "yes" : "no";
 }
 
-const byRef = (page: Page, ref: string) => page.locator(`[${MARK}="${ref}"]`).first();
+/**
+ * The frame holding iCIMS's account screens. iCIMS career sites draw the
+ * email step, sign-in, and create-profile forms inside a same-host content
+ * frame (`icims_content_iframe`, `?in_iframe=1`); a page without one is read
+ * itself. A frame on another host is never chosen.
+ */
+export async function icimsAccountFrame(page: Page): Promise<Frame> {
+  const main = page.mainFrame();
+  const pageHost = hostOf(page).toLowerCase();
+  if (!pageHost) return main;
+  const content = page.frames().find((frame) => contentFrameState(frame, main, pageHost) !== "no");
+  if (!content) return main;
+  await content.waitForLoadState("domcontentloaded", { timeout: 10_000 }).catch(() => undefined);
+  return contentFrameState(content, main, pageHost) === "yes" ? content : main;
+}
 
-async function visibleChallenge(page: Page): Promise<boolean> {
+async function inspect(page: Page, frame: Frame): Promise<Inspection> {
+  await ensureNameShim(page);
+  if (frame !== page.mainFrame()) await frame.evaluate(NAME_SHIM);
+  return frame.evaluate(inspectIcimsIn, MARK);
+}
+
+const byRef = (frame: Frame, ref: string) => frame.locator(`[${MARK}="${ref}"]`).first();
+
+async function visibleChallenge(page: Page, frame: Frame): Promise<boolean> {
+  let found = false;
   try {
     await ensureNameShim(page);
-    return (await page.evaluate(findVisibleChallengeIn)) !== null;
+    found = (await page.evaluate(findVisibleChallengeIn)) !== null;
+  } catch {
+    found = false;
+  }
+  if (found || frame === page.mainFrame()) return found;
+  try {
+    await frame.evaluate(NAME_SHIM);
+    return (await frame.evaluate(findVisibleChallengeIn)) !== null;
   } catch {
     return false;
   }
 }
 
-function screenOf(page: Page, inspection: Inspection, captcha: boolean): IcimsAccountScreen {
+function screenOf(url: string, inspection: Inspection, captcha: boolean): IcimsAccountScreen {
   if (captcha || WORKDAY_ACCOUNT_PATTERNS.ROBOT.test(inspection.text)) return "captcha";
   if (inspection.passwords.length >= 2) return "create";
   if (inspection.passwords.length === 1) return "sign-in";
@@ -178,15 +223,18 @@ function screenOf(page: Page, inspection: Inspection, captcha: boolean): IcimsAc
   if (WORKDAY_ACCOUNT_PATTERNS.VERIFY.test(inspection.text) || CHECK_EMAIL.test(inspection.text)) return "verify-email";
   if (inspection.email && inspection.submits.length > 0) return "email";
   let path = "";
-  try { path = new URL(page.url()).pathname; } catch { /* unreadable */ }
+  try { path = new URL(url).pathname; } catch { /* unreadable */ }
   if (!/\/login\/?$/.test(path) && inspection.controls > 0) return "application";
   return "other";
 }
 
 /** Which iCIMS account screen (or the application behind it) the page shows. */
 export async function readIcimsAccountScreen(page: Page): Promise<IcimsAccountScreen> {
-  const captcha = await visibleChallenge(page) || (await visible(page, OTHER_CAPTCHA).count().catch(() => 0)) > 0;
-  return screenOf(page, await inspect(page), captcha);
+  const frame = await icimsAccountFrame(page);
+  const captcha = await visibleChallenge(page, frame)
+    || (await visible(page, OTHER_CAPTCHA).count().catch(() => 0)) > 0
+    || (frame !== page.mainFrame() && (await visible(frame, OTHER_CAPTCHA).count().catch(() => 0)) > 0);
+  return screenOf(frame.url(), await inspect(page, frame), captcha);
 }
 
 function onHost(page: Page, host: string): boolean {
@@ -203,8 +251,8 @@ async function typeInto(field: Locator, value: string, failure: string): Promise
   }
 }
 
-async function check(page: Page, ref: string): Promise<void> {
-  const box = byRef(page, ref);
+async function check(frame: Frame, ref: string): Promise<void> {
+  const box = byRef(frame, ref);
   try {
     await box.check({ timeout: 10_000 });
   } catch {
@@ -216,16 +264,16 @@ async function check(page: Page, ref: string): Promise<void> {
   }
 }
 
-async function click(page: Page, ref: string, failure: string): Promise<void> {
+async function click(frame: Frame, ref: string, failure: string): Promise<void> {
   try {
-    await byRef(page, ref).click({ timeout: 10_000 });
+    await byRef(frame, ref).click({ timeout: 10_000 });
   } catch {
     throw new IcimsAccountStepError(failure);
   }
 }
 
-async function errorText(page: Page): Promise<string> {
-  const texts = await visible(page, ERRORS).allInnerTexts().catch(() => [] as string[]);
+async function errorText(scope: Frame): Promise<string> {
+  const texts = await visible(scope, ERRORS).allInnerTexts().catch(() => [] as string[]);
   return [...new Set(texts.map(collapse).filter(Boolean))].join(" ");
 }
 
@@ -252,13 +300,14 @@ async function settle(page: Page, after: "sign-in" | "create", from: IcimsAccoun
     await page.waitForTimeout(pollMs);
     if (!onHost(page, host)) return { accepted, result: "other", detail: "the page left the iCIMS site" };
     let screen: IcimsAccountScreen;
+    let errors: string;
     try {
       screen = await readIcimsAccountScreen(page);
+      if (screen === "captcha") return { accepted, result: "next", screen };
+      errors = await errorText(await icimsAccountFrame(page));
     } catch {
       continue; // A navigation is under way.
     }
-    if (screen === "captcha") return { accepted, result: "next", screen };
-    const errors = await errorText(page);
     if (errors) return { accepted, result: "error", kind: classifyWorkdayAccountMessage(after, errors), message: errors.slice(0, 300) };
     if (screen !== from) return { accepted, result: "next", screen };
   }
@@ -274,18 +323,19 @@ const PHONE_LABEL = /^(?:phone|mobile|cell)(?: phone)?(?: number)?$/i;
 /** Enters the email on the email-first step, ticks the boxes `accept` allows, and submits it. */
 export async function submitIcimsEmail(page: Page, email: string, accept: (statement: string) => boolean, host: string, wait?: IcimsWaitOptions): Promise<IcimsStepResult> {
   if (!onHost(page, host)) return { accepted: [], result: "other", detail: "the page is not on the iCIMS site" };
-  const inspection = await inspect(page);
+  const frame = await icimsAccountFrame(page);
+  const inspection = await inspect(page, frame);
   if (!inspection.email) return { accepted: [], result: "other", detail: "the email step has no email field" };
   if (inspection.submits.length !== 1) return { accepted: [], result: "other", detail: "no single submit control" };
   const { tick, refused } = boxPlan(inspection.boxes, accept);
   if (refused) return { accepted: [], result: "consent-needed", statement: refused.statement };
-  await typeInto(byRef(page, inspection.email), email, "the email field could not be filled");
+  await typeInto(byRef(frame, inspection.email), email, "the email field could not be filled");
   const accepted: string[] = [];
   for (const box of tick) {
-    await check(page, box.ref);
+    await check(frame, box.ref);
     accepted.push(box.statement);
   }
-  await click(page, inspection.submits[0]!, "the email step's submit control could not be clicked");
+  await click(frame, inspection.submits[0]!, "the email step's submit control could not be clicked");
   return settle(page, "sign-in", "email", host, accepted, wait);
 }
 
@@ -304,7 +354,8 @@ export async function createIcimsProfile(
   wait?: IcimsWaitOptions
 ): Promise<IcimsStepResult> {
   if (!onHost(page, host)) return { accepted: [], result: "other", detail: "the page is not on the iCIMS site" };
-  const inspection = await inspect(page);
+  const frame = await icimsAccountFrame(page);
+  const inspection = await inspect(page, frame);
   if (inspection.passwords.length !== 2) return { accepted: [], result: "other", detail: "the create-profile form has unexpected password fields" };
   if (inspection.submits.length !== 1) return { accepted: [], result: "other", detail: "no single submit control" };
   const typed: Array<{ ref: string; value: string; failure: string }> = [];
@@ -325,29 +376,30 @@ export async function createIcimsProfile(
   }
   const { tick, refused } = boxPlan(inspection.boxes, accept);
   if (refused) return { accepted: [], result: "consent-needed", statement: refused.statement };
-  for (const entry of typed) await typeInto(byRef(page, entry.ref), entry.value, entry.failure);
-  await typeInto(byRef(page, inspection.passwords[0]!), input.password, "the password field could not be filled");
-  await typeInto(byRef(page, inspection.passwords[1]!), input.password, "the confirm-password field could not be filled");
+  for (const entry of typed) await typeInto(byRef(frame, entry.ref), entry.value, entry.failure);
+  await typeInto(byRef(frame, inspection.passwords[0]!), input.password, "the password field could not be filled");
+  await typeInto(byRef(frame, inspection.passwords[1]!), input.password, "the confirm-password field could not be filled");
   const accepted: string[] = [];
   for (const box of tick) {
-    await check(page, box.ref);
+    await check(frame, box.ref);
     accepted.push(box.statement);
   }
   beforeSubmit();
-  await click(page, inspection.submits[0]!, "the create-profile submit control could not be clicked");
+  await click(frame, inspection.submits[0]!, "the create-profile submit control could not be clicked");
   return settle(page, "create", "create", host, accepted, wait);
 }
 
 /** Signs in with the saved password on the password screen of an existing account. */
 export async function signInToIcims(page: Page, input: { email: string; password: string }, host: string, wait?: IcimsWaitOptions): Promise<IcimsStepResult> {
   if (!onHost(page, host)) return { accepted: [], result: "other", detail: "the page is not on the iCIMS site" };
-  const inspection = await inspect(page);
+  const frame = await icimsAccountFrame(page);
+  const inspection = await inspect(page, frame);
   if (inspection.passwords.length !== 1) return { accepted: [], result: "other", detail: "the sign-in form has unexpected fields" };
   if (inspection.submits.length !== 1) return { accepted: [], result: "other", detail: "no single submit control" };
   const login = inspection.fields.find((field) => field.ref === inspection.email) ?? inspection.fields.find((field) => LOGIN_LABEL.test(field.label));
-  if (login && !login.value.trim()) await typeInto(byRef(page, login.ref), input.email, "the email field could not be filled");
-  await typeInto(byRef(page, inspection.passwords[0]!), input.password, "the password field could not be filled");
-  await click(page, inspection.submits[0]!, "the sign-in submit control could not be clicked");
+  if (login && !login.value.trim()) await typeInto(byRef(frame, login.ref), input.email, "the email field could not be filled");
+  await typeInto(byRef(frame, inspection.passwords[0]!), input.password, "the password field could not be filled");
+  await click(frame, inspection.submits[0]!, "the sign-in submit control could not be clicked");
   return settle(page, "sign-in", "sign-in", host, [], wait);
 }
 
@@ -359,10 +411,6 @@ export type IcimsAccountSteps = {
   /** Opens a link (an emailed verification link) in a new tab of the same browser context, then closes it. */
   openInNewTab(url: string): Promise<void>;
   goto(url: string): Promise<void>;
-};
-
-const hostOf = (page: Page) => {
-  try { return new URL(page.url()).hostname; } catch { return ""; }
 };
 
 /** iCIMS's account steps on a Playwright page; the host is read from the page when each step runs. */

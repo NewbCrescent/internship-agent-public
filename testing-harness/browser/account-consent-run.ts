@@ -1,7 +1,7 @@
 /**
  * iCIMS accounts, Jobvite's Data Consent step, and standing attestations in
  * real Chromium against routed fictional pages (testing-harness/browser/
- * fixtures: icims-account.html, jobvite-posting.html, jobvite-consent-policy
+ * fixtures: icims-account.html, icims-account-frame.html, jobvite-posting.html, jobvite-consent-policy
  * .html, jobvite-application.html, attestation-application.html). Every host
  * resolves to nothing (`--host-resolver-rules=MAP * ~NOTFOUND`), every
  * document is served by `context.route`, and every other request is aborted,
@@ -14,7 +14,9 @@
  * password, a CAPTCHA, the consent setting off, and a refused saved password
  * hold before anything is typed (and a refused password is never typed
  * again); a verification link from a fake mailbox is opened before signing
- * in. Jobvite's residence follows the profile country and Accept is clicked,
+ * in; the same flow when iCIMS draws its account screens inside the career
+ * site's same-host content frame (created, signed in again, and a CAPTCHA
+ * inside the frame held before anything is typed). Jobvite's residence follows the profile country and Accept is clicked,
  * with no click when no option matches. An attestation form is signed and
  * dated under the settings, and nothing is checked without them. The password
  * never reaches database rows, console output, or caught errors.
@@ -79,6 +81,7 @@ async function main(): Promise<void> {
 
     const fixture = (name: string) => readFileSync(join(process.cwd(), "testing-harness/browser/fixtures", name), "utf8");
     const icimsFlow = fixture("icims-account.html");
+    const icimsWrapper = fixture("icims-account-frame.html");
     const documents: Record<string, string> = {
       "jobs.jobvite.com/fixturerobotics/job/oFixture2": fixture("jobvite-posting.html").replaceAll("oFixture1", "oFixture2"),
       "jobs.jobvite.com/fixturerobotics/job/oFixture2/apply": fixture("jobvite-consent-policy.html"),
@@ -92,7 +95,8 @@ async function main(): Promise<void> {
       try { url = new URL(request.url()); } catch { /* not a URL */ }
       if (url && request.resourceType() === "document") {
         if (/^careers-fixture\d*\.icims\.com$/.test(url.hostname)) {
-          await route.fulfill({ status: 200, contentType: "text/html", body: icimsFlow });
+          const wrapper = url.searchParams.get("in_iframe") !== "1" && /\/login\/?$/.test(url.pathname);
+          await route.fulfill({ status: 200, contentType: "text/html", body: wrapper ? icimsWrapper : icimsFlow });
           return;
         }
         const body = documents[`${url.hostname}${url.pathname.replace(/\/$/, "")}`];
@@ -119,16 +123,24 @@ async function main(): Promise<void> {
     const events = () => (database.prepare("SELECT detail FROM application_events WHERE job_id = ?").all(jobId) as Array<{ detail: string | null }>).map((row) => row.detail ?? "");
     const fixtureState = (tab: Page) => tab.evaluate(() => JSON.parse(localStorage.getItem("fixture-icims-state") || "{}") as FixtureIcims);
     const loginUrl = (host: string, mode: string) => `https://${host}/jobs/9001/intern/login?in_iframe=1&fixture=${mode}`;
+    const framedLoginUrl = (host: string, mode: string) => `https://${host}/jobs/9001/intern/login?fixture=${mode}`;
     const inputValue = (tab: Page, selector: string) => tab.evaluate((query) => (document.querySelector(query) as HTMLInputElement | null)?.value ?? null, selector);
+    const contentFrame = (tab: Page) => tab.frame({ name: "icims_content_iframe" });
+    const frameInputValue = async (tab: Page, selector: string) => {
+      const frame = contentFrame(tab);
+      if (!frame) return null;
+      return frame.evaluate((query) => (document.querySelector(query) as HTMLInputElement | null)?.value ?? null, selector);
+    };
 
-    async function icims(name: string, host: string, mode: string, acceptDataConsent = true): Promise<{ tab: Page; result: string | null; error: Error | null }> {
+    async function icims(name: string, host: string, mode: string, acceptDataConsent = true, framed = false): Promise<{ tab: Page; result: string | null; error: Error | null }> {
       scenarios += 1;
       const tab = await context.newPage();
-      await tab.goto(loginUrl(host, mode));
+      const applicationUrl = framed ? framedLoginUrl(host, mode) : loginUrl(host, mode);
+      await tab.goto(applicationUrl);
       const page = createApplicationPage(tab);
       try {
         const result = await ensureIcimsAccount(page, {
-          database, jobId, applicationUrl: loginUrl(host, mode), company: COMPANY, candidate: CANDIDATE, runtime, acceptDataConsent
+          database, jobId, applicationUrl, company: COMPANY, candidate: CANDIDATE, runtime, acceptDataConsent
         });
         return { tab, result, error: null };
       } catch (error) {
@@ -220,6 +232,36 @@ async function main(): Promise<void> {
     check((await fixtureState(wrongAgain.tab)).signIns === 1, "wrong-password again: the refused password was typed again");
     check((await inputValue(wrongAgain.tab, "#email")) === "", "wrong-password again: the email was typed again");
     await wrongAgain.tab.close();
+
+    // iCIMS's account screens inside the career site's same-host content frame: created, consent logged, legal name typed.
+    const framedHost = "careers-fixture7.icims.com";
+    const framed = await icims("framed new", framedHost, "new", true, true);
+    check(framed.result === "created", `framed new: expected "created", got ${framed.result ?? framed.error?.message}`);
+    check(savedBeforeSubmit.get(framedHost) === true, "framed new: the password was not saved (pending) before the create submit");
+    const framedEntry = getIcimsAccount(file, framedHost);
+    check(framedEntry?.account === "created" && framedEntry.hold === null, `framed new: entry is ${framedEntry?.account} / ${framedEntry?.hold?.kind}`);
+    const framedState = await fixtureState(framed.tab);
+    check(framedState.gdprChecked && !framedState.alertsChecked, `framed new: gdpr ${framedState.gdprChecked}, alerts ${framedState.alertsChecked}`);
+    check(framedState.typedFirst === "Jordan" && framedState.typedLast === "Rivera", "framed new: the legal name was not typed");
+    check(/\/login\?/.test(framed.tab.url()), `framed new: the top page left the wrapper (${framed.tab.url()})`);
+    check(/\/candidate\?/.test(contentFrame(framed.tab)?.url() ?? ""), `framed new: the content frame is not on the application (${contentFrame(framed.tab)?.url()})`);
+    check(events().some((detail) => detail.startsWith("Accepted data consent: 'I consent to Fixture Robotics collecting") && detail.endsWith(`(iCIMS email step at ${framedHost})`)), "framed new: no data-consent event");
+    await framed.tab.close();
+
+    // The framed host again: signed in with the saved password, nothing created.
+    const framedAgain = await icims("framed again", framedHost, "new", true, true);
+    check(framedAgain.result === "signed-in", `framed again: expected "signed-in", got ${framedAgain.result ?? framedAgain.error?.message}`);
+    const framedAgainState = await fixtureState(framedAgain.tab);
+    check(framedAgainState.creates === 1 && framedAgainState.signIns === 1, `framed again: ${framedAgainState.creates} creates, ${framedAgainState.signIns} sign-ins`);
+    await framedAgain.tab.close();
+
+    // hCaptcha inside the content frame: held before anything is typed.
+    const framedCaptchaHost = "careers-fixture8.icims.com";
+    const framedCaptcha = await icims("framed captcha", framedCaptchaHost, "captcha", true, true);
+    heldWith("framed captcha", framedCaptcha, "the agent never solves CAPTCHAs");
+    check(getIcimsAccount(file, framedCaptchaHost)?.hold?.kind === "captcha", "framed captcha: the hold is not captcha");
+    check((await frameInputValue(framedCaptcha.tab, "#email")) === "", "framed captcha: the email was typed");
+    await framedCaptcha.tab.close();
 
     // Jobvite: the posting's Apply, then the residence from the profile country and Accept.
     scenarios += 1;
