@@ -3,12 +3,14 @@ import type { DatabaseSync } from "node:sqlite";
 
 import {
   closeProfileDatabase,
+  getCandidate,
   getCurrentFact,
   getCurrentFacts,
   getProfileDatabase,
   LOCAL_CANDIDATE_ID,
   revokeCandidateFact,
   saveCandidateFact,
+  setCandidatePreferredName,
   supersedeCandidateFact
 } from "@internship-agent/db";
 import {
@@ -18,14 +20,19 @@ import {
   factDefinitions,
   factScopeSchema,
   formatFactValue,
+  isStandardAnswerKey,
   scopeKey,
+  standardAnswersFileSchema,
   workspaceProfileSchema,
   type CandidateFactKey,
   type CandidateFactValue,
   type FactScope,
+  type StandardAnswersFile,
   type WorkspaceProfile
 } from "@internship-agent/domain";
 import { z } from "zod";
+
+import { formerEmployerNamed, standardAnswerFactFile } from "./standard-answers";
 
 /**
  * `pnpm profile:facts`: writes the candidate's explicitly given answers as
@@ -33,16 +40,27 @@ import { z } from "zod";
  * before anything is written; protected answers (voluntary
  * self-identification) are never printed, not even in errors — they show as
  * "set".
+ *
+ * It also accepts the standard legal and background answers file
+ * (standardAnswersFileSchema, packages/domain standard-answers.ts): an object
+ * of the candidate's answers by key, such as
+ * { "us_citizen": <true | false>, "non_solicitation": { "answer": <true | false>, "ends": "<YYYY-MM-DD>", ... }, "preferred_first_name": "<name>", ... }.
+ * Each answer is saved as its catalog fact (the 50-mile answer scoped to
+ * San Francisco only), the preferred first name goes to the profile, and
+ * every saved value prints only as "set". Unknown keys fail, naming the key.
  */
+// Built at resolve time from other saved answers; never written by a fact file.
+const NOT_STORED = [COURSEWORK_FACT_KEY, "us_person", "us_citizen_or_national", "us_citizen_or_permanent_resident", "salary_expectation"] as const;
+
 export const factFileSchema = z.object({
   facts: z.array(z.object({
-    key: candidateFactKeySchema.exclude([COURSEWORK_FACT_KEY]),
+    key: candidateFactKeySchema.exclude(NOT_STORED),
     scope: factScopeSchema.default({ kind: "global" }),
     value: z.union([z.boolean(), z.string()]),
     note: z.string().trim().min(1).max(500).optional()
   }).strict()).max(100).default([]),
   revoke: z.array(z.object({
-    key: candidateFactKeySchema.exclude([COURSEWORK_FACT_KEY]),
+    key: candidateFactKeySchema.exclude(NOT_STORED),
     scope: factScopeSchema.default({ kind: "global" })
   }).strict()).max(100).default([])
 }).strict();
@@ -59,7 +77,7 @@ export type ProfileFactsDeps = {
 const USAGE = "Usage: pnpm profile:facts --profile real|demo [--set-file <facts.json>] [--dry-run]";
 
 function shown(key: CandidateFactKey, value: CandidateFactValue): string {
-  return factDefinitions[key].sensitivity === "protected" ? "set" : formatFactValue(value);
+  return factDefinitions[key].sensitivity === "protected" || isStandardAnswerKey(key) ? "set" : formatFactValue(value);
 }
 
 function scopeLabel(scope: FactScope): string {
@@ -197,6 +215,7 @@ export async function runProfileFacts(argv: string[], deps: Partial<ProfileFacts
   }
 
   let file: FactFile | null = null;
+  let standard: StandardAnswersFile | null = null;
   if (args.setFile) {
     let text: string;
     try {
@@ -212,16 +231,33 @@ export async function runProfileFacts(argv: string[], deps: Partial<ProfileFacts
       io.log("The fact file is not valid JSON.");
       return 1;
     }
-    const parsed = factFileSchema.safeParse(raw);
-    if (!parsed.success) {
-      for (const issue of parsed.error.issues) io.log(`Invalid fact file at ${issue.path.join(".") || "(root)"}.`);
-      return 1;
+    const factShape = typeof raw === "object" && raw !== null && !Array.isArray(raw) && ("facts" in raw || "revoke" in raw);
+    if (factShape) {
+      const parsed = factFileSchema.safeParse(raw);
+      if (!parsed.success) {
+        for (const issue of parsed.error.issues) io.log(`Invalid fact file at ${issue.path.join(".") || "(root)"}.`);
+        return 1;
+      }
+      file = parsed.data;
+    } else {
+      // The standard answers file: only key names and paths are printed, never values.
+      const parsed = standardAnswersFileSchema.safeParse(raw);
+      if (!parsed.success) {
+        for (const issue of parsed.error.issues) {
+          const at = issue.path.join(".") || "(root)";
+          io.log(issue.code === "unrecognized_keys"
+            ? `Unknown key in the standard answers file at ${at}: ${issue.keys.join(", ")}.`
+            : `Invalid standard answers file at ${at}.`);
+        }
+        return 1;
+      }
+      standard = parsed.data;
     }
-    file = parsed.data;
   }
 
   const database = io.open(args.profile);
   try {
+    if (standard) return applyStandardAnswers(database, standard, { dryRun: args.dryRun, log: io.log });
     if (!file) {
       for (const line of listFacts(database)) io.log(line);
       return 0;
@@ -232,4 +268,36 @@ export async function runProfileFacts(argv: string[], deps: Partial<ProfileFacts
   } finally {
     io.close(args.profile);
   }
+}
+
+/** Saves the standard answers file: its facts through applyFactFile, then the preferred first name on the profile. */
+function applyStandardAnswers(
+  database: DatabaseSync,
+  data: StandardAnswersFile,
+  options: { dryRun: boolean; log: (line: string) => void }
+): number {
+  const candidate = getCandidate(database, LOCAL_CANDIDATE_ID);
+  if (!candidate) {
+    options.log("The workspace has no candidate profile; nothing was written.");
+    return 1;
+  }
+  if (data.non_solicitation.answer && formerEmployerNamed(database, LOCAL_CANDIDATE_ID, data.non_solicitation.explanation)) {
+    options.log("invalid: the non-solicitation explanation names a former employer saved in your facts; nothing was written.");
+    return 1;
+  }
+  const result = applyFactFile(database, standardAnswerFactFile(data), { dryRun: options.dryRun });
+  for (const line of result.lines) options.log(line);
+  if (!result.ok) return 1;
+  const preferredName = data.preferred_first_name;
+  if (options.dryRun) {
+    options.log(candidate.preferredName === preferredName ? "unchanged preferred name [profile]: set" : "would set preferred name [profile]: set");
+    return 0;
+  }
+  const outcome = setCandidatePreferredName(database, LOCAL_CANDIDATE_ID, preferredName);
+  if (outcome === "missing") {
+    options.log("The workspace has no candidate profile; the preferred name was not written.");
+    return 1;
+  }
+  options.log(outcome === "set" ? "set preferred name [profile]: set" : "unchanged preferred name [profile]: set");
+  return 0;
 }

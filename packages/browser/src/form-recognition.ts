@@ -98,6 +98,11 @@ function clip(value: string, max: number): string {
   return value.length <= max ? value : value.slice(0, max - 1).trimEnd() + "…";
 }
 
+/** Chatbot controls (e.g. Oracle Digital Assistant) are floating page widgets, never application questions. */
+export function isChatbotControl(control: RawControl): boolean {
+  return /^oda-|^chatbot|chatbot/i.test(control.id || control.name || "");
+}
+
 /**
  * Deterministic form recognition. Labels resolve from aria/label text first,
  * then placeholder, then a name that is not a generated id (no UUID) — never
@@ -114,7 +119,7 @@ export function recognizeFields(controls: RawControl[]): BrowserField[] {
       continue;
     }
     // The hidden CAPTCHA token field is page machinery, never a question.
-    if (isCaptchaTokenControl(control)) continue;
+    if (isCaptchaTokenControl(control) || isChatbotControl(control)) continue;
     const stripped = stripRequiredMarker(labelSourceOf(control));
     const label = stripped.label;
     const labelMarked = stripRequiredMarker(readableText(control.label)).marked;
@@ -188,7 +193,7 @@ export function isSubmitControl(control: RawControl): boolean {
  * as their own phrases: a job description that already says "Thank you for
  * your interest" cannot hide a later "Thank you for applying".
  */
-const CONFIRMATION_PATTERN = /\b(thanks for applying|application (?:has been|was) (?:successfully )?(?:submitted|received)|thank you for applying|we[’']ve received your application|we have received your application|thank you|application received|successfully submitted|confirmation|we received your application|application submitted|applied on)\b/i;
+const CONFIRMATION_PATTERN = /\b(thanks for applying|application (?:has been|was|is) (?:successfully )?(?:submitted|received|complete)|thank you for applying|we[’']ve received your application|we have received your application|thank you|application received|successfully submitted|confirmation|we received your application|application submitted|applied on|submission received|applied successfully)\b/i;
 
 /**
  * Confirmation that appeared because of the submit click: the phrase must

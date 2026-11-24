@@ -1,16 +1,24 @@
 import type { DatabaseSync } from "node:sqlite";
 
 import {
+  applicationHoldFixUsed,
+  applicationReceiptConfirmed,
   closeProfileDatabase,
   findBrowserRunIds,
+  getApplicationHold,
   getBrowserRun,
   getJobPosting,
   getProfileDatabase,
   listApplicationEvents,
   listBrowserRuns,
   listJobSummaries,
+  readApplicationReceiptCheck,
+  recordApplicationHoldReopen,
+  recordApplicationHoldRetry,
   resolveProfileDataDirectory,
-  setJobStatus
+  setJobStatus,
+  withApplicationHoldTransaction,
+  type ApplicationHold
 } from "@internship-agent/db";
 import {
   manualOnly,
@@ -22,6 +30,7 @@ import {
   type WorkspaceProfile
 } from "@internship-agent/domain";
 
+import { mayHaveSubmitted, observeApplicationHolds } from "./application-holds";
 import { cancelBrowserRun } from "./browser-orchestrator";
 import { greenhouseMailSender } from "./greenhouse-security-code";
 import { acquirePipelineLock } from "./pipeline-lock";
@@ -112,6 +121,7 @@ const VERIFICATION_EVIDENCE_TEXT = "its post-submit evidence shows the site's em
 const MAIL_EVENT = /^Email received: [^"]*? from ([a-z0-9.-]+): "([^"]*)"/i;
 /** Mail this long after the approval no longer counts as this submit's. */
 const MAIL_WINDOW_MS = 24 * 60 * 60 * 1_000;
+const RECEIPT_CHECK_FRESH_MS = 15 * 60 * 1_000;
 
 /** Positive evidence, after the submit approval (the click follows it), that the site did not complete the run; null when none. */
 export function unsubmittedEvidence(database: DatabaseSync, dataDir: string, run: BrowserRun): UnsubmittedEvidence | null {
@@ -141,6 +151,7 @@ export function reopenUnsubmittedBlocker(database: DatabaseSync, dataDir: string
   if (run.status !== "failed") return `it is ${run.status}; --reopen-unsubmitted reopens only a failed submit.`;
   if (!run.submissionApprovedAt) return "its submission was never approved, so its submit was never clicked; retry it without --reopen-unsubmitted.";
   if (run.confirmationText && run.confirmationText.trim()) return "a confirmation was recognized, so it stays as it is.";
+  if (applicationReceiptConfirmed(database, run.id)) return "a trusted application receipt was found, so it stays as it is.";
   const posting = getJobPosting(database, run.jobId);
   if (!posting) return "its posting is unknown.";
   if (posting.status !== "APPLYING") return `its application is ${posting.status.toLocaleLowerCase("en-US").replace(/_/g, " ")}, not applying.`;
@@ -153,6 +164,15 @@ export function reopenUnsubmittedBlocker(database: DatabaseSync, dataDir: string
   if (others.some((other) => other.status !== "cancelled")) return "another run of this application is open or failed.";
   if (unsubmittedEvidence(database, dataDir, run) === null) {
     return "there is no evidence the site did not complete it (no security-code email after the submit click and no security-code step in its evidence); check the application on the site.";
+  }
+  const check = readApplicationReceiptCheck(database, run.id);
+  const latestEvidence = readSubmitEvidence(dataDir, run)[0]?.capturedAt;
+  const latestAttempt = Math.max(Date.parse(run.submissionApprovedAt), latestEvidence ? Date.parse(latestEvidence) : 0);
+  const checkedAt = check ? Date.parse(check.checkedAt) : Number.NaN;
+  const age = Date.now() - checkedAt;
+  if (check?.result !== "absent" || Date.parse(check.attemptedAt) !== Date.parse(run.submissionApprovedAt)
+    || !(checkedAt >= latestAttempt && age >= 0 && age <= RECEIPT_CHECK_FRESH_MS)) {
+    return `a completed receipt check for this attempt is required (pnpm mail:scan --receipt ${run.id.slice(0, 8)}).`;
   }
   return null;
 }
@@ -172,15 +192,58 @@ export function reopenUnsubmittedRun(
 ): { run: BrowserRun; evidence: UnsubmittedEvidence } {
   const reason = options.reason.replace(/\s+/g, " ").trim();
   if (!reason) throw new Error("A reopen needs a reason.");
-  const run = getBrowserRun(database, runId);
-  if (!run) throw new Error("The browser run is unknown.");
-  const blocker = reopenUnsubmittedBlocker(database, dataDir, run);
-  if (blocker) throw new AutomaticRetryRefused(blocker);
-  const evidence = unsubmittedEvidence(database, dataDir, run)!;
-  const cancelled = cancelBrowserRun(run.id, database);
-  setJobStatus(database, run.jobId, "APPLYING", "READY_FOR_REVIEW",
-    (REOPENED_UNSUBMITTED_PREFIX + `${evidence.text}): ${reason}`).slice(0, 1_000));
-  return { run: cancelled, evidence };
+  return withApplicationHoldTransaction(database, () => {
+    const run = getBrowserRun(database, runId);
+    if (!run) throw new Error("The browser run is unknown.");
+    const blocker = reopenUnsubmittedBlocker(database, dataDir, run);
+    if (blocker) throw new AutomaticRetryRefused(blocker);
+    const evidence = unsubmittedEvidence(database, dataDir, run)!;
+    const cancelled = cancelBrowserRun(run.id, database);
+    setJobStatus(database, run.jobId, "APPLYING", "READY_FOR_REVIEW",
+      (REOPENED_UNSUBMITTED_PREFIX + `${evidence.text}): ${reason}`).slice(0, 1_000));
+    recordApplicationHoldReopen(database, run.jobId, run.id, new Date().toISOString());
+    return { run: cancelled, evidence };
+  });
+}
+
+export type VerifiedHoldFix = { revision: number; recheck: string };
+
+function verifiedHold(
+  database: DatabaseSync, dataDir: string, run: BrowserRun, fix: VerifiedHoldFix
+): ApplicationHold | string {
+  const blocker = automaticRetryBlocker(database, run);
+  if (blocker) return blocker;
+  if (run.status === "awaiting-approval") return "the run is awaiting approval or review.";
+  if (run.pauses.some((pause) => pause.safeguard)) return "the run has a safeguard that requires separate review.";
+  if (mayHaveSubmitted(run, readSubmitEvidence(dataDir, run)) || applicationReceiptConfirmed(database, run.id)) {
+    return "the run may already have submitted.";
+  }
+  const hold = getApplicationHold(database, run.jobId, run.id);
+  if (!hold?.active || hold.owner !== "manager" || hold.reason !== "automation-fault") return "there is no active manager-owned pre-submit fault.";
+  if (hold.revision !== fix.revision) return "the hold revision changed.";
+  const current = observeApplicationHolds(database, dataDir).observations.find((item) => item.runId === run.id);
+  if (!current || current.owner !== hold.owner || current.reason !== hold.reason || current.identity !== hold.identity) {
+    return "the hold evidence or reason changed; refresh and review the trace.";
+  }
+  if (applicationHoldFixUsed(database, hold, fix.recheck)) return "that recheck was already used for this job and evidence.";
+  return hold;
+}
+
+export function requeueVerifiedHold(
+  database: DatabaseSync, dataDir: string, runId: string, fix: VerifiedHoldFix, reason: string, now = new Date()
+): BrowserRun {
+  if (!Number.isSafeInteger(fix.revision) || fix.revision < 1 || !/^[a-f0-9]{7,64}$/i.test(fix.recheck) || !reason.trim()) {
+    throw new AutomaticRetryRefused("a revision, passing recheck reference, and reason are required.");
+  }
+  return withApplicationHoldTransaction(database, () => {
+    const run = getBrowserRun(database, runId);
+    if (!run) throw new AutomaticRetryRefused("the browser run is unknown.");
+    const hold = verifiedHold(database, dataDir, run, fix);
+    if (typeof hold === "string") throw new AutomaticRetryRefused(hold);
+    const cancelled = retryAutomaticRun(database, runId, { reason });
+    recordApplicationHoldRetry(database, hold, fix.recheck, now.toISOString());
+    return cancelled;
+  });
 }
 
 /** Every held run (paused or awaiting approval) on an applying job, newest first per job. */
@@ -222,11 +285,11 @@ export type RetryCommandDeps = {
   env: Record<string, string | undefined>;
 };
 
-const RETRY_USAGE = "Usage: pnpm pipeline:retry [--profile real|demo] (--run <id or 8-character prefix> ... | --held) [--dry-run] [--start] [--reason \"<text>\"] | --run <id or 8-character prefix> ... --reopen-unsubmitted --reason \"<text>\" [--dry-run] [--start]";
+const RETRY_USAGE = "Usage: pnpm pipeline:retry [--profile real|demo] (--run <id or 8-character prefix> ... | --held) [--dry-run] [--start] [--reason \"<text>\"] | --run <id or 8-character prefix> ... --reopen-unsubmitted --reason \"<text>\" [--dry-run] [--start] | --run <ref> --verified-hold --revision <n> --recheck <hex ref> --reason \"<text>\" [--dry-run]";
 const DEFAULT_REASON = "the bug that held it is fixed.";
 const FULL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-type RetryArgs = { profile: WorkspaceProfile; runs: string[]; held: boolean; dryRun: boolean; start: boolean; reason: string; reopen: boolean };
+type RetryArgs = { profile: WorkspaceProfile; runs: string[]; held: boolean; dryRun: boolean; start: boolean; reason: string; reopen: boolean; verified: VerifiedHoldFix | null };
 
 /** `--run` takes one or more references (repeated flags or several values); null on anything unknown, missing, or contradictory. */
 function parseRetryArgs(argv: string[]): RetryArgs | null {
@@ -237,14 +300,18 @@ function parseRetryArgs(argv: string[]): RetryArgs | null {
   let dryRun = false;
   let start = false;
   let reopen = false;
+  let verified = false;
+  let revision: string | undefined;
+  let recheck: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
-    if (arg === "--held" || arg === "--dry-run" || arg === "--start" || arg === "--reopen-unsubmitted") {
+    if (arg === "--held" || arg === "--dry-run" || arg === "--start" || arg === "--reopen-unsubmitted" || arg === "--verified-hold") {
       if ((arg === "--held" && held) || (arg === "--dry-run" && dryRun) || (arg === "--start" && start)
-        || (arg === "--reopen-unsubmitted" && reopen)) return null;
+        || (arg === "--reopen-unsubmitted" && reopen) || (arg === "--verified-hold" && verified)) return null;
       if (arg === "--held") held = true;
       else if (arg === "--dry-run") dryRun = true;
       else if (arg === "--reopen-unsubmitted") reopen = true;
+      else if (arg === "--verified-hold") verified = true;
       else start = true;
     } else if (arg === "--run") {
       const before = runs.length;
@@ -253,6 +320,13 @@ function parseRetryArgs(argv: string[]): RetryArgs | null {
         index += 1;
       }
       if (runs.length === before) return null;
+    } else if (arg === "--revision" || arg === "--recheck") {
+      const value = argv[index + 1];
+      if (!value || value.startsWith("--")) return null;
+      if (arg === "--revision" && revision === undefined) revision = value;
+      else if (arg === "--recheck" && recheck === undefined) recheck = value;
+      else return null;
+      index += 1;
     } else if (arg === "--profile" || arg === "--reason") {
       const value = argv[index + 1];
       if (value === undefined || (arg === "--profile" ? profileText !== undefined : reason !== undefined)) return null;
@@ -272,7 +346,12 @@ function parseRetryArgs(argv: string[]): RetryArgs | null {
   if (reason !== undefined && !trimmed) return null;
   // A reopen names its runs and says why; the default reason never applies.
   if (reopen && (held || reason === undefined)) return null;
-  return { profile: profile.data, runs, held, dryRun, start, reason: trimmed ?? DEFAULT_REASON, reopen };
+  if (verified && (held || start || reopen || runs.length !== 1 || !trimmed || !revision || !recheck
+    || !/^[1-9]\d*$/.test(revision) || !Number.isSafeInteger(Number(revision)) || !/^[a-f0-9]{7,64}$/i.test(recheck))) return null;
+  if (!verified && (revision !== undefined || recheck !== undefined)) return null;
+  return { profile: profile.data, runs, held, dryRun, start, reason: trimmed ?? DEFAULT_REASON, reopen,
+    verified: verified ? { revision: Number(revision), recheck: recheck!.toLowerCase() } : null };
+
 }
 
 function clip(text: string, max: number): string {
@@ -322,7 +401,7 @@ export async function runRetryCommand(argv: string[], deps: Partial<RetryCommand
     io.log(RETRY_USAGE);
     return 2;
   }
-  if (!args.dryRun && manualOnly(io.env)) {
+  if ((!args.dryRun || args.verified) && manualOnly(io.env)) {
     io.log("Not run: manual checklist mode is on; the pipeline starts no browser runs.");
     return 1;
   }
@@ -359,6 +438,25 @@ export async function runRetryCommand(argv: string[], deps: Partial<RetryCommand
         if (seen.has(target.id)) continue;
         seen.add(target.id);
         const label = describeRun(database, target);
+        if (args.verified) {
+          const dataDir = io.dataDir(args.profile);
+          const hold = verifiedHold(database, dataDir, target, args.verified);
+          if (typeof hold === "string") {
+            skipped += 1;
+            io.log(`skipped ${label} (${hold})`);
+            continue;
+          }
+          try {
+            if (!args.dryRun) requeueVerifiedHold(database, dataDir, target.id, args.verified, args.reason);
+            retried += 1;
+            io.log(`${args.dryRun ? "would requeue" : "requeued"} ${label} after verified pre-submit fix.`);
+          } catch (error) {
+            skipped += 1;
+            exit = 1;
+            io.log(`skipped ${label} (${clip(error instanceof Error ? error.message : String(error), 300)})`);
+          }
+          continue;
+        }
         if (args.reopen) {
           const dataDir = io.dataDir(args.profile);
           const blocker = reopenUnsubmittedBlocker(database, dataDir, target);

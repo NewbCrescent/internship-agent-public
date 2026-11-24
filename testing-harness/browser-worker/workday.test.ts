@@ -52,6 +52,8 @@ describe("Workday career sites", () => {
     expect(classifyWorkdayAccountMessage("sign-in", "Please verify your account before signing in.")).toBe("verify-email");
     expect(classifyWorkdayAccountMessage("sign-in", "Please verify you are human.")).toBe("captcha");
     expect(classifyWorkdayAccountMessage("create", "I'm not a robot")).toBe("captcha");
+    expect(classifyWorkdayAccountMessage("sign-in", "Enter website. This input is for robots only, do not enter if you're human.")).toBeNull();
+    expect(classifyWorkdayAccountMessage("create", "Enter website. This input is for robots only, do not enter if you're human.")).toBeNull();
     expect(classifyWorkdayAccountMessage("sign-in", "Welcome back")).toBeNull();
   });
 
@@ -64,9 +66,12 @@ describe("Workday career sites", () => {
 
   it("finds a verification notice that appeared after the submit, not one that was already there", () => {
     const form = "Sign In Email Address* Password* Sign In Create Account";
+    const honeypot = "Enter website. This input is for robots only, do not enter if you're human.";
     const notice = "Your account has not been verified. Check your email for the verification link.";
     expect(newWorkdayVerifyNotice(form, `${form} ${notice}`)).toBe(true);
+    expect(newWorkdayVerifyNotice(`${form} ${honeypot}`, `${form} ${honeypot} ${notice}`)).toBe(true);
     expect(newWorkdayVerifyNotice(`${form} ${notice}`, `${form} ${notice}`)).toBe(false);
+    expect(newWorkdayVerifyNotice(form, `${form} ${honeypot}`)).toBe(false);
     expect(newWorkdayVerifyNotice("Create Account", "Email Address Password Verify New Password Create Account")).toBe(false);
   });
 

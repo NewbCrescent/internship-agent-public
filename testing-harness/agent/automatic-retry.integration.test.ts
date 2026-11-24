@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  applicationHoldTrace,
   closeProfileDatabase,
   createDatabase,
   getFitInputVersion,
@@ -17,6 +18,7 @@ import {
   logApplicationEvent,
   persistNormalizedPosting,
   reconcileProjectEvidence,
+  recordApplicationReceipt,
   registerGitHubRepository,
   resolveProfileDataDirectory,
   reviewEvidenceClaim,
@@ -46,13 +48,16 @@ import {
   AutomaticRetryRefused,
   automaticRetryBlocker,
   automaticSubmissionsSince,
+  continueBrowserRun,
   evaluateAndPersistMatch,
   getWorkdayAccount,
   listHeldRuns,
   prepareApplication,
   putWorkdayAccount,
   readPipelineLock,
+  readSubmitEvidence,
   reopenUnsubmittedBlocker,
+  requeueVerifiedHold,
   releasableWorkdayHolds,
   reopenUnsubmittedRun,
   resolveWorkdayAccounts,
@@ -72,6 +77,7 @@ import {
   type VerificationMailboxFactory
 } from "@internship-agent/agent";
 
+import { mayHaveSubmitted, refreshApplicationHolds } from "../../packages/agent/src/application-holds";
 import { evaluateMail, mailEventDetail, type AppliedJob } from "../../packages/agent/src/mail-outcomes";
 import { runPipelinePass } from "../../packages/agent/scripts/pipeline-pass";
 
@@ -745,6 +751,53 @@ describe("pnpm pipeline:retry and Workday", () => {
   });
 });
 
+function receiptCheck(database: DatabaseSync, run: BrowserRun, result: "absent" | "ambiguous" | "unavailable" | "truncated" | "confirmed" = "absent", at = new Date(), attemptedAt = run.submissionApprovedAt!) {
+  recordApplicationReceipt(database, { jobId: run.jobId, runId: run.id }, result, result === "confirmed" ? "a".repeat(32) : null, attemptedAt, at.toISOString());
+}
+
+describe("verified pre-submit hold retry", () => {
+  it.each(["field-errors", "refused", "challenged", "verification-code", "unknown"] as const)(
+    "refuses verified retry whenever %s evidence exists",
+    async (outcome) => {
+      const database = disposableDatabase();
+      const dataDir = disposableDirectory("internship-agent-verified-evidence-");
+      const run = syntheticHeldRun(database, { company: "Fixture", by: "pipeline", pauses: [] });
+      const hold = refreshApplicationHolds(database, dataDir)[0]!;
+      await savePostSubmitEvidence({
+        database, dataDir, run, page: fakePage(),
+        evidence: { outcome, url: "https://boards.greenhouse.io/example/jobs/2", bodyText: "", invalidFields: [], alertText: "", challenge: null }
+      });
+      expect(() => requeueVerifiedHold(database, dataDir, run.id, { revision: hold.revision, recheck: "abc123def" }, "Fixed"))
+        .toThrow("may already have submitted");
+      expect(listBrowserRuns(database, run.jobId)[0]?.status).toBe("paused-needs-input");
+      database.close();
+    }
+  );
+
+  it("requires the current manager revision and requeues only the selected automatic run with a trace", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-verified-retry-");
+    const target = syntheticHeldRun(database, { company: "FixtureTarget", by: "pipeline", status: "paused-needs-input", pauses: [] });
+    const other = syntheticHeldRun(database, { company: "FixtureOther", by: "pipeline", status: "paused-needs-input", pauses: [] });
+    const now = new Date("2026-11-22T10:00:00Z");
+    const holds = refreshApplicationHolds(database, dataDir, now);
+    const hold = holds.find((item) => item.runId === target.id)!;
+    const { deps, lines } = commandDeps(database, { dataDir: () => dataDir });
+    const args = ["--run", target.id, "--verified-hold", "--recheck", "abc123def", "--reason", "Verified fixture repair", "--revision"];
+    const before = snapshot(database);
+    expect(await runRetryCommand([...args, String(hold.revision + 1)], deps)).toBe(0);
+    expect(lines).toContainEqual(expect.stringContaining("hold revision changed"));
+    expect(await runRetryCommand([...args, String(hold.revision), "--dry-run"], deps)).toBe(0);
+    expect(snapshot(database)).toEqual(before);
+    expect(await runRetryCommand([...args, String(hold.revision)], deps)).toBe(0);
+    expect(listBrowserRuns(database, target.jobId)[0]?.status).toBe("cancelled");
+    expect(statusOf(database, target.jobId)).toBe("READY_FOR_REVIEW");
+    expect(listBrowserRuns(database, other.jobId)[0]?.status).toBe("paused-needs-input");
+    expect(applicationHoldTrace(database, target.jobId).map((event) => event.event)).toEqual(["opened", "verified-retry", "resolved"]);
+    database.close();
+  });
+});
+
 describe("pnpm pipeline:retry --reopen-unsubmitted", () => {
   const submitWait = { timeoutMs: 50, pollMs: 5 };
   const REASON = "Greenhouse security code step handled.";
@@ -771,6 +824,7 @@ describe("pnpm pipeline:retry --reopen-unsubmitted", () => {
     const { jobId, run } = await failedUnconfirmed(database, dataDir);
     securityCodeEvent(database, jobId, "Northstar Systems", { label });
     expect(unsubmittedEvidence(database, dataDir, run)).toEqual({ kind: "security-code-email", text: EMAIL_TEXT });
+    receiptCheck(database, run);
     expect(reopenUnsubmittedBlocker(database, dataDir, run)).toBeNull();
     expect(reopenUnsubmittedRun(database, dataDir, run.id, { reason: REASON }).run.status).toBe("cancelled");
     database.close();
@@ -811,6 +865,7 @@ describe("pnpm pipeline:retry --reopen-unsubmitted", () => {
     const dataDir = disposableDirectory("internship-agent-retry-data-");
     const { jobId, run } = await failedUnconfirmed(database, dataDir);
     securityCodeEvent(database, jobId, "Northstar Systems");
+    receiptCheck(database, run);
     const ref = run.id.slice(0, 8);
     const { deps, lines, lock } = commandDeps(database, { dataDir: () => dataDir });
     expect(await runRetryCommand(["--run", ref, "--reopen-unsubmitted", "--reason", REASON], deps)).toBe(0);
@@ -836,6 +891,7 @@ describe("pnpm pipeline:retry --reopen-unsubmitted", () => {
       evidence: { outcome: "verification-code", url: "https://boards.greenhouse.io/example/jobs/2", bodyText: "Security code", invalidFields: [], alertText: "", challenge: null }
     });
     expect(unsubmittedEvidence(database, dataDir, run)).toEqual({ kind: "verification-code-evidence", text: EVIDENCE_TEXT });
+    receiptCheck(database, run);
     const { run: cancelled, evidence } = reopenUnsubmittedRun(database, dataDir, run.id, { reason: REASON });
     expect(cancelled.status).toBe("cancelled");
     expect(evidence.kind).toBe("verification-code-evidence");
@@ -937,6 +993,7 @@ describe("pnpm pipeline:retry --reopen-unsubmitted", () => {
     const dataDir = disposableDirectory("internship-agent-retry-data-");
     const { jobId, run } = await failedUnconfirmed(database, dataDir);
     securityCodeEvent(database, jobId, "Northstar Systems");
+    receiptCheck(database, run);
     const before = snapshot(database);
     const { deps, lines, lock } = commandDeps(database, { dataDir: () => dataDir, acquireLock: () => { throw new Error("a dry run must not take the lock"); } });
     expect(await runRetryCommand(["--run", run.id.slice(0, 8), "--reopen-unsubmitted", "--reason", REASON, "--dry-run"], deps)).toBe(0);
@@ -954,6 +1011,78 @@ describe("pnpm pipeline:retry --reopen-unsubmitted", () => {
     const { deps, lines } = commandDeps(database, { dataDir: () => dataDir, startPass: async () => { throw new Error("must not run a pass"); } });
     expect(await runRetryCommand(["--run", run.id, "--reopen-unsubmitted", "--reason", REASON, "--start"], deps)).toBe(0);
     expect(lines.at(-1)).toBe("Nothing reopened; no pass started.");
+    database.close();
+  });
+
+  it("requires a fresh complete check of this attempt and vetoes a trusted receipt", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-retry-receipt-");
+    const { jobId, run } = await failedUnconfirmed(database, dataDir);
+    securityCodeEvent(database, jobId, "Northstar Systems");
+    expect(reopenUnsubmittedBlocker(database, dataDir, run)).toContain("completed receipt check");
+    for (const result of ["ambiguous", "unavailable", "truncated"] as const) {
+      receiptCheck(database, run, result);
+      expect(reopenUnsubmittedBlocker(database, dataDir, run)).toContain("completed receipt check");
+    }
+    receiptCheck(database, run, "absent", new Date(), "2025-01-01T00:00:00Z");
+    expect(reopenUnsubmittedBlocker(database, dataDir, run)).toContain("completed receipt check");
+    receiptCheck(database, run, "absent", new Date(Date.now() - 16 * 60_000));
+    expect(reopenUnsubmittedBlocker(database, dataDir, run)).toContain("completed receipt check");
+    receiptCheck(database, run, "confirmed");
+    expect(reopenUnsubmittedBlocker(database, dataDir, run)).toContain("trusted application receipt");
+    expect(() => reopenUnsubmittedRun(database, dataDir, run.id, { reason: REASON })).toThrow(AutomaticRetryRefused);
+    expect(statusOf(database, jobId)).toBe("APPLYING");
+    database.close();
+  });
+
+  it.each([
+    ["matched", "q1", "What is your available start date?", "candidate-question"],
+    ["unmatched", "missing-field", "Unrecognized site field", "manual-field-correction"]
+  ] as const)("routes a %s post-submit field rejection to candidate action", async (match, ref, label, reason) => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-retry-field-");
+    const { run } = await heldAutomaticRun(database, dataDir, null);
+    approveRunSubmission(run.id, undefined, { database });
+    expect(refreshApplicationHolds(database, dataDir)[0]).toMatchObject({ owner: "manager", reason: "form-review" });
+
+    const flag = { clicked: false };
+    let submitClicks = 0;
+    const page = fakePage({ submitted: flag });
+    const rejected: BrowserPage = {
+      ...page,
+      clickSubmit: async () => { submitClicks += 1; await page.clickSubmit(); },
+      bodyText: async () => "Please fix the errors below.",
+      submitControlShown: async () => true,
+      invalidFields: async () => flag.clicked ? [{ ref, label, error: "This field is required." }] : []
+    };
+    await expect(submitBrowserRun(run.id, { database, dataDir, submitWait, openPage: async () => rejected, applicationRecord: null }))
+      .rejects.toBeInstanceOf(SubmissionNeedsInput);
+    const current = listBrowserRuns(database, run.jobId)[0]!;
+    expect(current.submissionApprovedAt).toBeNull();
+    expect(current.pauses).toContainEqual(expect.objectContaining({
+      fieldId: match === "matched" ? "q1" : "site-error-1", safeguard: match === "unmatched", status: "open"
+    }));
+    expect(refreshApplicationHolds(database, dataDir)[0]).toMatchObject({ owner: "candidate", reason });
+    if (match === "matched") {
+      await answerRunPause(run.id, "q1", "2027-05-15", false, { database });
+      const continued = await continueBrowserRun(run.id, { database, dataDir, openPage: async () => ({
+        ...fakePage(), clickSubmit: async () => { submitClicks += 1; }
+      }) });
+      expect(continued.run).toMatchObject({ id: run.id, status: "awaiting-approval", submissionApprovedAt: null });
+      expect(refreshApplicationHolds(database, dataDir)[0]).toMatchObject({ owner: "candidate", reason: "approval" });
+      const saved = readSubmitEvidence(dataDir, continued.run);
+      expect(saved.map(({ outcome }) => outcome)).toEqual(["field-errors"]);
+      expect(mayHaveSubmitted(continued.run, saved)).toBe(true);
+
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date(Date.parse(saved[0]!.capturedAt) + 1_000));
+        approveRunSubmission(run.id, undefined, { database });
+      } finally { vi.useRealTimers(); }
+      expect(refreshApplicationHolds(database, dataDir)[0]).toMatchObject({ owner: "manager", reason: "form-review" });
+      expect(readSubmitEvidence(dataDir, run)).toEqual(saved);
+      expect(submitClicks).toBe(1);
+    }
     database.close();
   });
 
@@ -980,6 +1109,7 @@ describe("pnpm pipeline:retry --reopen-unsubmitted", () => {
     expect(held.status).toBe("paused-needs-input");
     expect(held.submissionApprovedAt).toBeNull();
     expect(held.pauses).toContainEqual(expect.objectContaining({ fieldId: "site-security-code", safeguard: true, status: "open" }));
+    expect(refreshApplicationHolds(database, dataDir)[0]).toMatchObject({ owner: "manager", reason: "automation-fault" });
     expect(automaticRetryBlocker(database, held)).toBeNull();
     expect(retryAutomaticRun(database, run.id, { reason: "Security code read" }).status).toBe("cancelled");
     expect(statusOf(database, jobId)).toBe("READY_FOR_REVIEW");
@@ -1124,6 +1254,7 @@ describe("daily auto-submit cap", () => {
       detail: `Email received: Recruiter reply from us.greenhouse-mail.io: "Security code for your application to Northstar Systems"`
     });
     expect(automaticSubmissionsSince(database, startOfToday())).toBe(1);
+    receiptCheck(database, failed);
     reopenUnsubmittedRun(database, dataDir, failed.id, { reason: "Greenhouse security code step handled." });
     expect(automaticSubmissionsSince(database, startOfToday())).toBe(0);
     const second = await autoPass(database, dataDir, async () => fakePage());

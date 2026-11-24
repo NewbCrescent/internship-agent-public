@@ -7,6 +7,8 @@ import {
   chooseApplyEntry,
   classifyAts,
   classifyFieldRole,
+  dismissCookieBannerIn,
+  isCookieBannerCandidate,
   isSensitiveRole,
   planAutofill,
   recognizeForm,
@@ -176,6 +178,102 @@ describe("Jobvite and iCIMS, and posting pages behind an Apply link", () => {
       .toMatch(/^Jobvite asks you to accept its data-consent policy at jobs\.jobvite\.com/);
     expect(applicationWallReason("https://job-boards.greenhouse.io/fixture/jobs/1", "Data Consent")).toBeNull();
     expect(applicationWallReason("https://careers-fixture.icims.com/jobs/9001/job", "Apply for this job online")).toBeNull();
+  });
+
+  it("follows SmartRecruiters I'm interested and Im interested buttons and links on LLNL and ServiceNow postings", () => {
+    const llnlPage = "https://jobs.smartrecruiters.com/LawrenceLivermoreNationalLaboratory/744000123456789-cybersecurity-undergraduate-intern";
+    const llnlApply = entry({
+      index: 1,
+      tag: "a",
+      href: "https://jobs.smartrecruiters.com/oneclick-ui/company/LawrenceLivermoreNationalLaboratory/publication/744000123456789",
+      texts: ["I'm interested"],
+      className: "js-oneclick"
+    });
+    const llnlCandidates = [
+      entry({ index: 0, href: "#", texts: ["Share this job"], className: "share-btn" }),
+      llnlApply,
+      entry({ index: 2, href: "https://www.linkedin.com/sharing/share-offsite", texts: ["Share on LinkedIn"] })
+    ];
+    expect(chooseApplyEntry(llnlPage, llnlCandidates)).toEqual(llnlApply);
+
+    // ServiceNow button with "Im interested" (no apostrophe) and curly apostrophe "I’m interested"
+    const serviceNowPage = "https://jobs.smartrecruiters.com/ServiceNow/744000000000001-software-intern";
+    const serviceNowButton = entry({
+      index: 0,
+      tag: "button",
+      texts: ["Im interested"],
+      className: "st-apply"
+    });
+    expect(chooseApplyEntry(serviceNowPage, [serviceNowButton])).toEqual(serviceNowButton);
+
+    const curlyApostropheButton = entry({
+      index: 0,
+      tag: "button",
+      texts: ["I’m interested"],
+      className: "st-apply"
+    });
+    expect(chooseApplyEntry(serviceNowPage, [curlyApostropheButton])).toEqual(curlyApostropheButton);
+  });
+
+  it("handles cookie banner overlays and never chooses OneTrust, Privacy Preference Center, or cookie allow/accept as Apply entry", () => {
+    const page = "https://jobs.smartrecruiters.com/ServiceNow/744000000000001-software-intern";
+    const onetrustAccept = entry({
+      index: 0,
+      tag: "button",
+      id: "onetrust-accept-btn-handler",
+      texts: ["Accept All Cookies"],
+      className: "onetrust-close-btn-handler"
+    });
+    const privacyPref = entry({
+      index: 1,
+      tag: "button",
+      texts: ["Confirm My Choices"],
+      className: "save-preference-btn-handler onetrust-close-btn-handler"
+    });
+    const cookieAllow = entry({
+      index: 2,
+      tag: "button",
+      id: "cookie-allow-all",
+      texts: ["Allow"],
+      className: "cookie-banner-accept"
+    });
+    const applyEntry = entry({
+      index: 3,
+      tag: "a",
+      href: "https://jobs.smartrecruiters.com/oneclick-ui/company/ServiceNow/publication/00000000-0000-4000-8000-000000000000",
+      texts: ["I'm interested"],
+      className: "js-oneclick"
+    });
+
+    // Alone, cookie banner candidates are never chosen
+    expect(chooseApplyEntry(page, [onetrustAccept, privacyPref, cookieAllow])).toBeNull();
+
+    // isCookieBannerCandidate classifies each overlay element
+    expect(isCookieBannerCandidate(onetrustAccept)).toBe(true);
+    expect(isCookieBannerCandidate(privacyPref)).toBe(true);
+    expect(isCookieBannerCandidate(cookieAllow)).toBe(true);
+    expect(isCookieBannerCandidate(applyEntry)).toBe(false);
+
+    // When appearing before the real apply entry, the apply entry is reached rather than halted
+    expect(chooseApplyEntry(page, [onetrustAccept, privacyPref, cookieAllow, applyEntry])).toEqual(applyEntry);
+
+    // dismissCookieBannerIn clicks the OneTrust accept button and hides the overlay
+    let otClicked = false;
+    const fakeOtButton = { click: () => { otClicked = true; } };
+    const fakeDarkFilter = { style: { display: "block" } };
+    const fakeDoc = {
+      querySelector: (selector: string) => {
+        if (selector.includes("onetrust-accept-btn-handler")) return fakeOtButton;
+        return null;
+      },
+      querySelectorAll: (selector: string) => {
+        if (selector.includes("onetrust-consent-sdk")) return [fakeDarkFilter];
+        return [];
+      }
+    };
+    expect(dismissCookieBannerIn(fakeDoc as unknown as Document)).toBe(true);
+    expect(otClicked).toBe(true);
+    expect(fakeDarkFilter.style.display).toBe("none");
   });
 });
 

@@ -17,6 +17,27 @@
  *   ],
  *   "revoke": [{ "key": "<fact key>", "scope": { "kind": "global" } }]
  * }
+ *
+ * Also accepts the standard legal and background answers file (placeholders;
+ * every key is required, unknown keys fail, and values print only as "set"):
+ * {
+ *   "us_citizen": <true | false>,
+ *   "us_person_export_controls": "<option text, e.g. A United States citizen or national>",
+ *   "security_clearance_eligible": <true | false>, "holds_security_clearance": <true | false>,
+ *   "criminal_conviction": <true | false>, "government_debarment_or_exclusion": <true | false>,
+ *   "non_compete": <true | false>,
+ *   "non_solicitation": {
+ *     "answer": <true | false>, "explanation": "<text that names no employer>", "ends": "<YYYY-MM-DD>",
+ *     "name_former_employer": false, "combined_non_compete_or_non_solicit_question": <true | false>,
+ *     "agreement_restricts_this_job": <true | false>, "confirmed": "<when and how the candidate confirmed it>"
+ *   },
+ *   "conflict_of_interest": <true | false>, "relative_government_official": <true | false>,
+ *   "immediate_family_health_care_professional": <true | false>,
+ *   "lives_within_50_miles_of_san_francisco": <true | false>,
+ *   "salary_expectation": "<the rule in words; the coded rule uses the posting's stated pay>",
+ *   "preferred_first_name": "<name>",
+ *   "concerns_working_on_dod_projects": <true | false>
+ * }
  */
 import { runProfileFacts } from "../src/profile-facts";
 

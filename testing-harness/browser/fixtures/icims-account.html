@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Software Engineer Intern | Careers at Fixture Robotics</title></head>
+<body>
+  <!--
+    A fictional iCIMS account flow for careers-fixture*.icims.com, simulated in the page and served
+    for any path. The email-first step ("Enter Your Information": an Email field named loginName, a
+    data-consent paragraph with a required "I agree" box #accept_gdpr, and an input[type=submit]
+    "Next") is derived from the 2026-11-20 read-only captures of public iCIMS apply steps (tokens and
+    personal data stripped). The later screens (Create Your Profile with two password inputs, the
+    password screen of an existing account, the "Check your email" notice, the Candidate Profile
+    application) are derived from iCIMS's public candidate guide (community.icims.com); they are NOT
+    captured structure. Every name, host, and email here is fictional.
+
+    The query parameter `fixture` picks the behaviour: new (default), existing (an account for the
+    email already exists with a password the agent does not know), captcha (a visible hCaptcha frame
+    on load), verify (the create asks to verify the email first), wrongpw (like existing). The path
+    picks the screen: .../login is the email step, .../candidate the application, .../verify marks
+    the pending account verified. Before a create or login completes the page awaits
+    window.onFixtureIcimsSubmit(kind) when the runner exposes it. State is kept per host in
+    localStorage ("fixture-icims-state", "fixture-icims-accounts") and mirrored on window.fixtureIcims.
+  -->
+  <div id="iCIMS_Header"><h1 class="iCIMS_Header" id="heading">Careers at Fixture Robotics</h1></div>
+  <div id="app"></div>
+  <div class="iCIMS_Logo"><p class="iCIMS_Logo_Text">Software Powered by iCIMS</p></div>
+  <script>
+    (function () {
+      var params = new URLSearchParams(location.search);
+      var mode = params.get("fixture") || "new";
+      var SEEDED_EMAIL = "jordan@example.test";
+      var ACCOUNTS = "fixture-icims-accounts";
+      var STATE = "fixture-icims-state";
+      function read(key, fallback) { try { return JSON.parse(localStorage.getItem(key) || "") || fallback; } catch (error) { return fallback; } }
+      function write(key, value) { localStorage.setItem(key, JSON.stringify(value)); }
+      var state = read(STATE, { gdprChecked: false, alertsChecked: false, emailSubmits: 0, creates: 0, signIns: 0, typedFirst: "", typedLast: "", email: "" });
+      function save() { write(STATE, state); window.fixtureIcims = state; }
+      save();
+      var accounts = read(ACCOUNTS, {});
+      if ((mode === "existing" || mode === "wrongpw") && !accounts[SEEDED_EMAIL]) {
+        accounts[SEEDED_EMAIL] = { password: "Unknown-Pass-0000!", verified: true };
+        write(ACCOUNTS, accounts);
+      }
+      var app = document.getElementById("app");
+      var heading = document.getElementById("heading");
+      var base = location.pathname.replace(/\/(?:login|candidate|verify)\/?$/, "");
+      function go(path) { location.href = base + path + location.search; }
+      async function notify(kind) { if (typeof window.onFixtureIcimsSubmit === "function") await window.onFixtureIcimsSubmit(kind); }
+      function checkNotice() {
+        heading.textContent = "Check your email";
+        app.innerHTML = '<p>Check your email: we sent a link to verify your email address.</p>';
+      }
+
+      function emailScreen() {
+        heading.textContent = "Enter Your Information";
+        app.innerHTML =
+          '<form id="loginForm" method="post" action="#">' +
+          '<div class="iCIMS_TableRow"><label for="email">Email</label><input type="email" id="email" name="loginName" required></div>' +
+          '<div class="iCIMS_TableRow"><p>I consent to Fixture Robotics collecting, processing and storing my personal data for recruitment purposes as described in its privacy policy.</p></div>' +
+          '<div class="iCIMS_TableRow"><input type="checkbox" id="accept_gdpr" name="accept_gdpr" required><label for="accept_gdpr">I agree</label></div>' +
+          '<div class="iCIMS_TableRow"><input type="checkbox" id="job_alerts" name="job_alerts"><label for="job_alerts">Send me job alerts and news</label></div>' +
+          '<input type="submit" id="enterEmailSubmitButton" class="iCIMS_Button" value="Next">' +
+          '</form>';
+        if (mode === "captcha") {
+          var frame = document.createElement("iframe");
+          frame.setAttribute("src", "https://newassets.hcaptcha.com/captcha/v1/fixture/static/hcaptcha.html");
+          frame.setAttribute("title", "Widget containing checkbox for hCaptcha security challenge");
+          frame.width = "300";
+          frame.height = "80";
+          app.appendChild(frame);
+        }
+        document.getElementById("loginForm").addEventListener("submit", function (event) {
+          event.preventDefault();
+          var email = document.getElementById("email").value.trim().toLowerCase();
+          state.gdprChecked = document.getElementById("accept_gdpr").checked;
+          state.alertsChecked = document.getElementById("job_alerts").checked;
+          state.emailSubmits += 1;
+          state.email = email;
+          save();
+          if (!state.gdprChecked) return;
+          if (read(ACCOUNTS, {})[email]) signInScreen(email);
+          else createScreen(email);
+        });
+      }
+
+      function createScreen(email) {
+        heading.textContent = "Create Your Profile";
+        app.innerHTML =
+          '<form id="createForm" method="post" action="#">' +
+          '<div class="iCIMS_TableRow"><label for="firstName">First Name *</label><input type="text" id="firstName" name="firstName" required></div>' +
+          '<div class="iCIMS_TableRow"><label for="lastName">Last Name *</label><input type="text" id="lastName" name="lastName" required></div>' +
+          '<div class="iCIMS_TableRow"><label for="profileEmail">Email</label><input type="email" id="profileEmail" name="profileEmail"></div>' +
+          '<div class="iCIMS_TableRow"><label for="password">Password *</label><input type="password" id="password" name="password" required></div>' +
+          '<div class="iCIMS_TableRow"><label for="confirmPassword">Re-enter Password *</label><input type="password" id="confirmPassword" name="confirmPassword" required></div>' +
+          '<div class="iCIMS_TableRow"><label for="phone">Phone</label><input type="tel" id="phone" name="phone"></div>' +
+          '<button type="submit" class="iCIMS_Button">Submit Profile</button>' +
+          '</form>';
+        document.getElementById("profileEmail").value = email;
+        document.getElementById("createForm").addEventListener("submit", async function (event) {
+          event.preventDefault();
+          var first = document.getElementById("firstName").value.trim();
+          var last = document.getElementById("lastName").value.trim();
+          var password = document.getElementById("password").value;
+          if (!first || !last || !password || password !== document.getElementById("confirmPassword").value) return;
+          state.creates += 1;
+          state.typedFirst = first;
+          state.typedLast = last;
+          save();
+          await notify("create");
+          var stored = read(ACCOUNTS, {});
+          stored[email] = { password: password, verified: mode !== "verify" };
+          write(ACCOUNTS, stored);
+          if (mode === "verify") {
+            localStorage.setItem("fixture-icims-pending", email);
+            checkNotice();
+          } else {
+            go("/candidate");
+          }
+        });
+      }
+
+      function signInScreen(email) {
+        heading.textContent = "Welcome Back";
+        app.innerHTML =
+          '<form id="signInForm" method="post" action="#">' +
+          '<div class="iCIMS_TableRow"><label for="loginPassword">Password</label><input type="password" id="loginPassword" name="password" required></div>' +
+          '<div class="iCIMS_TableRow"><a href="#forgot">Forgot password?</a></div>' +
+          '<div id="signInError"></div>' +
+          '<button type="submit" class="iCIMS_Button">Login</button>' +
+          '</form>';
+        document.getElementById("signInForm").addEventListener("submit", async function (event) {
+          event.preventDefault();
+          state.signIns += 1;
+          save();
+          await notify("login");
+          var account = read(ACCOUNTS, {})[email];
+          if (!account || account.password !== document.getElementById("loginPassword").value) {
+            document.getElementById("signInError").innerHTML = '<div role="alert">The password you entered is incorrect.</div>';
+            return;
+          }
+          if (!account.verified) { checkNotice(); return; }
+          go("/candidate");
+        });
+      }
+
+      function applicationScreen() {
+        heading.textContent = "Candidate Profile";
+        app.innerHTML =
+          '<form id="profileForm">' +
+          '<div class="iCIMS_TableRow"><label for="address">Address</label><input type="text" id="address" name="address"></div>' +
+          '<div class="iCIMS_TableRow"><label for="resume">Resume</label><input type="file" id="resume" name="resume"></div>' +
+          '<button type="button" class="iCIMS_Button">Next</button>' +
+          '</form>';
+      }
+
+      function verifyScreen() {
+        var pending = localStorage.getItem("fixture-icims-pending");
+        var stored = read(ACCOUNTS, {});
+        if (pending && stored[pending]) {
+          stored[pending].verified = true;
+          write(ACCOUNTS, stored);
+        }
+        heading.textContent = "Email verified";
+        app.innerHTML = '<p>Your email address has been verified.</p>';
+      }
+
+      if (/\/candidate\/?$/.test(location.pathname)) applicationScreen();
+      else if (/\/verify\/?$/.test(location.pathname)) verifyScreen();
+      else emailScreen();
+    })();
+  </script>
+</body>
+</html>

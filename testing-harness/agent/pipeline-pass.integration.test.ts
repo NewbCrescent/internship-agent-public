@@ -1,11 +1,16 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { addCompanySource, readDoorbellState } from "@internship-agent/agent";
-import { closeProfileDatabase, createDatabase, resolveProfileDatabasePath, resolveProfileDataDirectory } from "@internship-agent/db";
+import { addCompanySource, readDoorbellState, savePostSubmitEvidence } from "@internship-agent/agent";
+import {
+  closeProfileDatabase, createDatabase, persistNormalizedPosting, resolveProfileDatabasePath, resolveProfileDataDirectory,
+  saveApplicationPackage, saveBrowserRun, setJobStatus, updateBrowserRun
+} from "@internship-agent/db";
+import type { BrowserPage } from "@internship-agent/browser";
 
 import { runPipelinePass, runWatchTick } from "../../packages/agent/scripts/pipeline-pass";
 import type { DiscordFetch } from "../../packages/agent/src/discord-notify";
@@ -107,7 +112,7 @@ describe("pipeline watcher pass", () => {
     await runPipelinePass({ profile: "real", sourceIds: [], log: () => undefined, advance, notify: { fetch } });
     expect(calls).toEqual([false, false]);
     const sent = contents.join("\n");
-    expect(sent).toContain("Preparation failed for x: boom");
+    expect(sent).not.toContain("Preparation failed for x: boom");
     expect(sent).toContain("Unknown posting (job ");
     expect(sent).not.toContain("Thanks");
 
@@ -115,7 +120,58 @@ describe("pipeline watcher pass", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("a pass that throws still releases the lock, notifies the failure once, and rethrows", async () => {
+  it("does not send a second approval request and sends a later browser correction once", async () => {
+    process.env.INTERNSHIP_AGENT_DISCORD_BOT_TOKEN = TOKEN;
+    process.env.INTERNSHIP_AGENT_DISCORD_USER_ID = "123456789012345678";
+    const dataDir = resolveProfileDataDirectory("real");
+    const database = createDatabase(resolveProfileDatabasePath("real"));
+    const companyName = "Fixture Employer";
+    const sourceUrl = "https://example.test/jobs/correction";
+    const { jobId } = persistNormalizedPosting(database, {
+      companyName, title: "Intern", employmentType: "INTERNSHIP", applicationType: "EXTERNAL_ATS",
+      sourceUrl, externalApplicationUrl: null, companyCareersUrl: null, contentHash: "browser-correction",
+      normalizedText: "Fixture application",
+      locations: [], compensation: null, requirements: [], technologies: [],
+      constraints: { graduation: null, authorization: null, sponsorship: null, availability: null }
+    });
+    setJobStatus(database, jobId, "DISCOVERED", "APPLYING");
+    const now = new Date().toISOString();
+    const packageId = randomUUID();
+    saveApplicationPackage(database, { id: packageId, jobId, createdAt: now, summary: "Fixture", answers: [], bullets: [], claims: [] });
+    const run = saveBrowserRun(database, {
+      id: randomUUID(), jobId, applicationUrl: sourceUrl, status: "awaiting-approval", packageId,
+      variantId: null, baseResumeId: null, applicationProfile: "default",
+      atsKind: "greenhouse", atsConfidence: 1, atsConfirmed: true, suggestedAtsKind: null,
+      pauses: [], decisions: [], submittedAnswers: null, confirmationText: null, submissionApprovedAt: now,
+      createdAt: now, updatedAt: now
+    });
+    const { fetch, contents } = recordingFetch(dataDir);
+    const pass = () => runPipelinePass({ profile: "real", sourceIds: [], log: () => undefined, notify: { fetch },
+      advance: async () => ({ analyzed: [], prepared: [], started: [], stopped: [], waiting: [], held: [], skipped: [], submitted: [], errors: [] }) });
+    await pass();
+    expect(contents).toEqual([]);
+
+    const pause = { suggestedKey: null, suggestedScope: null, sensitive: false, upload: false, status: "open" as const, answer: null, draft: null };
+    updateBrowserRun(database, run.id, { status: "paused-needs-input", submissionApprovedAt: null, pauses: [
+      { ...pause, fieldId: "unknown", label: "Unlabeled input control 1", question: "Unlabeled input control 1", safeguard: false },
+      { ...pause, fieldId: "site-error-1", label: "Applicant jordan@example.test", question: "Correct the value", safeguard: true }
+    ] });
+    await savePostSubmitEvidence({
+      database, dataDir, run, page: { screenshot: async () => {} } as BrowserPage,
+      evidence: {
+        outcome: "field-errors", url: sourceUrl, bodyText: "", alertText: "", challenge: null,
+        invalidFields: [{ ref: null, label: "Applicant jordan@example.test", error: "Correct the value" }]
+      }
+    });
+    database.close();
+    await pass();
+    await pass();
+    expect(contents).toHaveLength(1);
+    expect(contents[0]).toContain('Q2 fix this field in the browser: "Applicant [email]"');
+    expect(contents[0]).not.toMatch(/Unlabeled|CAPTCHA|jordan@example.test/);
+  });
+
+  it("a pass that throws releases the lock and rethrows without interrupting the candidate", async () => {
     process.env.INTERNSHIP_AGENT_DISCORD_BOT_TOKEN = TOKEN;
     process.env.INTERNSHIP_AGENT_DISCORD_USER_ID = "123456789012345678";
     const dataDir = resolveProfileDataDirectory("real");
@@ -125,12 +181,12 @@ describe("pipeline watcher pass", () => {
     await expect(runPipelinePass({ profile: "real", sourceIds: [], log: () => undefined, advance, notify: { fetch } }))
       .rejects.toThrow("database is not open");
     expect(existsSync(join(dataDir, "pipeline.lock"))).toBe(false);
-    expect(calls).toEqual([false, false]);
-    expect(contents.join("\n")).toContain("Pass failed: database is not open");
+    expect(calls).toEqual([]);
+    expect(contents).toEqual([]);
 
     await expect(runPipelinePass({ profile: "real", sourceIds: [], log: () => undefined, advance, notify: { fetch } }))
       .rejects.toThrow("database is not open");
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(0);
   });
 });
 

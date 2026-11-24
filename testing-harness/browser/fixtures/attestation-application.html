@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply: Robotics Software Intern | Fixture Robotics</title></head>
+<body>
+  <!--
+    A fictional careers application form (careers.fixturerobotics.com/jobs/1003/apply) carrying the
+    statements the standing consent and attestation settings decide: an accuracy certification, an
+    electronic signature with its date, a background-check authorization, a CLO-style data-retention
+    consent, an export-control U.S.-person statement of fact (never signed), and an optional
+    marketing opt-in (never checked). Every text is fictional; the Submit button is never clicked.
+  -->
+  <h1>Robotics Software Intern</h1>
+  <form id="application" method="post" action="/jobs/1003/submit">
+    <div class="field">
+      <input type="checkbox" id="certify" name="certify" required>
+      <label for="certify">I certify that the information in this application is true and complete, and I understand that false statements may result in disqualification.</label>
+    </div>
+    <div class="field">
+      <label for="signature">Electronic Signature (type your full legal name)</label>
+      <input type="text" id="signature" name="signature" required>
+    </div>
+    <div class="field">
+      <label for="signature_date">Date (MM/DD/YYYY)</label>
+      <input type="text" id="signature_date" name="signature_date" required>
+    </div>
+    <div class="field">
+      <input type="checkbox" id="background" name="background" required>
+      <label for="background">I authorize Fixture Robotics to conduct a background check, including criminal history.</label>
+    </div>
+    <div class="field">
+      <input type="checkbox" id="retain" name="retain" required>
+      <label for="retain">Fixture Robotics has my consent to retain my data for the purpose of considering me for employment and for up to 3 years thereafter.</label>
+    </div>
+    <div class="field">
+      <input type="checkbox" id="us_person" name="us_person" required>
+      <label for="us_person">I certify that I am a U.S. person under U.S. export-control regulations.</label>
+    </div>
+    <div class="field">
+      <input type="checkbox" id="marketing" name="marketing">
+      <label for="marketing">Send me marketing emails and job alerts.</label>
+    </div>
+    <button type="submit">Submit</button>
+  </form>
+</body>
+</html>

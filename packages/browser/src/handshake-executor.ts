@@ -1,8 +1,9 @@
 import type { Locator, Page } from "playwright-core";
 
-import type { BrowserField, FillDecision, PauseRecord, RecognizedForm } from "@internship-agent/domain";
+import { promptSearchTerms, type AtsKind, type BrowserField, type FillDecision, type PauseRecord, type RecognizedForm } from "@internship-agent/domain";
 
-import { chooseApplyEntry, type ApplyEntryCandidate } from "./apply-entry";
+import { chooseApplyEntry, dismissCookieBanner, type ApplyEntryCandidate } from "./apply-entry";
+import { isDoverOrAshby } from "./ats/adapters";
 import { matchSuggestion } from "./autofill-planner";
 import { findVisibleChallengeIn, SubmissionChallenged, SubmissionRefused, type VisibleChallenge } from "./challenge";
 import { isSubmitControl, readNewConfirmation, recognizeForm, waitForStableControls, type RawControl } from "./form-recognition";
@@ -240,13 +241,15 @@ export async function applyDecisions(
  */
 export async function submitAndConfirm(
   page: BrowserPage,
-  options: { timeoutMs?: number; pollMs?: number; securityCode?: SecurityCodeLookup | null } = {}
+  options: { timeoutMs?: number; pollMs?: number; securityCode?: SecurityCodeLookup | null; atsKind?: AtsKind | null } = {}
 ): Promise<string> {
   const before = await page.bodyText();
   const beforeUrl = page.url();
   const successBefore = page.successText ? (await page.successText()).trim() : "";
   const invalidBefore = page.invalidFields ? await page.invalidFields().catch((): InvalidField[] => []) : [];
   const codeInputsBefore = page.securityCodeInputs ? await page.securityCodeInputs().catch(() => 0) : 0;
+  const dialogOpenBefore = page.applicationDialogOpen ? await page.applicationDialogOpen().catch(() => false) : false;
+  const targetAts = isDoverOrAshby(beforeUrl, options.atsKind);
   const clickedAt = new Date();
   await page.clickSubmit();
   // A submission is a network round trip: keep the page open and watch for a
@@ -275,6 +278,33 @@ export async function submitAndConfirm(
           `After the submit click the site showed ${challenge.detail}. The agent never solves CAPTCHAs, so this application is held for you: finish it in your own browser. The run is not marked submitted.`,
           scrubbed(await capturePostSubmitEvidence(page, "challenged", { bodyText: body, challenge: challenge.detail }))
         );
+      }
+      // If a modal dialog was open before submit and has now closed without errors, challenge, or refusal:
+      if (dialogOpenBefore && page.applicationDialogOpen) {
+        const dialogOpenNow = await page.applicationDialogOpen().catch(() => false);
+        if (!dialogOpenNow) {
+          const invalidAfter = page.invalidFields ? await page.invalidFields().catch((): InvalidField[] => []) : [];
+          const submitShown = page.submitControlShown ? await page.submitControlShown().catch(() => false) : false;
+          const refusal = page.alertText ? (await page.alertText()).trim() : "";
+          const kind = classifyUnconfirmed({ invalidBefore, invalidAfter, submitShown, alertText: refusal });
+          if (kind === "field-errors") {
+            const evidence = scrubbed(await capturePostSubmitEvidence(page, kind, { invalidFields: invalidAfter, alertText: refusal }));
+            throw new SubmissionNeedsInput(
+              `After the submit click the site marked ${invalidAfter.length} field(s) invalid, so nothing was sent. The run waits for your answers with the approval withdrawn; it is not marked submitted.`,
+              evidence,
+              evidence.invalidFields
+            );
+          }
+          if (kind === "refused") {
+            const evidence = scrubbed(await capturePostSubmitEvidence(page, kind, { invalidFields: invalidAfter, alertText: refusal }));
+            throw new SubmissionRefused(`The site did not accept the submission ("${scrubSecret(refusal, secret).slice(0, 200)}"). The run is not marked submitted; check the application on the site before retrying.`, evidence);
+          }
+          if (targetAts) {
+            const success = page.successText ? (await page.successText().catch(() => "")).trim() : "";
+            const text = success || readNewConfirmation(before, body) || (urlConfirmed ? body.trim() || `Confirmation page: ${urlConfirmed}` : null);
+            return scrubSecret(text || "Application submitted (application dialog closed)", secret).slice(0, 2_000);
+          }
+        }
       }
       // The site's emailed security-code step: the code comes from the candidate's mailbox, else the run is held.
       if (secret === null && page.securityCodeInputs) {
@@ -332,7 +362,11 @@ export async function submitAndConfirm(
     if (kind === "refused") {
       throw new SubmissionRefused(`The site did not accept the submission ("${scrubSecret(refusal, secret).slice(0, 200)}"). The run is not marked submitted; check the application on the site before retrying.`, evidence);
     }
-    const dialogClosed = page.applicationDialogOpen ? !(await page.applicationDialogOpen()) : false;
+    const dialogClosed = page.applicationDialogOpen ? (dialogOpenBefore && !(await page.applicationDialogOpen().catch(() => true))) : false;
+    if (dialogClosed && targetAts && kind === "unknown") {
+      const success = page.successText ? (await page.successText().catch(() => "")).trim() : "";
+      return scrubSecret(success || "Application submitted (application dialog closed)", secret).slice(0, 2_000);
+    }
     throw new SubmissionUnconfirmed(dialogClosed
       ? "The submit button was clicked and the application dialog closed, but no confirmation text was recognized. Check the application on the site before retrying; the run is not marked submitted."
       : "The submit button was clicked but no new confirmation appeared. Check the application on the site before retrying; the run is not marked submitted.", evidence);
@@ -425,9 +459,35 @@ export function createPlaywrightPage(page: Page): BrowserPage {
         const named = within().locator(`input[type="${field.kind}"][name="${cssValue(field.id)}"]`);
         const byId = field.kind === "checkbox" ? await within().locator(idSelector(field.id)).count().catch(() => 0) : 0;
         if (byId === 0 && (await named.count().catch(() => 0)) > 0) {
-          const target = named.and(within().getByRole(field.kind, { name: option, exact: true }));
-          if ((await target.count()) === 0) throw new FieldUnfillable("the option was not found");
-          await target.first().check({ timeout: 10_000 });
+          if (field.kind === "radio") {
+            // Match the label read from this group, including when ARIA gives it a different name.
+            const target = named.and(within().locator(`[data-ia-radio-option="${cssValue(option)}"]`));
+            const count = await target.count();
+            if (count === 0) throw new FieldUnfillable("the option was not found");
+            if (count > 1) throw new FieldUnfillable("more than one option matched");
+            try {
+              await target.check({ timeout: 10_000 });
+            } catch {
+              // Styled or hidden radios (such as Jobvite's 0x0 radios) fail actionability. Fall back to clicking
+              // the associated label (`<label for="...">`) or dispatching a click, and ensure form validation triggers.
+              const id = await target.getAttribute("id").catch(() => null);
+              const label = id ? within().locator(`label[for="${cssValue(id)}"]`) : null;
+              if (label && (await label.count().catch(() => 0)) > 0) {
+                await label.first().click({ timeout: 10_000 });
+              } else {
+                await target.dispatchEvent("click");
+              }
+              await target.evaluate((input: HTMLInputElement) => {
+                if (!input.checked) input.checked = true;
+                input.dispatchEvent(new Event("input", { bubbles: true }));
+                input.dispatchEvent(new Event("change", { bubbles: true }));
+              }).catch(() => undefined);
+            }
+          } else {
+            const target = named.and(within().getByRole(field.kind, { name: option, exact: true }));
+            if ((await target.count()) === 0) throw new FieldUnfillable("the option was not found");
+            await target.first().check({ timeout: 10_000 });
+          }
           return;
         }
       }
@@ -513,7 +573,20 @@ export function createPlaywrightPage(page: Page): BrowserPage {
       return true;
     },
     attachedDocumentNames: async () => (scope ? attachedNamesFromText(await scope.innerText()) : []),
-    applicationDialogOpen: async () => (scope ? scope.isVisible() : false),
+    applicationDialogOpen: async () => {
+      if (scope) return scope.isVisible().catch(() => false);
+      try {
+        await ensureNameShim(page);
+        return await page.evaluate(() => {
+          const dialog = document.querySelector('[role="dialog"], dialog[open], .MuiDialog-root, [aria-modal="true"]');
+          if (!dialog) return false;
+          const el = dialog as HTMLElement;
+          return el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden" && getComputedStyle(el).display !== "none";
+        });
+      } catch {
+        return false;
+      }
+    },
     waitForFormReady: async () => {
       await waitForStableControls(() => root().locator(FORM_CONTROLS).count());
     },
@@ -548,6 +621,7 @@ export function createPlaywrightPage(page: Page): BrowserPage {
       // (iCIMS draws the job inside a same-host iframe). One entry, at most.
       try {
         await ensureNameShim(page);
+        await dismissCookieBanner(page);
         const pageHost = hostOf(page.url());
         const main = page.mainFrame();
         const frames = [main, ...page.frames().filter((frame) => frame !== main && pageHost !== null && hostOf(frame.url()) === pageHost)];
@@ -563,6 +637,7 @@ export function createPlaywrightPage(page: Page): BrowserPage {
         }
         const chosen = chooseApplyEntry(page.url(), candidates);
         if (!chosen) return null;
+        await dismissCookieBanner(page);
         if (chosen.tag === "a" && chosen.href) {
           await page.goto(chosen.href, { waitUntil: "domcontentloaded" });
         } else {
@@ -647,9 +722,10 @@ function collectApplyEntriesIn(root: Element): Array<Omit<ApplyEntryCandidate, "
       element instanceof HTMLInputElement ? element.value : ""
     ].map((text) => text.replace(/\s+/g, " ").trim()).filter(Boolean);
     const className = typeof element.className === "string" ? element.className : element.getAttribute("class") ?? "";
+    const id = element.id || null;
     const index = entries.length;
     element.setAttribute("data-ia-apply-entry", String(index));
-    entries.push({ tag: anchor ? "a" : "button", href, texts, className, index });
+    entries.push({ tag: anchor ? "a" : "button", href, texts, className, index, id });
   }
   return entries;
 }
@@ -678,6 +754,7 @@ async function suggestionsFor(page: Page, input: Locator): Promise<Locator[]> {
   const sources: Locator[] = [];
   for (const id of attributes.owns.split(/\s+/).filter(Boolean)) sources.push(page.locator(`[id="${cssValue(id)}"] [role="option"]`));
   if (attributes.id) sources.push(page.locator(`[id^="react-select-${cssValue(attributes.id)}-option-"]`));
+  sources.push(page.locator('[class*="select__menu"] [role="option"], [role="listbox"] [role="option"]'));
   sources.push(page.locator(".ashby-application-form-input-autocomplete-popup-result"));
   sources.push(input.locator("xpath=ancestor::*[self::li or self::label][1]").locator(".dropdown-results > *"));
   sources.push(input.locator("xpath=ancestor::*[position() <= 5]").locator('[role="option"]'));
@@ -730,16 +807,28 @@ async function chooseSuggestion(page: Page, input: Locator, field: BrowserField,
         const texts = (await source.allInnerTexts().catch(() => [] as string[])).map((text) => text.replace(/\s+/g, " ").trim());
         if (!texts.some(Boolean)) continue;
         const match = matchSuggestion(value, texts);
-        if (match !== null) found = { source, index: texts.indexOf(match) };
-        break;
+        if (match !== null) {
+          found = { source, index: texts.indexOf(match) };
+          break;
+        }
       }
       if (!found) await page.waitForTimeout(250);
     }
     return found;
   };
-  let picked = await search(value);
+  const candidates: string[] = [value];
+  const hyphenated = value.replace(/,\s*/g, " - ");
+  if (hyphenated !== value) candidates.push(hyphenated);
+  for (const term of promptSearchTerms(value)) {
+    if (!candidates.includes(term)) candidates.push(term);
+  }
   const city = value.includes(",") ? value.slice(0, value.indexOf(",")).trim() : "";
-  if (!picked && city) picked = await search(city);
+  if (city && !candidates.includes(city)) candidates.push(city);
+  let picked: { source: Locator; index: number } | null = null;
+  for (const term of candidates) {
+    picked = await search(term);
+    if (picked) break;
+  }
   if (!picked) {
     await input.fill("", { timeout: 5_000 }).catch(() => undefined);
     await page.keyboard.press("Escape").catch(() => undefined);
@@ -914,20 +1003,66 @@ function readInvalidFieldsIn(root: Element): InvalidField[] {
 /** Visible alert and error texts, deduplicated and clipped. Runs in the page. */
 function readAlertTextIn(): string {
   const texts: string[] = [];
+  const docTitle = (document.title ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+  const headings = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"]'))
+    .map((h) => ((h as HTMLElement).innerText ?? h.textContent ?? "").replace(/\s+/g, " ").trim().toLowerCase())
+    .filter(Boolean);
+
   for (const element of Array.from(document.querySelectorAll('[role="alert"], [aria-live="assertive"], [id$="-error"], .error, .error-message, .flash-error'))) {
     if (element.getClientRects().length === 0) continue;
     const text = ((element as HTMLElement).innerText ?? element.textContent ?? "").replace(/\s+/g, " ").trim();
-    if (text && !texts.includes(text)) texts.push(text);
+    if (!text) continue;
+
+    const isExplicitError =
+      Boolean(element.id && element.id.endsWith("-error")) ||
+      element.matches('.error, .error-message, .flash-error, [id$="-error"]');
+
+    const hasErrorKeyword = /\b(?:error|errors|problem|failed|failure|invalid|required|sorry|unable|cannot|denied|wrong|rejected|unsuccessful|already applied|deadline|closed)\b/i.test(text);
+
+    if (!isExplicitError && !hasErrorKeyword) {
+      if (element.matches('h1, h2, h3, h4, h5, h6, header, [role="heading"], [role="banner"]') || element.closest('header, [role="banner"]')) {
+        continue;
+      }
+      if (/^(?:apply\s*[-–—:]|application\s*[-–—:]|job\s+application\s*[-–—:]|apply$|application$)/i.test(text)) {
+        continue;
+      }
+      const lower = text.toLowerCase();
+      if (docTitle && (docTitle === lower || docTitle.startsWith(lower) || lower.startsWith(docTitle) || (docTitle.length > 5 && (docTitle.includes(lower) || lower.includes(docTitle))))) {
+        continue;
+      }
+      if (headings.some((h) => h === lower || (h.length > 5 && (h.includes(lower) || lower.includes(h))))) {
+        continue;
+      }
+    }
+
+    if (!texts.includes(text)) texts.push(text);
   }
   return texts.join(" ").slice(0, 300);
 }
 
-/** The text of the first shown post-submit success container (Ashby's), collapsed and clipped; "" when none. Runs in the page. */
+/** The text of the first shown post-submit success container (Ashby's, Dover's MUI alert/snackbar, or status toast), collapsed and clipped; "" when none. Runs in the page. */
 function readSuccessTextIn(): string {
-  for (const element of Array.from(document.querySelectorAll(".ashby-application-form-success-container"))) {
+  const SELECTORS = [
+    ".ashby-application-form-success-container",
+    '[data-testid="application-form-success"]',
+    ".MuiAlert-standardSuccess",
+    ".MuiAlert-colorSuccess",
+    ".MuiSnackbar-root",
+    '[data-testid="toast"]',
+    '[role="status"]'
+  ].join(", ");
+  for (const element of Array.from(document.querySelectorAll(SELECTORS))) {
     if (element.getClientRects().length === 0) continue;
+    const className = typeof (element as HTMLElement).className === "string" ? (element as HTMLElement).className : element.getAttribute("class") ?? "";
+    if (/error|danger|invalid|refused/i.test(className)) continue;
     const text = ((element as HTMLElement).innerText ?? element.textContent ?? "").replace(/\s+/g, " ").trim();
-    if (text) return text.slice(0, 2_000);
+    if (!text) continue;
+    if (element.matches(".ashby-application-form-success-container, .MuiAlert-standardSuccess, .MuiAlert-colorSuccess, [data-testid='application-form-success']")) {
+      return text.slice(0, 2_000);
+    }
+    if (/\b(applied|submitted|received|thanks|thank you|success|sent)\b/i.test(text)) {
+      return text.slice(0, 2_000);
+    }
   }
   return "";
 }
@@ -986,7 +1121,7 @@ export function attachedNamesFromText(text: string): string[] {
 function collectControlsIn(root: Element): RawControl[] {
   const controls: RawControl[] = [];
   const TOKEN = /^(?:g-recaptcha-response|h-captcha-response|cf-turnstile-response)(?:-\d+)?$/i;
-  const GENERIC_FILE = /^(?:attach|upload|choose (?:a )?file|browse|select (?:a )?file|add (?:a )?file|drop (?:files? )?here.*)$/i;
+  const GENERIC_FILE = /^(?:attach|upload|choose (?:a )?file|browse|select|select (?:a )?file|add (?:a )?file|drop (?:files? )?here.*)$/i;
   const MARKER = /\s*(?:[*∗✱＊]+|\(required\))\s*$/i;
   const CONTROL = "input, textarea, select, button";
   /** Buttons and links: their text (Oracle JET's "Discard" label span) never labels a control. */
@@ -1034,8 +1169,11 @@ function collectControlsIn(root: Element): RawControl[] {
   /** A control that is a question of its own (buttons, hidden inputs, and the token field are not). */
   const isQuestion = (element: Element): boolean => {
     if (element instanceof HTMLButtonElement) return false;
+    if (element.getAttribute("aria-hidden") === "true") return false;
+    if ((element as HTMLElement).hidden) return false;
     const input = element as HTMLInputElement;
     if (input instanceof HTMLInputElement && ["hidden", "submit", "image", "button", "reset"].includes(input.type)) return false;
+    if (/^oda-|^chatbot|chatbot/i.test(input.id || input.name || "")) return false;
     return !(TOKEN.test(input.name ?? "") || TOKEN.test(input.id ?? ""));
   };
   /**
@@ -1104,6 +1242,8 @@ function collectControlsIn(root: Element): RawControl[] {
     if (near) return near;
     return collapse(element.getAttribute("placeholder")) || nameLabel((element as HTMLInputElement).name) || undefined;
   };
+  const RESUME_LABEL = /\b(resume|cv|curriculum vitae)\b|r[eé]sum[eé]|add resume|attach resume/i;
+  const isSiblingPaste = (other: Element) => other.tagName === "TEXTAREA" && /paste|resume/i.test(other.id || other.className);
   /**
    * An upload labelled only "Attach" takes the label of its upload group or
    * nearby heading (Dover's `styles__FormLabel-…` div included); the walk
@@ -1117,13 +1257,16 @@ function collectControlsIn(root: Element): RawControl[] {
     if (grouped && !GENERIC_FILE.test(unstar(grouped))) return grouped;
     let node: Element | null = element.parentElement;
     for (let depth = 0; node && depth < 5; depth += 1, node = node.parentElement) {
-      if (Array.from(node.querySelectorAll(CONTROL)).filter((other) => isQuestion(other) && other !== element).length > 0) return own;
-      for (const candidate of Array.from(node.querySelectorAll('legend, label, [class*="label"], [class*="FormLabel"]'))) {
+      if (Array.from(node.querySelectorAll(CONTROL)).filter((other) => isQuestion(other) && other !== element && !isSiblingPaste(other)).length > 0) return own;
+      for (const candidate of Array.from(node.querySelectorAll('legend, label, [role="heading"], h1, h2, h3, h4, h5, h6, [class*="label"], [class*="FormLabel"], [class*="title"], [class*="jv-field-label"]'))) {
         if (candidate.getAttribute("for") === element.id && element.id) continue;
         if (candidate.closest(ACTION)) continue;
         if (notQuestionText(candidate)) continue;
         const text = textOf(candidate);
-        if (text && !GENERIC_FILE.test(unstar(text))) return text;
+        if (text) {
+          if (RESUME_LABEL.test(text)) return text;
+          if (!GENERIC_FILE.test(unstar(text))) return text;
+        }
       }
     }
     return own;
@@ -1222,6 +1365,11 @@ function collectControlsIn(root: Element): RawControl[] {
       const rawLabel = (group ? textOf(group.querySelector("legend")) || byIds(group.getAttribute("aria-labelledby")) || collapse(group.getAttribute("aria-label")) || textOf(titleLabel) || "" : "")
         || questionLabelNear(input) || nameLabel(input.name);
       const checked = radios.find((radio) => radio.checked);
+      const options = radios.map((radio) => {
+        const label = optionLabel(radio);
+        radio.setAttribute("data-ia-radio-option", label);
+        return label;
+      });
       controls.push({
         tag: "input",
         type: "radio",
@@ -1229,7 +1377,7 @@ function collectControlsIn(root: Element): RawControl[] {
         name: input.name,
         label: unstar(rawLabel) || undefined,
         required: radios.some((radio) => radio.required) || group?.getAttribute("aria-required") === "true" || ashbyRequired(input) || MARKER.test(rawLabel),
-        options: radios.map(optionLabel).filter(Boolean),
+        options: options.filter(Boolean),
         value: checked ? optionLabel(checked) || undefined : undefined
       });
       continue;

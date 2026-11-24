@@ -23,11 +23,13 @@ import {
 } from "@internship-agent/domain";
 import { ZodError } from "zod";
 
+import { classifyOpenPauses } from "./application-holds";
 import { ATTACHED_RESUME_FIELD, answerRunPause, continueBrowserRun, pauseContext, type RunReport } from "./browser-orchestrator";
 import { readDigestState } from "./daily-digest";
 import { redactNoticeText } from "./pass-notice";
 import { acquirePipelineLock } from "./pipeline-lock";
 import { planPauseMemory } from "./question-answers";
+import { postingQuestionContext } from "./saved-answers";
 
 /**
  * `pnpm run:questions`, `pnpm run:answer`, and `pnpm profile:answers`: answer
@@ -83,8 +85,10 @@ function errorText(error: unknown): string {
 }
 
 /** One question line, exactly as the Discord notice's questionLines writes it (without the indent). */
-function questionLine(pause: PauseRecord, n: number): string {
+function questionLine(pause: PauseRecord, n: number, correction: boolean): string {
   const label = labelOf(pause);
+  if (pause.fieldId === "site-security-code") return `Q${n} agent review: "${label}"`;
+  if (correction) return `Q${n} fix this field in the browser: "${label}"`;
   if (pause.safeguard) return `Q${n} CAPTCHA or safeguard, solve it in the browser: "${label}"`;
   if (pause.upload) return `Q${n} needs a document: "${label}"`;
   if (pause.sensitive) return `Q${n} demographic, answered for this application only: "${label}"`;
@@ -122,11 +126,6 @@ function resolveDigestRun(database: DatabaseSync, dataDir: string, n: number): B
   const run = getBrowserRun(database, item.runId);
   if (!run) throw new Error(`Digest item ${n}'s run no longer exists.`);
   return run;
-}
-
-/** Mirrors the digest's classifyHold: open, not a safeguard, not an "Unlabeled <tag> control <n>" recognition gap. */
-function digestAsks(pause: PauseRecord): boolean {
-  return pause.status === "open" && !pause.safeguard && !/^Unlabeled \S+ control \d+$/.test(pause.label.trim());
 }
 
 /** Exactly one of `--run <ref>` / `--digest <n>`; null when neither, both, or a digest number that is not a positive integer. */
@@ -197,12 +196,11 @@ export async function runQuestionsCommand(argv: string[], deps: Partial<RunComma
     io.log(`Run ${ref(run.id)}: ${name} (${run.status})`);
     if ("digest" in target) {
       // The digest shows a run's asks in this order (up to two), so a reply like "1: yes, May 15" maps onto these Q numbers.
-      const asks = run.pauses.flatMap((pause, index) => (digestAsks(pause) ? [`Q${index + 1}`] : []));
+      const asks = classifyOpenPauses(run.pauses).filter(({ kind }) => kind === "question").map(({ index }) => `Q${index + 1}`);
       io.log(`Digest item ${target.digest} (asks in this order: ${asks.length > 0 ? asks.join(", ") : "none"})`);
     }
     let count = 0;
-    for (const [index, pause] of run.pauses.entries()) {
-      if (pause.status !== "open") continue;
+    for (const { index, pause, kind: routing } of classifyOpenPauses(run.pauses)) {
       count += 1;
       const kind = pause.fieldKind ?? "unknown kind";
       let options = "";
@@ -213,18 +211,20 @@ export async function runQuestionsCommand(argv: string[], deps: Partial<RunComma
       }
       let hint: string;
       if (pause.fieldId === ATTACHED_RESUME_FIELD) hint = "answer yes to keep it";
+      else if (pause.fieldId === "site-security-code") hint = "no candidate answer requested";
+      else if (routing === "correction") hint = "cannot be answered here; fix the field in the browser";
       else if (pause.safeguard) hint = "cannot be answered here; solve it in the browser";
       else if (pause.upload) hint = "cannot be answered here; attach it in the browser";
       else {
         const plan = await planPauseMemory(pause, {
           companyName: posting?.companyName ?? null,
-          context: pauseContext(pause.suggestedScope) ?? {}
+          context: { ...postingQuestionContext(posting), ...(pauseContext(pause.suggestedScope) ?? {}) }
         });
         if (plan.path === "fact") hint = `would be saved as ${factDefinitions[plan.key].label.toLocaleLowerCase("en-US")}`;
         else if (plan.path === "question") hint = "would be saved for reuse";
         else hint = `this run only (${notSavedReasonText(plan.reason)})`;
       }
-      io.log(`${questionLine(pause, index + 1)} — ${kind}${options} — ${hint}`);
+      io.log(`${questionLine(pause, index + 1, routing === "correction")} — ${kind}${options} — ${hint}`);
     }
     if (count > 0) {
       io.log(`${count} open question(s).`);

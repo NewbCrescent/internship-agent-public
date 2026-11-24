@@ -19,8 +19,8 @@ export const AUTO_SUBMIT_MIN_FIT_FLOOR = 40;
 export type AutoSubmitSettings = {
   /** Lowest current AI score an automatic submission accepts. */
   minFit: number;
-  /** Automatic submissions per local calendar day. */
-  dailyCap: number;
+  /** Automatic submissions per local calendar day, or null for no daily cap. */
+  dailyCap: number | null;
 };
 
 /**
@@ -35,9 +35,10 @@ export function autoSubmitSettings(env: Record<string, string | undefined> = pro
     const value = raw?.trim();
     return value && /^\d+$/.test(value) ? Math.min(max, Math.max(min, Number.parseInt(value, 10))) : fallback;
   };
+  const dailyCap = env.INTERNSHIP_AGENT_AUTO_SUBMIT_DAILY_CAP?.trim();
   return {
     minFit: whole(env.INTERNSHIP_AGENT_AUTO_SUBMIT_MIN_FIT, AUTO_SUBMIT_DEFAULT_MIN_FIT, AUTO_SUBMIT_MIN_FIT_FLOOR, 100),
-    dailyCap: whole(env.INTERNSHIP_AGENT_AUTO_SUBMIT_DAILY_CAP, 10, 1, 50)
+    dailyCap: dailyCap === "unlimited" ? null : whole(dailyCap, 10, 1, 50)
   };
 }
 
@@ -49,21 +50,23 @@ type RunForAutoSubmit = {
   atsConfirmed: boolean;
   /** The kind the classifier suggested when the run was not confirmed automatically. */
   suggestedAtsKind?: string | null;
-  pauses: ReadonlyArray<{ safeguard: boolean }>;
+  pauses: ReadonlyArray<{ safeguard: boolean; status?: string }>;
   decisions: ReadonlyArray<{ action: string; basis: { kind: string } | null }>;
 };
 
 /**
- * Why a filled run may not be submitted without the candidate. Any pause
- * (even one answered later), a safeguard, a site type the classifier did not
- * recognize on its own, an answer drafted in the candidate's voice, or an
- * attachment the site already held keeps the run for the candidate.
+ * Why a filled run may not be submitted without the candidate. An unanswered
+ * pause, a safeguard, a site type the classifier did not recognize on its own,
+ * an answer drafted in the candidate's voice, or an attachment the site already
+ * held keeps the run for the candidate.
  */
 export function autoSubmitBlockers(run: RunForAutoSubmit): string[] {
   const blockers: string[] = [];
   if (run.status !== "awaiting-approval") blockers.push(`The run is ${run.status}, not waiting at the submit step.`);
   if (run.pauses.some((pause) => pause.safeguard)) blockers.push("The site showed a safeguard challenge.");
-  if (run.pauses.length > 0) blockers.push("The form asked something the agent could not answer on its own.");
+  if (run.pauses.some((pause) => pause.status === "open")) {
+    blockers.push("The form has unanswered questions waiting for you.");
+  }
   if (!run.atsConfirmed) {
     const suggested = run.suggestedAtsKind;
     if (atsKindNeedsApproval(suggested)) {

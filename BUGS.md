@@ -85,7 +85,53 @@ Resolved). Next step: a read-only DOM capture of that form from a session the
 candidate opens, then the label source (aria-labelledby, a preceding
 heading) in `collectControlsIn`.
 
+### iCIMS applications stop after the account step
+
+With `INTERNSHIP_AGENT_ICIMS_ACCOUNTS=1` an automatic run creates or signs in
+to the candidate's iCIMS account (2026-11-20), but the agent does not walk
+iCIMS's multi-page application (Candidate Profile, Questions, Submit): no
+structure past the email-first step has been captured, since the read-only
+captures stopped there, and a guessed multi-page walker could click the wrong
+control. The run stops once the application shows ("… but it does not fill
+iCIMS's multi-page application yet …"), saves no run, and saves
+`icims-application` evidence for the job (screenshot and redacted text,
+`pnpm run:evidence --job <ref>`). Next step: an iCIMS adapter built from that
+evidence, after which iCIMS could leave the approval-needed kinds.
+
 ## Resolved
+
+### Known site field refusals held continued runs in submission uncertainty
+
+After a candidate answered an invalid field pause and continued a browser run,
+the run returned to `awaiting-approval` with approval cleared (`submissionApprovedAt: null`).
+However, `explainsPriorSubmit` and `receiptInvestigation` only recognized
+`field-errors` and `verification-code`, treating any site refusal captured as
+`outcome: "refused"` with `invalidFields` as a conflicting uncertainty capture,
+which routed the run to manager-owned `possible-submission` instead of candidate-owned
+`approval`. Now `isFieldRefusal` recognizes both `field-errors` and `refused` with
+non-empty `invalidFields`, allowing continued runs to proceed to approval while
+preserving uncertainty holds for genuine ambiguous submissions without field lists.
+Regressions: continued run hold routing tests in
+`testing-harness/agent/submit-evidence.integration.test.ts` (`pnpm test:agent:evidence`).
+
+
+### A new audit finding repeated every previously delivered finding
+
+A watcher held its delivery history in memory, so restarting could send the
+same prompt again. When one new finding arrived, the watcher formatted the
+entire audit, which repeated all earlier items. Regression: the SQLite-backed
+audit fixture delivers the first item, reopens the database, and verifies that
+a later injection contains only the new manager item. A failed injection
+remains pending, and resolving and reopening an item produces a new revision.
+
+### Radio choice lookup disagreed with the option label read from the form
+
+Starwood's Jobvite work authorization and sponsorship choices reopened with
+“the option was not found” after the run tried to apply the answers. The
+Jobvite Chromium fixture reproduces that error when a radio's visible label
+differs from its accessible name. The browser now selects named radios by the
+same labels it reads from their group and refuses duplicate matches. The
+fixture verifies both successful selections and the duplicate-label hold.
 
 ### Workday's sign-in after account creation got no answer
 
@@ -198,6 +244,18 @@ and the stored over-long row in
 `testing-harness/matching/match-persistence.integration.test.ts` (`pnpm
 test:matching:local`).
 
+### Workday's create-account recovery missed the email sign-in chooser
+
+Raytheon's saved page showed the email sign-in chooser after a create timeout.
+The adapter supported that chooser on entry but did not handle it when the
+create form's Sign In link opened it. The recovery now recognizes the chooser
+on the expected Workday host and selects email once. The account service also
+preserves the create timeout's request and page transition diagnostics in the
+follow-up hold or timeline event. The Chromium fixture covers the chooser
+transition and the diagnostics in an interrupted hold. Raytheon's saved
+evidence did not include the chooser's DOM marker or establish the cause of
+the live create timeout.
+
 ### Workday's create-account submit was held after 20 seconds
 
 On 2026-11-20 three automatic runs checked the terms box on Workday's
@@ -214,11 +272,24 @@ every 500 ms; a sign-in still 20); "already exists", and no answer within
 a verification screen goes to the Gmail flow, a refused sign-in holds as
 `exists` or `interrupted`); an error banner holds with Workday's redacted
 text; a CAPTCHA holds and is never solved; every hold reason names what
-happened (`workday-account-service.ts`). These holds are entries in the
+happened (`workday-account-service.ts`).
+
+If both the create-account submit and its one follow-up sign-in time out,
+the agent checks the configured mailbox once for a verification message
+associated with the pending account. It opens only a unique verification link
+whose HTTPS origin exactly matches the career site. Missing, ambiguous,
+unreadable, or off-origin mail leaves the account pending with its original
+`unexpected` hold. If opening the verification page fails, the hold uses a
+generic reason that omits the activation URL and token. A valid link uses the
+existing verification and sign-in flow.
+
+These holds are entries in the
 accounts file, not saved runs (the account step runs before the walk), so
 `pnpm pipeline:retry --held` now releases holds of kind `unexpected`, and
 the next pass signs in with the saved password. Regressions: the slow
-create, slow verify, double create, silent, lost, and banner scenarios in
+create, slow verify, double create, silent, lost, and banner scenarios and
+the six dual-timeout mailbox cases (valid, missing, ambiguous, unreadable,
+off-origin, and navigation failure) in
 `testing-harness/browser/workday-account-run.ts` (`pnpm
 test:browser:workday-account`), the no-answer and existing-account cases in
 `run-lifecycle.integration.test.ts`, and the account-hold cases in

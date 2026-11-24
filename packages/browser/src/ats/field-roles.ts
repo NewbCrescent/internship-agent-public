@@ -13,7 +13,7 @@ type RolePattern = { role: FieldRole; pattern: RegExp };
 const ROLE_PATTERNS: RolePattern[] = [
   { role: "email", pattern: /\b(e-?mail|email address)\b/i },
   { role: "phone", pattern: /\b(phone|mobile|telephone|cell)\b/i },
-  { role: "resume", pattern: /\b(resume|cv|curriculum vitae)\b/i },
+  { role: "resume", pattern: /\b(resume|cv|curriculum vitae)\b|r[eé]sum[eé]|add resume|attach resume/i },
   { role: "cover", pattern: /\bcover ?letter\b/i },
   { role: "linkedin", pattern: /linked ?in/i },
   { role: "github", pattern: /github/i },
@@ -32,7 +32,7 @@ const ROLE_PATTERNS: RolePattern[] = [
 export function classifyFieldRole(field: BrowserField): FieldRole {
   if (field.kind === "email") return "email";
   if (field.kind === "tel") return "phone";
-  if (field.kind === "file") return classifyUploadRole(field.label);
+  if (field.kind === "file") return classifyUploadRole(field.label, field.id);
   for (const { role, pattern } of ROLE_PATTERNS) {
     if (pattern.test(field.label)) return role;
   }
@@ -45,17 +45,17 @@ export function classifyFieldRole(field: BrowserField): FieldRole {
  * transcript; a cover letter or an unlabeled attachment is the candidate's
  * call, so it never silently receives the resume.
  */
-export function classifyUploadRole(label: string): "resume" | "transcript" | "cover" | "document" {
-  if (/\btranscripts?\b|\bacademic record\b/i.test(label)) return "transcript";
-  if (/\bcover ?letter\b/i.test(label)) return "cover";
-  // `\b` treats accented letters as non-word characters, so match résumé separately.
-  if (/\b(resume|cv|curriculum vitae)\b|r[eé]sum[eé]/i.test(label)) return "resume";
+export function classifyUploadRole(label: string, fieldId?: string): "resume" | "transcript" | "cover" | "document" {
+  if (/\btranscripts?\b|\bacademic record\b/i.test(label) || /\btranscript\b/i.test(fieldId ?? "")) return "transcript";
+  if (/\bcover ?letter\b/i.test(label) || /\bcover/i.test(fieldId ?? "")) return "cover";
+  if (/\b(resume|cv|curriculum vitae)\b|r[eé]sum[eé]|add resume|attach resume/i.test(label)) return "resume";
+  if (fieldId && (/^file-input-0$/i.test(fieldId) || /\b(resume|cv)\b/i.test(fieldId))) return "resume";
   return "document";
 }
 
 /** True when the form asks the candidate to upload a transcript. */
 export function hasTranscriptField(fields: BrowserField[]): boolean {
-  return fields.some((field) => field.kind === "file" && classifyUploadRole(field.label) === "transcript");
+  return fields.some((field) => field.kind === "file" && classifyUploadRole(field.label, field.id) === "transcript");
 }
 
 /** Sensitive roles pause unless the candidate's saved voluntary self-identification answer matches exactly one offered option (ats/self-identification.ts); answers given in-session are never remembered. */

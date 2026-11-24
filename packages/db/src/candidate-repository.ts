@@ -8,6 +8,7 @@ import {
   candidateProfileInputSchema,
   candidateSchema,
   COURSEWORK_FACT_KEY,
+  DERIVED_STANDARD_KEYS,
   factDefinitions,
   scopeKey,
   type Candidate,
@@ -162,6 +163,22 @@ export function saveCandidate(
   return saved;
 }
 
+/** Sets only the profile's preferred name (pnpm profile:facts); every other column is left as it is. */
+export function setCandidatePreferredName(
+  database: DatabaseSync,
+  candidateId: string,
+  preferredName: string
+): "set" | "unchanged" | "missing" {
+  const row = database.prepare("SELECT preferred_name FROM candidates WHERE id = ?").get(candidateId) as
+    | Pick<CandidateRow, "preferred_name">
+    | undefined;
+  if (!row) return "missing";
+  if (row.preferred_name === preferredName) return "unchanged";
+  database.prepare("UPDATE candidates SET preferred_name = ?, updated_at = ? WHERE id = ?")
+    .run(preferredName, new Date().toISOString(), candidateId);
+  return "set";
+}
+
 export function getCandidatePreferences(database: DatabaseSync, candidateId: string): CandidatePreference | null {
   const row = database.prepare("SELECT * FROM candidate_preferences WHERE candidate_id = ?")
     .get(candidateId) as PreferenceRow | undefined;
@@ -247,6 +264,9 @@ export type SaveCandidateFactInput = {
 export function saveCandidateFact(database: DatabaseSync, input: SaveCandidateFactInput): CandidateFact {
   if (input.key === COURSEWORK_FACT_KEY) {
     throw new Error("Relevant coursework is built from the candidate's saved courses (pnpm profile:coursework) and is never stored as a fact.");
+  }
+  if (DERIVED_STANDARD_KEYS.has(input.key)) {
+    throw new Error(`${input.key} is built from other saved answers at resolve time and is never stored as a fact.`);
   }
   const definition = factDefinitions[input.key];
   const id = randomUUID();

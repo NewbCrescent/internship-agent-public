@@ -25,7 +25,9 @@ fills their application forms in a real browser, with a human in the loop.
 5. **Submission.** Final submission needs the candidate's explicit approval. An
    opt-in auto-submit policy (`INTERNSHIP_AGENT_AUTO_SUBMIT=1` with a target
    term) may submit only runs with no hold of any kind, on postings the target
-   accepts, within a daily cap; it records itself as the policy's approval.
+   accepts and within per-company limits. The daily limit defaults to 10.
+   Set `INTERNSHIP_AGENT_AUTO_SUBMIT_DAILY_CAP=unlimited` to remove the daily
+   limit. The policy records its approval on the application timeline.
 
 A Next.js dashboard shows postings, match reports, application packages, runs
 and their holds, and the candidate profile and memory.

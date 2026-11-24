@@ -6,7 +6,10 @@ import type { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createDatabase, listApplicationEvents, persistNormalizedPosting, saveBrowserRun } from "@internship-agent/db";
+import {
+  applicationHoldTrace, createDatabase, listApplicationEvents, logApplicationEvent, persistNormalizedPosting, saveApplicationPackage,
+  saveBrowserRun, saveVerificationReport, setJobStatus, updateBrowserRun
+} from "@internship-agent/db";
 import type { BrowserRun } from "@internship-agent/domain";
 import { submitEvidenceRoot, type BrowserPage, type PostSubmitEvidence } from "@internship-agent/browser";
 import {
@@ -18,6 +21,9 @@ import {
   savePostSubmitEvidenceQuietly,
   submitEvidenceFileSchema
 } from "@internship-agent/agent";
+import { refreshApplicationHolds } from "../../packages/agent/src/application-holds";
+import { answerRunPause, continueBrowserRun } from "../../packages/agent/src/browser-orchestrator";
+import { buildAgentPrompt, deliverManagerAudit, readPipelineAudit } from "../../packages/agent/scripts/pipeline-audit";
 
 /**
  * Post-submit evidence (submit-evidence.ts) against a disposable SQLite
@@ -43,8 +49,132 @@ function disposableDatabase(): DatabaseSync {
   return createDatabase(join(disposableDirectory("internship-agent-evidence-"), "test.sqlite"));
 }
 
+describe("pipeline audit of Workday account stops", () => {
+  const WAIT = "Automatic browser run waiting: Workday fixture.wd1.myworkdayjobs.com: ";
+  const TIMEOUT = WAIT + "the account step stopped (Workday did not answer the create-account submit within 60 seconds; no same-host request observed; no page transition observed, and the sign-in after it stopped (a page the agent does not recognize)).";
+
+  function readyJob(database: DatabaseSync, company: string, blocked = false): { jobId: string; packageId: string; sourceUrl: string } {
+    const title = "Engineering Intern";
+    const sourceUrl = `https://fixture.wd1.myworkdayjobs.com/en-US/careers/job/${company}`;
+    const { jobId } = persistNormalizedPosting(database, {
+      companyName: company, title, employmentType: "INTERNSHIP", applicationType: "EXTERNAL_ATS",
+      sourceUrl, externalApplicationUrl: null, companyCareersUrl: null, contentHash: `hash-${sourceUrl}`,
+      normalizedText: title, locations: [], compensation: null, requirements: [], technologies: [],
+      constraints: { graduation: null, authorization: null, sponsorship: null, availability: null }
+    });
+    const packageId = randomUUID();
+    const at = new Date().toISOString();
+    saveApplicationPackage(database, { id: packageId, jobId, createdAt: at, summary: "Verified fixture", answers: [], bullets: [], claims: [] });
+    saveVerificationReport(database, { packageId, jobId, verifiedAt: at, checks: [], blocked });
+    setJobStatus(database, jobId, "DISCOVERED", "READY_FOR_REVIEW");
+    return { jobId, packageId, sourceUrl };
+  }
+
+  function wait(database: DatabaseSync, jobId: string, detail = TIMEOUT): void {
+    logApplicationEvent(database, { jobId, fromStatus: "READY_FOR_REVIEW", toStatus: "READY_FOR_REVIEW", detail });
+  }
+
+  it("includes a verified posting with a pre-run timeout in the agent prompt without exposing the event text", () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-audit-data-");
+    const { jobId } = readyJob(database, "FixtureTimeout");
+    wait(database, jobId, TIMEOUT + " fixture-private-context");
+
+    const audit = readPipelineAudit(database, dataDir);
+    expect(audit.total).toBe(0);
+    expect(audit.categories.ATS_BUG).toEqual([expect.objectContaining({ jobId, runId: null, ats: "workday" })]);
+    const prompt = buildAgentPrompt(audit);
+    expect(prompt).toContain("FixtureTimeout");
+    expect(prompt).toContain("Workday account step timed out");
+    expect(prompt).toContain(`Job ID: ${jobId.slice(0, 8)}`);
+    expect(prompt).not.toContain("fixture-private-context");
+    expect(prompt).not.toContain("no same-host request observed");
+    expect(prompt).not.toContain("no page transition observed");
+    database.close();
+  });
+
+  it("skips a timeout superseded by a manual gate, a later browser run, or a blocked verification", () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-audit-data-");
+    const captcha = readyJob(database, "FixtureCaptcha");
+    const signIn = readyJob(database, "FixtureSignIn");
+    const started = readyJob(database, "FixtureStarted");
+    const blocked = readyJob(database, "FixtureBlocked", true);
+    for (const { jobId } of [captcha, signIn, started, blocked]) wait(database, jobId);
+    wait(database, captcha.jobId, WAIT + "Workday shows a CAPTCHA, and the agent never solves CAPTCHAs.");
+    wait(database, signIn.jobId, WAIT + "the account step stopped (a text-message, app or other sign-in method).");
+    const now = new Date().toISOString();
+    saveBrowserRun(database, {
+      id: randomUUID(), jobId: started.jobId, applicationUrl: started.sourceUrl, status: "awaiting-approval",
+      packageId: started.packageId, variantId: null, baseResumeId: null, applicationProfile: "default",
+      atsKind: "workday", atsConfidence: 1, suggestedAtsKind: null, atsConfirmed: true,
+      decisions: [], pauses: [], submittedAnswers: null, confirmationText: null, submissionApprovedAt: null,
+      createdAt: now, updatedAt: now
+    });
+
+    const audit = readPipelineAudit(database, dataDir);
+    expect(audit.categories.ATS_BUG).toEqual([]);
+    expect(audit.categories.AWAITING_APPROVAL).toEqual([expect.objectContaining({ jobId: started.jobId })]);
+    const prompt = buildAgentPrompt(audit);
+    expect(prompt).not.toMatch(/FixtureCaptcha|FixtureSignIn|FixtureBlocked|account step timed out/);
+    database.close();
+  });
+
+  it("reports a Workday timeout only when it is newer than a target skip", () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-audit-data-");
+    const skipped = readyJob(database, "FixtureTargetSkip");
+    const unresolved = readyJob(database, "FixtureUnresolved");
+    const skip = "Not pursued for your target: Fit: AI score 30 (weak) is below the skip line of 50.";
+    wait(database, skipped.jobId);
+    wait(database, skipped.jobId, skip);
+    wait(database, unresolved.jobId, skip);
+    wait(database, unresolved.jobId);
+
+    const audit = readPipelineAudit(database, dataDir);
+    expect(audit.categories.ATS_BUG).toEqual([expect.objectContaining({ jobId: unresolved.jobId })]);
+    expect(buildAgentPrompt(audit)).not.toContain("FixtureTargetSkip");
+    database.close();
+  });
+
+  it("restarts without repeating delivered findings, retries failed injection, and traces resolution", () => {
+    const dataDir = disposableDirectory("internship-agent-audit-data-");
+    const dbPath = join(dataDir, "audit.sqlite");
+    let database = createDatabase(dbPath);
+    const prompts: string[] = [];
+    const now = new Date("2026-11-22T10:00:00Z");
+    const tick = (ok = true, idle = true) => deliverManagerAudit({
+      database, dataDir, destination: "fixture-pane", now, idle: () => idle,
+      inject(prompt) { prompts.push(prompt); return ok; }
+    });
+    const first = readyJob(database, "FixtureFirst");
+    wait(database, first.jobId, TIMEOUT + " PRIVATE_HELD_PAGE");
+    expect(tick(false)).toBe(false);
+    expect(tick(true, false)).toBe(false);
+    expect(tick()).toBe(true);
+    database.close();
+
+    database = createDatabase(dbPath);
+    expect(tick()).toBe(false);
+    const second = readyJob(database, "FixtureSecond");
+    wait(database, second.jobId);
+    expect(tick()).toBe(true);
+    expect(prompts).toHaveLength(3);
+    expect(prompts[2]).toContain("FixtureSecond");
+    expect(prompts[2]).not.toContain("FixtureFirst");
+    expect(prompts.join("\n")).not.toContain("PRIVATE_HELD_PAGE");
+    wait(database, second.jobId, "Not pursued for your target: fixture");
+    expect(tick()).toBe(false);
+    expect(applicationHoldTrace(database, second.jobId).map((event) => event.event)).toEqual(["opened", "resolved"]);
+    wait(database, second.jobId);
+    expect(tick()).toBe(true);
+    expect(applicationHoldTrace(database, second.jobId).map((event) => event.event)).toEqual(["opened", "resolved", "reopened"]);
+    database.close();
+  });
+});
+
 /** A synthetic applying posting with one failed run (fictional company). */
-function syntheticRun(database: DatabaseSync, company = "Fixture Robotics"): BrowserRun {
+function syntheticRun(database: DatabaseSync, company = "Fixture Robotics", atsKind: BrowserRun["atsKind"] = "greenhouse"): BrowserRun {
   const title = "Software Engineering Intern";
   const sourceUrl = `https://example.test/internships/${company.toLowerCase().replace(/\W+/g, "-")}`;
   const { jobId } = persistNormalizedPosting(database, {
@@ -60,10 +190,116 @@ function syntheticRun(database: DatabaseSync, company = "Fixture Robotics"): Bro
   const now = new Date().toISOString();
   return saveBrowserRun(database, {
     id: randomUUID(), jobId, applicationUrl: sourceUrl, status: "failed", packageId, variantId: null,
-    baseResumeId: null, applicationProfile: "default", atsKind: "greenhouse", atsConfidence: 1, suggestedAtsKind: null, atsConfirmed: true,
+    baseResumeId: null, applicationProfile: "default", atsKind, atsConfidence: 1, suggestedAtsKind: null, atsConfirmed: true,
     decisions: [], pauses: [], submittedAnswers: null, confirmationText: null, submissionApprovedAt: now, createdAt: now, updatedAt: now
   });
 }
+
+describe("post-submit hold evidence routing", () => {
+  function withdrawApproval(database: DatabaseSync, run: BrowserRun) {
+    updateBrowserRun(database, run.id, {
+      status: "paused-needs-input", submissionApprovedAt: null,
+      pauses: [{ fieldId: "school", label: "School", question: "School: invalid value", suggestedKey: null, suggestedScope: null,
+        safeguard: false, sensitive: false, upload: false, status: "open", answer: null, draft: null }]
+    });
+  }
+
+  const before = new Date("2026-11-20T09:00:00.000Z");
+  const after = new Date("2026-11-20T10:00:00.000Z");
+
+  it("changes prior uncertainty when withdrawn approval and structured field errors explain it", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    expect(refreshApplicationHolds(database, dataDir, before)[0]).toMatchObject({ reason: "possible-submission", revision: 1 });
+    withdrawApproval(database, run);
+    await savePostSubmitEvidence({ database, dataDir, run, page: stubPage(), evidence: evidence(), now: after });
+    expect(refreshApplicationHolds(database, dataDir, after)[0]).toMatchObject({ owner: "candidate", reason: "candidate-question", revision: 2 });
+    expect(applicationHoldTrace(database, run.jobId).map((event) => event.event)).toEqual(["opened", "changed"]);
+    database.close();
+  });
+
+  it("retains an older conflicting capture as the uncertainty anchor if it disappears", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    const unknown = await savePostSubmitEvidence({ database, dataDir, run, page: stubPage(), evidence: evidence({ outcome: "unknown" }), now: before });
+    const initial = refreshApplicationHolds(database, dataDir, before)[0]!;
+    withdrawApproval(database, run);
+    await savePostSubmitEvidence({ database, dataDir, run, page: stubPage(), evidence: evidence(), now: after });
+    expect(refreshApplicationHolds(database, dataDir, after)[0]).toEqual(initial);
+
+    rmSync(join(dataDir, unknown.relativeDir), { recursive: true });
+    expect(refreshApplicationHolds(database, dataDir, after)[0]).toEqual(initial);
+    expect(refreshApplicationHolds(database, dataDir, after)[0]).toEqual(initial);
+    database.close();
+  });
+
+  it.each(["field-errors", "refused"] as const)(
+    "routes a continued run to candidate approval after fixing a %s pause",
+    async (outcome) => {
+      const database = disposableDatabase();
+      const dataDir = disposableDirectory("internship-agent-evidence-data-");
+      const run = syntheticRun(database, `Fixture ${outcome}`);
+      withdrawApproval(database, run);
+      await savePostSubmitEvidence({
+        database,
+        dataDir,
+        run,
+        page: stubPage(),
+        evidence: evidence({
+          outcome,
+          invalidFields: [{ ref: "school", label: "School", error: "This field is required." }]
+        }),
+        now: after
+      });
+      await answerRunPause(run.id, "school", "UC Berkeley", false, { database });
+      const continued = await continueBrowserRun(run.id, {
+        database,
+        dataDir,
+        openPage: async () => stubPage()
+      });
+      expect(continued.run.status).toBe("awaiting-approval");
+      expect(continued.run.submissionApprovedAt).toBeNull();
+      const holds = refreshApplicationHolds(database, dataDir, new Date("2026-11-20T10:30:00Z"));
+      const hold = holds.find((h) => h.jobId === run.jobId);
+      expect(hold).toMatchObject({ owner: "candidate", reason: "approval" });
+      database.close();
+    }
+  );
+
+  it.each([
+    { outcome: "unknown" as const, invalidFields: [] },
+    { outcome: "refused" as const, invalidFields: [] }
+  ])(
+    "keeps ambiguous $outcome submission held in possible-submission after continuation",
+    async ({ outcome, invalidFields }) => {
+      const database = disposableDatabase();
+      const dataDir = disposableDirectory("internship-agent-evidence-data-");
+      const run = syntheticRun(database, `Fixture Ambiguous ${outcome}`);
+      withdrawApproval(database, run);
+      await savePostSubmitEvidence({
+        database,
+        dataDir,
+        run,
+        page: stubPage(),
+        evidence: evidence({ outcome, invalidFields }),
+        now: after
+      });
+      await answerRunPause(run.id, "school", "UC Berkeley", false, { database });
+      const continued = await continueBrowserRun(run.id, {
+        database,
+        dataDir,
+        openPage: async () => stubPage()
+      });
+      expect(continued.run.status).toBe("awaiting-approval");
+      const holds = refreshApplicationHolds(database, dataDir, new Date("2026-11-20T10:30:00Z"));
+      const hold = holds.find((h) => h.jobId === run.jobId);
+      expect(hold).toMatchObject({ owner: "manager", reason: "possible-submission" });
+      database.close();
+    }
+  );
+});
 
 const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -200,6 +436,31 @@ describe("post-submit evidence files", () => {
     const read = readSubmitEvidence(dataDir, run);
     expect(read.map((entry) => entry.outcome)).toEqual(["refused", "unknown"]);
     expect(readSubmitEvidence(dataDir, { id: run.id, jobId: randomUUID() })).toEqual([]);
+    database.close();
+  });
+
+  it("distinguishes the latest unconfirmed submission evidence from unproven ATS failures", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-audit-data-");
+    const unknown = syntheticRun(database, "Fixture Unknown", "dover");
+    const superseded = syntheticRun(database, "Fixture Superseded", "ashby");
+    const missing = syntheticRun(database, "Fixture Missing", "smartrecruiters");
+    const before = new Date("2026-11-20T09:00:00.000Z");
+    const after = new Date("2026-11-20T10:00:00.000Z");
+    const unconfirmed = evidence({ outcome: "unknown", text: "fixture-private-evidence" });
+    await savePostSubmitEvidence({ database, dataDir, run: unknown, page: stubPage(), evidence: unconfirmed, now: after });
+    await savePostSubmitEvidence({ database, dataDir, run: superseded, page: stubPage(), evidence: unconfirmed, now: before });
+    await savePostSubmitEvidence({ database, dataDir, run: superseded, page: stubPage(), evidence: evidence({ outcome: "refused" }), now: after });
+
+    const audit = readPipelineAudit(database, dataDir);
+    expect(audit.categories.UNCONFIRMED_SUBMISSION).toEqual([expect.objectContaining({ runId: unknown.id })]);
+    expect(audit.categories.RUN_NEEDS_REVIEW.map((item) => item.runId)).toEqual(expect.arrayContaining([superseded.id, missing.id]));
+    expect(audit.categories.ATS_BUG).toEqual([]);
+    const prompt = buildAgentPrompt(audit);
+    expect(prompt).toContain("UNCONFIRMED SUBMISSIONS");
+    expect(prompt).toContain("Fixture Unknown");
+    expect(prompt).toContain("Confirm whether the employer received the application");
+    expect(prompt).not.toMatch(/\bretry\b|fixture-private-evidence|modal dialog closed|SmartRecruiters application adapter issue/i);
     database.close();
   });
 

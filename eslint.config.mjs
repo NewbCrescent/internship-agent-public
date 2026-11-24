@@ -18,6 +18,8 @@ export default defineConfig([
     "**/coverage/**",
     "**/dist/**",
     "data/**",
-    "next-env.d.ts"
+    "next-env.d.ts",
+    "**/.claude/**",
+    "**/worktrees/**"
   ])
 ]);

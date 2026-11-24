@@ -8,6 +8,7 @@ import {
   WorkdayAccountWall,
   type WorkdayHistoryOptions,
   type FieldResolution,
+  type StandingInputs,
   type WorkdayPage,
   type WorkdayStep,
   type WorkdayStepPlan,
@@ -62,6 +63,8 @@ export type WorkdayRunContext = {
   account: { runtime: WorkdayAccountRuntime; mode: "create" | "sign-in" } | null;
   /** The company's pinned profile; "default" holds a step that asks for a transcript. */
   profileLock?: ApplicationProfile | null;
+  /** The candidate's standing consent and attestation settings for this run. */
+  standing?: StandingInputs;
 };
 
 export { WorkdaySignInRequired };
@@ -143,12 +146,13 @@ async function planWorkdayStep(step: WorkdayStep, form: RecognizedForm, context:
       legalFirstName: candidate?.legalFirstName, legalLastName: candidate?.legalLastName,
       addressLine1: candidate?.addressLine1, addressLine2: candidate?.addressLine2, addressCity: candidate?.addressCity,
       addressRegion: candidate?.addressRegion, addressPostalCode: candidate?.addressPostalCode, addressCountry: candidate?.addressCountry,
-      phoneType: candidate?.phoneType, fieldOfStudy: candidate?.fieldOfStudy
+      phoneType: candidate?.phoneType, fieldOfStudy: candidate?.fieldOfStudy, gpa: candidate?.gpa
     },
     resolutions: await context.deps.resolveFields(form, transcript),
     packageAnswers: context.packageAnswers,
     variantId: context.variantId,
-    transcriptDocumentId
+    transcriptDocumentId,
+    standing: context.standing
   });
   let { decisions, pauses } = applyAnswers(step, form, plan.decisions, plan.pauses, context.answers);
   if (context.drafter) {

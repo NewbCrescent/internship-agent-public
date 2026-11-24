@@ -161,6 +161,23 @@ export function gmailMailSessionFactory(env: Record<string, string | undefined> 
     client.on("exists", () => listener?.());
     const structures = new Map<number, StructureNode>();
 
+    async function readBody(uid: number, maxBytes: number): Promise<{ body: string; truncated: boolean }> {
+      const structure = structures.get(uid);
+      structures.delete(uid);
+      if (!structure) return { body: "", truncated: true };
+      const parts = textParts(structure);
+      const part = parts.plain ?? parts.html;
+      if (!part) return { body: "", truncated: true };
+      const download = await client.download(String(uid), part, { uid: true, maxBytes });
+      const raw = await streamText(download.content);
+      const body = parts.plain ? raw : htmlToText(raw);
+      return {
+        body: body.slice(0, 20_000),
+        truncated: !download.content || body.length >= 20_000 || Buffer.byteLength(raw) >= maxBytes
+          || (download.meta?.expectedSize ?? maxBytes) >= maxBytes
+      };
+    }
+
     return {
       uidValidity: String(box.uidValidity),
       uidNext: box.uidNext,
@@ -195,17 +212,8 @@ export function gmailMailSessionFactory(env: Record<string, string | undefined> 
         }
         return rows.sort((a, b) => a.uid - b.uid);
       },
-      async bodyText(uid, maxBytes) {
-        const structure = structures.get(uid);
-        structures.delete(uid);
-        if (!structure) return "";
-        const parts = textParts(structure);
-        const part = parts.plain ?? parts.html;
-        if (!part) return "";
-        const download = await client.download(String(uid), part, { uid: true, maxBytes });
-        const text = await streamText(download.content);
-        return (parts.plain ? text : htmlToText(text)).slice(0, 20_000);
-      },
+      async bodyText(uid, maxBytes) { return (await readBody(uid, maxBytes)).body; },
+      bodyForReceipt: readBody,
       onNewMail(callback) {
         listener = callback;
       },

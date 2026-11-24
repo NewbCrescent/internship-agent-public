@@ -236,17 +236,28 @@ describe("saved answer mappings", () => {
       await notMapped("This role is based in our Fixture City office and involves working primarily in person. Are you willing and able to work from this location?");
     });
 
+    // Salary, FDA/OIG debarment, DoD clearance eligibility, and the 50-mile question now map to the
+    // standard legal and background answers (standard-question-mapper.ts; see the table below).
     it("leaves questions that need the candidate's own answer unmapped", async () => {
       for (const question of [
-        "What are your base salary expectations for this role?",
-        "Have you ever been or currently debarred by the U.S. FDA or excluded by the OIG?",
         "CONFLICT OF INTEREST: Do you currently, or have you in the last 5 years, worked for the US government (e.g., Congressional staffer, member of the military, state, or federal agencies) and had oversight or similar responsibility over Fixture Robotics’s business or other interests?",
         "EXPORT CONTROLS - This position requires access to information and technology that is subject to U.S. export controls.",
-        "Are you eligible for a U.S. Department of Defense security clearance?",
-        "Do you currently reside within 50 miles from Fixture City, California?",
         "HISTORY WITH FIXTURE ROBOTICS: Have you previously applied to a position at Fixture Robotics?",
         "Preferred First Name"
       ]) await notMapped(question);
+    });
+
+    it("maps the earlier unmapped legal and background phrasings to the standard answers", async () => {
+      expect(await mapper.map("What are your base salary expectations for this role?", context)).toMatchObject({ status: "MAPPED", key: "salary_expectation" });
+      expect(await mapper.map("Have you ever been or currently debarred by the U.S. FDA or excluded by the OIG?", context)).toMatchObject({
+        status: "MAPPED", key: "government_debarment_or_exclusion", narrower: true
+      });
+      expect(await mapper.map("Are you eligible for a U.S. Department of Defense security clearance?", context)).toMatchObject({
+        status: "MAPPED", key: "security_clearance_eligible"
+      });
+      expect(await mapper.map("Do you currently reside within 50 miles from Fixture City, California?", context)).toMatchObject({
+        status: "MAPPED", key: "lives_within_50_miles", scope: { kind: "location", name: "Fixture City, California" }
+      });
     });
 
     it("maps worked-here history and the posting country's authorization and sponsorship", async () => {
@@ -266,5 +277,114 @@ describe("saved answer mappings", () => {
         scope: { kind: "country", code: "US" }
       });
     });
+  });
+});
+
+describe("standard legal and background phrasings (fictional companies and places)", () => {
+  type Expected = { key: string; scope?: object; narrower?: boolean } | "AMBIGUOUS" | "UNMAPPED";
+  type Row = [question: string, expected: Expected, context?: Record<string, unknown>];
+  const global = { kind: "global" };
+  const rows: Row[] = [
+    // Citizenship and export control.
+    ["Are you a U.S. citizen?", { key: "us_citizen", scope: global }],
+    ["Are you a citizen of the United States?", { key: "us_citizen" }],
+    ["U.S. Citizen", { key: "us_citizen" }],
+    ["What is your U.S. citizenship status?", { key: "us_citizen" }, { fieldKind: "select" }],
+    ["What is your U.S. citizenship status?", "AMBIGUOUS", { fieldKind: "text" }],
+    ["Are you a U.S. person as defined by ITAR/EAR?", { key: "us_person" }],
+    ["Are you a 'U.S. Person' under the International Traffic in Arms Regulations (ITAR) and Export Administration Regulations (EAR)?", { key: "us_person" }],
+    ["Which of the following describes your U.S. person status for export-control purposes?", { key: "us_person_export_controls" }],
+    ["EXPORT CONTROLS - This position requires access to information and technology that is subject to U.S. export controls.", { key: "us_person_export_controls" }, { fieldKind: "radio" }],
+    ["EXPORT CONTROLS - This position requires access to information and technology that is subject to U.S. export controls.", "AMBIGUOUS"],
+    ["Are you a U.S. citizen or lawful permanent resident?", { key: "us_citizen_or_permanent_resident" }],
+    ["Are you a U.S. citizen or national?", { key: "us_citizen_or_national" }],
+    ["Are you a U.S. citizen, permanent resident, refugee, or asylee?", { key: "us_person" }],
+    ["Do you hold dual citizenship?", "AMBIGUOUS"],
+    // Clearance.
+    ["Do you currently hold an active security clearance?", { key: "holds_security_clearance" }],
+    ["Do you have an active Secret or Top Secret clearance?", { key: "holds_security_clearance" }],
+    ["Are you eligible to obtain a security clearance?", { key: "security_clearance_eligible" }],
+    ["Are you eligible for a U.S. Department of Defense security clearance?", { key: "security_clearance_eligible" }],
+    ["Do you currently hold an active security clearance, or are you eligible to obtain one?", "AMBIGUOUS"],
+    ["Have you ever held a security clearance?", "AMBIGUOUS"],
+    // Criminal history.
+    ["Have you ever been convicted of a crime?", { key: "criminal_conviction" }],
+    ["Have you been convicted of a felony?", { key: "criminal_conviction", narrower: true }],
+    ["Have you ever been convicted of a felony or misdemeanor (excluding minor traffic violations)?", { key: "criminal_conviction", narrower: true }],
+    ["Have you ever been arrested or convicted of a crime?", "AMBIGUOUS"],
+    // Debarment.
+    ["Have you ever been debarred, suspended, or excluded from participation in any federal government program?", { key: "government_debarment_or_exclusion" }],
+    ["Have you ever been or currently debarred by the U.S. FDA or excluded by the OIG?", { key: "government_debarment_or_exclusion", narrower: true }],
+    // Restrictive covenants.
+    ["Are you subject to a non-compete agreement?", { key: "non_compete" }],
+    ["Are you subject to a non-solicitation agreement?", { key: "non_solicitation" }],
+    ["Are you subject to a non-compete or non-solicitation agreement?", { key: "non_compete_or_non_solicitation" }],
+    ["Are you bound by any restrictive covenants, such as a non-compete or non-solicitation agreement?", { key: "non_compete_or_non_solicitation" }],
+    ["Are you bound by any restrictive covenants?", "AMBIGUOUS"],
+    ["Are you subject to a non-disclosure or non-compete agreement?", "AMBIGUOUS"],
+    ["When does your non-solicitation agreement end?", "AMBIGUOUS"],
+    ["Please describe your non-solicitation agreement.", { key: "non_solicitation_explanation" }, { fieldKind: "textarea" }],
+    ["Are you subject to a non-solicitation agreement? If yes, please explain.", { key: "non_solicitation" }, { fieldKind: "radio" }],
+    ["Are you subject to a non-solicitation agreement? If yes, please explain.", { key: "non_solicitation_explanation" }, { fieldKind: "textarea" }],
+    ["Would your non-solicitation agreement restrict you from performing the duties of this role?", { key: "non_solicitation_restricts_this_job" }],
+    // Conflicts, relatives in government or health care.
+    ["Do you have any potential conflicts of interest?", { key: "conflict_of_interest" }],
+    ["Do you have any relatives employed by a government agency or who are public officials?", { key: "relative_government_official" }],
+    ["Is any member of your immediate family a government official?", { key: "relative_government_official", narrower: true }],
+    ["Are any of your immediate family members health care professionals?", { key: "immediate_family_health_care_professional" }],
+    ["Are any of your immediate family members practicing health care professionals that may use or purchase Fixture Robotics products?",
+      { key: "immediate_family_health_care_professional", narrower: true }, { companyName: "Fixture Robotics", postingCountryCode: "US" }],
+    ["Are any of your relatives health care professionals?", "AMBIGUOUS"],
+    // Living within 50 miles: scoped to the named place, never another.
+    ["Do you live within 50 miles of San Francisco?", { key: "lives_within_50_miles", scope: { kind: "location", name: "San Francisco" } }],
+    ["Do you currently reside within 50 miles of San Francisco, CA?", { key: "lives_within_50_miles", scope: { kind: "location", name: "San Francisco" } }],
+    ["Are you located within 50 miles of our San Francisco office?", { key: "lives_within_50_miles", scope: { kind: "location", name: "San Francisco" } }],
+    ["Do you currently reside within 50 miles from Fixture City, California?", { key: "lives_within_50_miles", scope: { kind: "location", name: "Fixture City, California" } }],
+    ["Do you live within 50 miles of Austin, TX?", { key: "lives_within_50_miles", scope: { kind: "location", name: "Austin, TX" } }],
+    ["Do you live within 50 miles of South San Francisco?", { key: "lives_within_50_miles", scope: { kind: "location", name: "South San Francisco" } }],
+    ["Do you live within 30 miles of San Francisco?", "AMBIGUOUS"],
+    // Department of Defense work.
+    ["Do you have concerns working on Department of Defense projects?", { key: "concerns_working_on_dod_projects" }],
+    ["Do you have any concerns about working on DoD-funded programs?", { key: "concerns_working_on_dod_projects" }],
+    ["Are you comfortable working on Department of Defense projects?", "AMBIGUOUS"],
+    // Salary.
+    ["What are your salary expectations?", { key: "salary_expectation" }],
+    ["Desired hourly rate", { key: "salary_expectation" }],
+    ["What are your base salary expectations for this role?", { key: "salary_expectation" }],
+    ["What is your current salary?", "AMBIGUOUS"],
+    ["Are you comfortable with the pay range for this role?", "AMBIGUOUS"],
+    // Combined, negated, and statement forms.
+    ["Are you a U.S. citizen and do you hold an active security clearance?", "AMBIGUOUS"],
+    ["I have never been convicted of a felony", "AMBIGUOUS"],
+    ["I am a U.S. citizen", { key: "us_citizen" }],
+    // Left to the other rules.
+    ["Preferred first name", "UNMAPPED"]
+  ];
+
+  it.each(rows)("maps %s", async (question, expected, context = {}) => {
+    const result = await mapper.map(question, context);
+    if (typeof expected === "string") {
+      expect(result.status, JSON.stringify(result)).toBe(expected);
+      return;
+    }
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "MAPPED", key: expected.key, method: "deterministic", ...(expected.scope ? { scope: expected.scope } : {}) });
+    if (result.status === "MAPPED") expect(result.narrower === true, question).toBe(expected.narrower === true);
+  });
+
+  it("keeps relatives at the company on its own key", async () => {
+    expect(await mapper.map("Do you have any relatives working at Fixture Robotics?", { companyName: "Fixture Robotics" })).toMatchObject({
+      status: "MAPPED", key: "relatives_at_company", scope: { kind: "company", name: "fixture robotics" }
+    });
+  });
+
+  it("scopes Starwood-style \"Work Authorization\" and \"Visa Sponsorship\" labels to the posting's one country only", async () => {
+    expect(await mapper.map("Work Authorization", { postingCountryCode: "US" })).toMatchObject({
+      status: "MAPPED", key: "authorized_to_work", scope: { kind: "country", code: "US" }
+    });
+    expect(await mapper.map("Visa Sponsorship", { postingCountryCode: "US" })).toMatchObject({
+      status: "MAPPED", key: "requires_sponsorship", scope: { kind: "country", code: "US" }
+    });
+    expect(await mapper.map("Work Authorization")).toMatchObject({ status: "AMBIGUOUS" });
+    expect(await mapper.map("Visa Sponsorship")).toMatchObject({ status: "AMBIGUOUS" });
   });
 });

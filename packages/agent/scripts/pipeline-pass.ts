@@ -11,7 +11,8 @@ import { advancePipeline, pipelineSettings, type PipelineReport } from "../src/p
 import { readDoorbellState, ringListDoorbell, writeDoorbellState } from "../src/list-doorbell";
 import { acquirePipelineLock, readPipelineLock } from "../src/pipeline-lock";
 import { discordFailureStatus, discordSettings, type DiscordTransport } from "../src/discord-notify";
-import { notifyPass, passFailureItem, passNoticeItems, type NoticeItem } from "../src/pass-notice";
+import { notifyPass, passNoticeItems, type NoticeItem } from "../src/pass-notice";
+import { recordApplicationHoldFailures, refreshApplicationHolds } from "../src/application-holds";
 import { dailyDigestTick, type DigestTickOptions } from "../src/daily-digest";
 
 export type PassLog = (line: string) => void;
@@ -53,9 +54,11 @@ export async function runPipelinePass(options: {
     const database = getProfileDatabase(profile);
     const settings = pipelineSettings();
     const startedAt = new Date().toISOString();
+    const autoSubmit = settings.autoSubmit;
+    const dailyCapLabel = autoSubmit?.dailyCap == null ? "no daily cap" : `${autoSubmit.dailyCap}/day`;
     log(`Workspace ${profile}; model ${process.env.MODEL_API_KEY ? "configured" : "not configured"}; min fit ${settings.minFit}; ` +
       `auto-apply ${settings.autoApply ? "on" : "off"}; target ${settings.target ? `${settings.target.season} ${settings.target.year}` : "none"}; ` +
-      `auto-submit ${settings.autoSubmit ? `on (AI ${settings.autoSubmit.minFit}+, ${settings.autoSubmit.dailyCap}/day)` : "off"}.`);
+      `auto-submit ${autoSubmit ? `on (AI ${autoSubmit.minFit}+, ${dailyCapLabel})` : "off"}.`);
     const sources = listDiscoverySources(database).filter((entry) => entry.enabled && entry.url &&
       (options.sourceIds === "all" || options.sourceIds.includes(entry.id)));
     for (const source of sources) {
@@ -76,8 +79,13 @@ export async function runPipelinePass(options: {
     for (const entry of report.skipped) log(`  ruled out ${name(entry.jobId)}: ${entry.reasons.join(" ")}`);
     for (const entry of report.started) log(`  run ${name(entry.jobId)}: ${entry.runStatus}`);
     for (const entry of report.stopped) log(`  stopped ${name(entry.jobId)}: ${entry.reason.replace(/\s+/g, " ").slice(0, 300)}`);
-    if (report.waiting.length) {
-      log(`Workday: ${report.waiting.length} applications wait for sign-in on ${new Set(report.waiting.map((entry) => entry.siteKey)).size} sites.`);
+    const workdayWaiting = report.waiting.filter((entry) => entry.reason.startsWith("workday"));
+    const icimsWaiting = report.waiting.filter((entry) => entry.reason === "icims-account");
+    if (workdayWaiting.length) {
+      log(`Workday: ${workdayWaiting.length} applications wait for sign-in on ${new Set(workdayWaiting.map((entry) => entry.siteKey)).size} sites.`);
+    }
+    if (icimsWaiting.length) {
+      log(`iCIMS: ${icimsWaiting.length} applications wait on ${new Set(icimsWaiting.map((entry) => entry.siteKey)).size} sites.`);
     }
     for (const error of report.errors) log(`  ${error}`);
     writeStatus(dataDir, {
@@ -90,26 +98,28 @@ export async function runPipelinePass(options: {
       errors: report.errors.map((error) => error.slice(0, 500))
     });
     result = report;
-    if (discord) {
-      try {
+    try {
+      recordApplicationHoldFailures(database, report.errors);
+      const holds = refreshApplicationHolds(database, dataDir);
+      if (discord) {
         notice = passNoticeItems(report, {
+          holds,
           posting: (jobId) => getJobPosting(database, jobId),
           latestRun: (jobId) => {
             const run = listBrowserRuns(database, jobId)[0];
             return run ? {
               id: run.id, status: run.status,
-              pauses: run.pauses.map(({ label, status, safeguard, sensitive, upload }) => ({ label, status, safeguard, sensitive, upload }))
+              pauses: run.pauses.map(({ label, status, safeguard, sensitive, upload, fieldId }) => ({ label, status, safeguard, sensitive, upload, fieldId }))
             } : null;
           },
           recordSaved: (jobId) => existsSync(applicationRecordPdfPath(dataDir, jobId))
         });
-      } catch (error) {
-        safeLog(`Discord notify failed: ${discordFailureStatus(error)}`);
       }
+    } catch (error) {
+      safeLog(`Hold refresh failed: ${discordFailureStatus(error)}`);
     }
   } catch (error) {
     failure = { error };
-    if (discord) notice = [passFailureItem(error)];
   } finally {
     try {
       // Closes and forgets the cached handle, so a later pass in this process opens a fresh one.
@@ -121,7 +131,7 @@ export async function runPipelinePass(options: {
     }
   }
   // Sent after the lock is released, so a slow or failing Discord call never holds the lock or fails the pass.
-  await notifyPass({ dataDir, items: notice, settings: discord, transport: options.notify, log: safeLog });
+  await notifyPass({ dataDir, profile, items: notice, settings: discord, transport: options.notify, log: safeLog });
   if (failure) throw failure.error;
   if (!result) throw new Error("Pipeline pass finished without a report.");
   return result;

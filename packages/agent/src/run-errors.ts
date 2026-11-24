@@ -10,3 +10,10 @@ export class WorkdaySignInRequired extends Error {}
  * the hold allows (see `workdayAccountWait`).
  */
 export class WorkdayAccountHeld extends WorkdaySignInRequired {}
+
+/**
+ * An iCIMS account step (email, create profile, sign in, verify the email) is
+ * held for the candidate or for a later pass. The job keeps its status and is
+ * retried once the hold allows (see `icimsAccountWait`).
+ */
+export class IcimsAccountHeld extends Error {}

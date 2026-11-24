@@ -22,8 +22,14 @@ import type { BrowserPage } from "./handshake-executor";
  * Two outcomes are Workday stops, not submit clicks:
  * - `workday-account`: the Workday account step (sign-in or create account) held the host.
  * - `workday-errors`: Workday would not save an application step and showed errors.
+ *
+ * Two are iCIMS stops, not submit clicks either:
+ * - `icims-account`: the iCIMS account step held the host.
+ * - `icims-application`: the agent reached iCIMS's application after the account step and stopped there.
  */
-export type PostSubmitOutcome = "field-errors" | "refused" | "challenged" | "verification-code" | "unknown" | "workday-account" | "workday-errors";
+export type PostSubmitOutcome =
+  | "field-errors" | "refused" | "challenged" | "verification-code" | "unknown" | "workday-account" | "workday-errors"
+  | "icims-account" | "icims-application";
 
 /** A field the page marks invalid: the control's id (else name, else data-ia-control tag), its label, and the site's error text. */
 export type InvalidField = { ref: string | null; label: string; error: string };
@@ -68,6 +74,8 @@ export function stripUrlQuery(url: string): string {
 
 const GREENHOUSE_HOSTS = new Set(["job-boards.greenhouse.io", "job-boards.eu.greenhouse.io", "boards.greenhouse.io", "boards.eu.greenhouse.io"]);
 const LEVER_HOSTS = new Set(["jobs.lever.co", "jobs.eu.lever.co"]);
+const ASHBY_HOSTS = new Set(["jobs.ashbyhq.com", "ashbyhq.com"]);
+const DOVER_HOSTS = new Set(["app.dover.io", "jobs.dover.com", "dover.io", "dover.com"]);
 
 /** A Greenhouse job-board page (new or classic board, US or EU). */
 export function isGreenhouseBoardUrl(url: string): boolean {
@@ -80,8 +88,9 @@ export function isGreenhouseBoardUrl(url: string): boolean {
 
 /**
  * A site's own confirmation address: Greenhouse's `/confirmation` path or
- * `?confirmation` parameter, Lever's `/thanks` path. Any other host is never
- * a confirmation by URL.
+ * `?confirmation` parameter, Lever's `/thanks` path, Ashby's `/submitted` or
+ * `/confirmation`, and Dover's `/applied` or `/confirmation`. Any other host
+ * is never a confirmation by URL.
  */
 export function isConfirmationUrl(url: string): boolean {
   let parsed: URL;
@@ -94,6 +103,12 @@ export function isConfirmationUrl(url: string): boolean {
   const path = parsed.pathname.replace(/\/+$/, "").toLowerCase();
   if (GREENHOUSE_HOSTS.has(host)) return path.endsWith("/confirmation") || parsed.searchParams.has("confirmation");
   if (LEVER_HOSTS.has(host)) return path.endsWith("/thanks");
+  if (ASHBY_HOSTS.has(host) || host.endsWith(".ashbyhq.com")) {
+    return path.endsWith("/confirmation") || path.endsWith("/submitted") || path.endsWith("/thanks") || parsed.searchParams.has("submitted") || parsed.searchParams.has("confirmation");
+  }
+  if (DOVER_HOSTS.has(host) || host.endsWith(".dover.com") || host.endsWith(".dover.io")) {
+    return path.endsWith("/confirmation") || path.endsWith("/applied") || path.endsWith("/thanks") || parsed.searchParams.has("applied") || parsed.searchParams.has("confirmation");
+  }
   return false;
 }
 
@@ -106,23 +121,92 @@ export function invalidFieldKey(field: InvalidField): string {
   return `${field.ref ?? ""}|${field.label}|${field.error}`;
 }
 
+const BENIGN_HEADER_PREFIXES = /^(?:apply\s*[-–—:]|application\s*[-–—:]|job\s+application\s*[-–—:])/i;
+const BENIGN_HEADER_EXACT = /^(?:apply|application|job\s+application)$/i;
+const ERROR_INDICATORS = /\b(?:error|errors|problem|failed|failure|invalid|required|sorry|unable|cannot|denied|wrong|rejected|unsuccessful|already applied|deadline|closed)\b/i;
+
+/**
+ * Whether the alert text represents a benign page header or title (e.g. Rippling's
+ * aria-live job title banner "Apply - Engineering Intern (Summer 2027)") rather than
+ * a genuine error or submission refusal.
+ */
+export function isBenignAlertText(alertText: string, context?: { pageTitle?: string; headingText?: string }): boolean {
+  const trimmed = alertText.trim();
+  if (!trimmed) return true;
+  if (ERROR_INDICATORS.test(trimmed)) {
+    return false;
+  }
+  if (BENIGN_HEADER_PREFIXES.test(trimmed) || BENIGN_HEADER_EXACT.test(trimmed)) {
+    return true;
+  }
+  const lower = trimmed.toLowerCase();
+  if (context?.pageTitle) {
+    const title = context.pageTitle.trim().toLowerCase();
+    if (title && (title === lower || title.includes(lower) || lower.includes(title))) {
+      return true;
+    }
+  }
+  if (context?.headingText) {
+    const heading = context.headingText.trim().toLowerCase();
+    if (heading && (heading === lower || heading.includes(lower) || lower.includes(heading))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether the alert text indicates a genuine refusal rather than empty or benign page title text.
+ */
+export function isRefusalAlert(alertText: string, context?: { pageTitle?: string; headingText?: string }): boolean {
+  const trimmed = alertText.trim();
+  if (!trimmed) return false;
+  return !isBenignAlertText(trimmed, context);
+}
+
 /**
  * The outcome of a click that showed no confirmation and no challenge by the
  * deadline. Field errors need at least one invalid field that was not invalid
- * before the click and a submit control still shown; otherwise an alert means
- * refused, and nothing means unknown.
+ * before the click and a submit control still shown; otherwise a genuine error
+ * alert means refused, and nothing/benign alert means unknown.
  */
 export function classifyUnconfirmed(input: {
   invalidBefore: InvalidField[];
   invalidAfter: InvalidField[];
   submitShown: boolean;
   alertText: string;
+  pageTitle?: string;
+  headingText?: string;
 }): "field-errors" | "refused" | "unknown" {
   const before = new Set(input.invalidBefore.map(invalidFieldKey));
   const fresh = input.invalidAfter.some((field) => !before.has(invalidFieldKey(field)));
   if (fresh && input.submitShown) return "field-errors";
-  if (input.alertText.trim()) return "refused";
+  if (isRefusalAlert(input.alertText, { pageTitle: input.pageTitle, headingText: input.headingText })) return "refused";
   return "unknown";
+}
+
+/**
+ * Whether a closed application dialog transition qualifies as a confirmed submission.
+ * On Dover and Ashby, if an application modal dialog closes without field validation errors,
+ * alert refusals, or CAPTCHA challenges, this transition confirms the submission.
+ */
+export function isDialogCloseConfirmed(input: {
+  dialogClosed: boolean;
+  invalidBefore: InvalidField[];
+  invalidAfter: InvalidField[];
+  submitShown: boolean;
+  alertText: string;
+  isDoverOrAshby?: boolean;
+}): boolean {
+  if (!input.dialogClosed) return false;
+  const outcome = classifyUnconfirmed({
+    invalidBefore: input.invalidBefore,
+    invalidAfter: input.invalidAfter,
+    submitShown: input.submitShown,
+    alertText: input.alertText
+  });
+  if (outcome !== "unknown") return false;
+  return Boolean(input.isDoverOrAshby);
 }
 
 /** The site marked fields invalid after the click, so nothing was sent: the run waits for the candidate. */
@@ -307,6 +391,9 @@ export async function capturePostSubmitEvidence(
     } catch {
       alertText = "";
     }
+  }
+  if (isBenignAlertText(alertText)) {
+    alertText = "";
   }
   return {
     outcome,

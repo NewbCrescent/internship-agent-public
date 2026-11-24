@@ -5,8 +5,22 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { answerCandidateQuestion, resolveCandidateQuestion } from "@internship-agent/agent";
+import { planAutofill, type FieldResolution } from "@internship-agent/browser";
 import { createDatabase, LOCAL_CANDIDATE_ID, replaceCoursework, saveCandidateFact, seedDevelopmentData } from "@internship-agent/db";
-import { formatCourseworkAnswer, type CourseworkSet, type FactScope } from "@internship-agent/domain";
+import {
+  formatCourseworkAnswer,
+  scopeKey,
+  type BrowserField,
+  type CourseworkSet,
+  type FactScope,
+  type JobLocation,
+  type PauseRecord,
+  type PostingPay,
+  type QuestionContext
+} from "@internship-agent/domain";
+
+import { planPauseMemory } from "../../packages/agent/src/question-answers";
+import { postingQuestionContext } from "../../packages/agent/src/saved-answers";
 
 const temporaryDirectories: string[] = [];
 
@@ -182,6 +196,238 @@ describe("company-, country-, and protected-scoped answers", () => {
     expect(await resolveCandidateQuestion("Relevant coursework", {}, { database })).toMatchObject({
       status: "RESOLVED", displayAnswer: formatCourseworkAnswer(coursework.courses)
     });
+    database.close();
+  });
+});
+
+describe("standard legal and background answers (fictional answers)", () => {
+  function workspace() {
+    const directory = mkdtempSync(join(tmpdir(), "internship-agent-memory-"));
+    temporaryDirectories.push(directory);
+    const database = createDatabase(join(directory, "test.sqlite"));
+    seedDevelopmentData(database);
+    return database;
+  }
+  type Database = ReturnType<typeof createDatabase>;
+  const GLOBAL: FactScope = { kind: "global" };
+  const save = (database: Database, key: Parameters<typeof saveCandidateFact>[1]["key"], value: boolean | string, scope: FactScope = GLOBAL) =>
+    saveCandidateFact(database, {
+      candidateId: LOCAL_CANDIDATE_ID,
+      key,
+      scope,
+      value,
+      source: "user",
+      sourceDetail: { kind: "profile", question: "Fixture standard answers." },
+      confidence: 1,
+      rememberedAt: new Date().toISOString()
+    });
+  const factCount = (database: Database) =>
+    (database.prepare("SELECT COUNT(*) AS count FROM candidate_facts").get() as { count: number }).count;
+  const EXPLANATION = "I agreed not to solicit my previous employer's clients for twelve months after leaving.";
+
+  function standardWorkspace() {
+    const database = workspace();
+    save(database, "us_citizen", true);
+    save(database, "us_person_export_controls", "A United States citizen or national");
+    save(database, "holds_security_clearance", false);
+    save(database, "security_clearance_eligible", true);
+    save(database, "criminal_conviction", false);
+    save(database, "government_debarment_or_exclusion", false);
+    save(database, "non_compete", false);
+    save(database, "non_solicitation", true);
+    save(database, "non_solicitation_ends", "2027-03-31");
+    save(database, "non_solicitation_explanation", EXPLANATION);
+    save(database, "non_compete_or_non_solicitation", true);
+    save(database, "non_solicitation_restricts_this_job", false);
+    save(database, "conflict_of_interest", false);
+    save(database, "relative_government_official", false);
+    save(database, "immediate_family_health_care_professional", false);
+    save(database, "lives_within_50_miles", true, { kind: "location", name: "San Francisco" });
+    save(database, "salary_expectation_rule", "posting_pay_hourly");
+    save(database, "concerns_working_on_dod_projects", false);
+    return database;
+  }
+  const resolve = (database: Database, question: string, context: QuestionContext = {}, today?: string) =>
+    resolveCandidateQuestion(question, context, { database, ...(today ? { today } : {}) });
+
+  it("answers the non-solicitation agreement through its end date, then No without the explanation", async () => {
+    const database = standardWorkspace();
+    const subject = "Are you subject to a non-solicitation agreement?";
+    const explain = "Please describe your non-solicitation agreement.";
+    const combined = "Are you subject to a non-compete or non-solicitation agreement?";
+    const restricts = "Would your non-solicitation agreement restrict you from performing the duties of this role?";
+    expect(await resolve(database, subject, {}, "2027-03-31")).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
+    expect(await resolve(database, explain, { fieldKind: "textarea" }, "2027-03-31")).toMatchObject({ status: "RESOLVED", displayAnswer: EXPLANATION });
+    expect(await resolve(database, combined, {}, "2027-03-31")).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
+    expect(await resolve(database, restricts, {}, "2027-03-31")).toMatchObject({ status: "RESOLVED", displayAnswer: "No" });
+
+    expect(await resolve(database, subject, {}, "2027-04-01")).toMatchObject({ status: "RESOLVED", displayAnswer: "No" });
+    const expired = await resolve(database, explain, { fieldKind: "textarea" }, "2027-04-01");
+    expect(expired).toMatchObject({ status: "NEEDS_INPUT" });
+    expect(JSON.stringify(expired)).not.toContain("twelve months");
+    expect(await resolve(database, combined, {}, "2027-04-01")).toMatchObject({ status: "RESOLVED", displayAnswer: "No", fact: { key: "non_compete" } });
+    expect(await resolve(database, restricts, {}, "2027-04-01")).toMatchObject({ status: "RESOLVED", displayAnswer: "No" });
+    database.close();
+  });
+
+  it("answers the 50-mile question for San Francisco only, never for Austin", async () => {
+    const database = standardWorkspace();
+    expect(await resolve(database, "Do you live within 50 miles of San Francisco?")).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
+    expect(await resolve(database, "Are you located within 50 miles of our San Francisco office?")).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
+    expect(await resolve(database, "Do you live within 50 miles of Austin, TX?")).toMatchObject({
+      status: "NEEDS_INPUT",
+      mapping: { key: "lives_within_50_miles", scope: { kind: "location", name: "Austin, TX" } }
+    });
+    database.close();
+  });
+
+  it("builds U.S. person and citizen-or-resident answers from the saved answers", async () => {
+    const database = standardWorkspace();
+    expect(await resolve(database, "Are you a U.S. person as defined by ITAR/EAR?")).toMatchObject({
+      status: "RESOLVED", displayAnswer: "Yes", fact: { key: "us_person", id: "derived:us_person" }
+    });
+    expect(await resolve(database, "Are you a U.S. citizen or lawful permanent resident?")).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
+    expect(await resolve(database, "Are you a U.S. citizen or national?")).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
+    expect(() => save(database, "us_person", true)).toThrow(/never stored/);
+    database.close();
+  });
+
+  it("answers a narrower question only with a saved No", async () => {
+    const database = standardWorkspace();
+    const felony = "Have you been convicted of a felony?";
+    expect(await resolve(database, felony)).toMatchObject({ status: "RESOLVED", displayAnswer: "No" });
+    save(database, "criminal_conviction", true);
+    expect(await resolve(database, felony)).toMatchObject({ status: "NEEDS_INPUT", mapping: { key: "criminal_conviction", narrower: true } });
+    expect(await resolve(database, "Have you ever been convicted of a crime?")).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
+    database.close();
+  });
+
+  it("states the posting's pay as an hourly figure, and holds without a number or a saved rule", async () => {
+    const database = standardWorkspace();
+    const question = "What are your salary expectations?";
+    const pay = (period: PostingPay["period"], minimum: number, maximum: number): PostingPay => ({ minimum, maximum, currency: "USD", period });
+    expect(await resolve(database, question, { postingPay: pay("HOUR", 45, 45), fieldKind: "text" })).toMatchObject({ status: "RESOLVED", displayAnswer: "$45/hour" });
+    expect(await resolve(database, question, { postingPay: pay("YEAR", 100_000, 120_000) })).toMatchObject({ status: "RESOLVED", displayAnswer: "$48.08–$57.69/hour" });
+    expect(await resolve(database, question, { postingPay: pay("MONTH", 8_000, 8_000) })).toMatchObject({ status: "RESOLVED", displayAnswer: "$46.15/hour" });
+    expect(await resolve(database, question)).toMatchObject({ status: "RESOLVED", displayAnswer: "Open to discussion" });
+    expect(await resolve(database, "Desired hourly rate", { fieldKind: "number" })).toMatchObject({ status: "NEEDS_INPUT" });
+    database.close();
+
+    const bare = workspace();
+    expect(await resolve(bare, question, { postingPay: pay("HOUR", 45, 45) })).toMatchObject({ status: "NEEDS_INPUT", reason: "No salary rule is saved." });
+    bare.close();
+  });
+
+  it("never saves a legal or background answer from a question", async () => {
+    const database = standardWorkspace();
+    const before = factCount(database);
+    expect(await answerCandidateQuestion({ question: "Are you a U.S. citizen?", answer: "yes", remember: true, context: {} }, { database }))
+      .toMatchObject({ status: "ANSWERED_ONCE" });
+    expect(factCount(database)).toBe(before);
+    database.close();
+  });
+
+  it("never uses an explanation that names a former employer", async () => {
+    const database = standardWorkspace();
+    save(database, "previously_worked_here", true, { kind: "company", name: "Example Corp" });
+    save(database, "non_solicitation_explanation", "I agreed not to solicit Example Corp clients for a year.");
+    const resolution = await resolve(database, "Please describe your non-solicitation agreement.", { fieldKind: "textarea" }, "2027-01-15");
+    expect(resolution).toMatchObject({ status: "NEEDS_INPUT" });
+    expect(JSON.stringify(resolution)).not.toContain("Example Corp");
+    database.close();
+  });
+
+  describe("work authorization and sponsorship with no country (Starwood-style labels)", () => {
+    const location = (raw: string, countryCode: string | null, region: string | null = null): JobLocation => ({
+      jobId: "00000000-0000-4000-8000-000000000001",
+      raw,
+      city: null,
+      region,
+      countryCode,
+      workMode: "ONSITE",
+      span: { start: 0, end: raw.length, excerpt: raw }
+    });
+    const posting = (locations: JobLocation[]) => ({ companyName: "Fixture Robotics", locations, compensation: null });
+    const usPosting = posting([location("Fixture City, NY", "US")]);
+
+    function authorizationWorkspace() {
+      const database = workspace();
+      save(database, "authorized_to_work", true, { kind: "country", code: "US" });
+      save(database, "requires_sponsorship", false, { kind: "country", code: "US" });
+      return database;
+    }
+
+    it("takes the country from a one-country posting, and pauses for several or none", async () => {
+      const database = authorizationWorkspace();
+      expect(await resolve(database, "Work Authorization", postingQuestionContext(usPosting))).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
+      expect(await resolve(database, "Visa Sponsorship", postingQuestionContext(usPosting))).toMatchObject({ status: "RESOLVED", displayAnswer: "No" });
+      const twoCountries = posting([location("Fixture City, NY", "US"), location("Fixture Town, ON", "CA")]);
+      expect(await resolve(database, "Work Authorization", postingQuestionContext(twoCountries))).toMatchObject({ status: "AMBIGUOUS" });
+      expect(await resolve(database, "Visa Sponsorship", postingQuestionContext(posting([])))).toMatchObject({ status: "AMBIGUOUS" });
+      // A location stored without a country still names one in its text.
+      const textOnly = postingQuestionContext(posting([location("Fixture City, FL", null)]));
+      expect(textOnly.postingCountryCode).toBe("US");
+      expect(await resolve(database, "Work Authorization", textOnly)).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
+      database.close();
+    });
+
+    it("gives a pause answer and its hint the posting's country", async () => {
+      const pause: PauseRecord = {
+        fieldId: "work-authorization",
+        label: "Work Authorization",
+        question: 'How should "Work Authorization" be answered?',
+        suggestedKey: null,
+        suggestedScope: null,
+        safeguard: false,
+        sensitive: false,
+        upload: false,
+        status: "open",
+        answer: null,
+        draft: null,
+        fieldKind: "radio",
+        options: ["Yes", "No"]
+      };
+      expect(await planPauseMemory(pause, { companyName: "Fixture Robotics", context: postingQuestionContext(usPosting) }))
+        .toMatchObject({ path: "fact", key: "authorized_to_work" });
+      expect(await planPauseMemory(pause, { companyName: "Fixture Robotics", context: {} })).toMatchObject({ path: "once", reason: "ambiguous" });
+    });
+  });
+
+  it("fills browser fields from the standard answers end to end", async () => {
+    const database = standardWorkspace();
+    const fields: BrowserField[] = [
+      { id: "citizen", label: "Are you a U.S. citizen?", kind: "radio", required: true, options: ["Yes", "No"] },
+      {
+        id: "export",
+        label: "Which of the following describes your U.S. person status for export-control purposes?",
+        kind: "select",
+        required: true,
+        options: ["U.S. citizen or national", "U.S. lawful permanent resident (green card holder)", "Refugee under 8 U.S.C. 1157", "Asylee under 8 U.S.C. 1158", "None of the above"]
+      },
+      { id: "rate", label: "Desired hourly rate", kind: "text", required: true },
+      { id: "box", label: "I am a U.S. citizen", kind: "checkbox", required: false }
+    ];
+    const context: QuestionContext = { ...postingQuestionContext({ companyName: "Fixture Robotics", locations: [], compensation: null }), postingPay: { minimum: 45, maximum: 45, currency: "USD", period: "HOUR" } };
+    const resolutions = new Map<string, FieldResolution>();
+    for (const field of fields) {
+      const resolution = await resolveCandidateQuestion(field.label, { ...context, fieldKind: field.kind }, { database });
+      if (resolution.status !== "RESOLVED") throw new Error(`${field.label}: ${resolution.status}`);
+      resolutions.set(field.id, {
+        status: "RESOLVED",
+        key: resolution.fact.key,
+        scope: scopeKey(resolution.fact.scope),
+        display: resolution.displayAnswer,
+        value: resolution.fact.value
+      });
+    }
+    const plan = planAutofill({ url: "https://boards.greenhouse.io/example/jobs/1", title: "Apply", fields }, {
+      profile: {}, resolutions, packageAnswers: [], variantId: null
+    });
+    const decision = (id: string) => plan.decisions.find((entry) => entry.fieldId === id);
+    expect(decision("citizen")).toMatchObject({ action: "choose", value: "Yes" });
+    expect(decision("export")).toMatchObject({ action: "choose", value: "U.S. citizen or national" });
+    expect(decision("rate")).toMatchObject({ action: "fill", value: "$45/hour" });
+    expect(decision("box")).toMatchObject({ action: "check" });
     database.close();
   });
 });

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Fixture Robotics Careers - Software Intern - Apply</title>
+  <style>
+    /* Jobvite custom CSS: native radios are visually hidden with 0x0 dimensions outside viewport */
+    .jv-form input[type="radio"] {
+      position: absolute;
+      left: -9999px;
+      width: 0;
+      height: 0;
+      opacity: 0;
+    }
+    .jv-form label {
+      cursor: pointer;
+      display: inline-block;
+      padding: 4px 8px;
+    }
+  </style>
+</head>
+<body class="jv-desktop jv-page-apply">
+  <!--
+    A short fictional Jobvite application form, served for the Data Consent step's POST
+    (jobs.jobvite.com/fixturerobotics/job/oFixture2/apply/consent). Derived, not captured: the
+    agent never loaded a real Jobvite form past the consent step. Never submitted by any test.
+  -->
+  <article class="jv-page-body" role="main">
+    <h2 class="jv-header">Software Intern</h2>
+    <form name="applyForm" class="jv-form" method="POST" action="/fixturerobotics/job/oFixture2/apply/submit">
+      <label for="jv-first-name">First Name</label>
+      <input type="text" id="jv-first-name" name="firstName" required>
+      <label for="jv-last-name">Last Name</label>
+      <input type="text" id="jv-last-name" name="lastName" required>
+      <label for="jv-email">Email</label>
+      <input type="email" id="jv-email" name="email" required>
+      <div class="jv-field jv-form-field">
+        <div class="jv-field-label"><label>Add Resume<span class="jv-field-required">*</span></label></div>
+        <div class="jv-file-upload">
+          <input type="file" id="file-input-0" class="file-input">
+          <button type="button" class="jv-button">Select</button>
+        </div>
+        <textarea id="jv-paste-resume-textarea0" class="jv-paste-resume" style="display:none"></textarea>
+      </div>
+      <div class="jv-field jv-form-field">
+        <div class="jv-field-label"><label>Cover Letter</label></div>
+        <div class="jv-file-upload">
+          <input type="file" id="file-input-1" class="file-input">
+          <button type="button" class="jv-button">Select</button>
+        </div>
+        <textarea id="jv-paste-resume-textarea1" class="jv-paste-resume" style="display:none"></textarea>
+      </div>
+      <fieldset class="ng-invalid ng-invalid-required">
+        <legend>Work Authorization</legend>
+        <input type="radio" id="jv-work-yes" name="work" value="1" aria-label="Authorized to work: Yes" required class="ng-invalid ng-invalid-required">
+        <label for="jv-work-yes">Yes</label>
+        <input type="radio" id="jv-work-no" name="work" value="0" class="ng-invalid ng-invalid-required">
+        <label for="jv-work-no">No</label>
+      </fieldset>
+      <fieldset class="ng-invalid ng-invalid-required">
+        <legend>Visa Sponsorship</legend>
+        <input type="radio" id="jv-visa-yes" name="visa" value="1" required class="ng-invalid ng-invalid-required">
+        <label for="jv-visa-yes">Yes</label>
+        <input type="radio" id="jv-visa-no" name="visa" value="0" aria-label="Sponsorship required: No" class="ng-invalid ng-invalid-required">
+        <label for="jv-visa-no">No</label>
+      </fieldset>
+      <button type="submit" class="jv-button jv-button-primary">Send Application</button>
+    </form>
+  </article>
+  <footer class="jv-footer"><p>Powered by Jobvite</p></footer>
+  <script>
+    function updateRadioValidity(name) {
+      var radios = document.querySelectorAll('input[type="radio"][name="' + CSS.escape(name) + '"]');
+      var anyChecked = Array.prototype.some.call(radios, function(r) { return r.checked; });
+      radios.forEach(function(r) {
+        if (anyChecked) {
+          r.classList.remove('ng-invalid', 'ng-invalid-required');
+          r.classList.add('ng-valid');
+        } else {
+          r.classList.remove('ng-valid');
+          r.classList.add('ng-invalid', 'ng-invalid-required');
+        }
+      });
+      if (radios.length > 0) {
+        var fieldset = radios[0].closest('fieldset');
+        if (fieldset) {
+          if (anyChecked) {
+            fieldset.classList.remove('ng-invalid', 'ng-invalid-required');
+            fieldset.classList.add('ng-valid');
+          } else {
+            fieldset.classList.remove('ng-valid');
+            fieldset.classList.add('ng-invalid', 'ng-invalid-required');
+          }
+        }
+      }
+    }
+    document.addEventListener('change', function(e) {
+      if (e.target && e.target.type === 'radio') {
+        updateRadioValidity(e.target.name);
+      }
+    });
+    document.addEventListener('click', function(e) {
+      if (e.target && e.target.type === 'radio') {
+        updateRadioValidity(e.target.name);
+      }
+    });
+  </script>
+</body>
+</html>

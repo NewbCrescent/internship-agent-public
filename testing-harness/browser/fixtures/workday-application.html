@@ -13,13 +13,14 @@
   <div id="popup"></div>
   <script>
     const params = new URLSearchParams(location.search);
-    // Candidate accounts (?account=create|verify|captcha|exists|sms|double|silent|lost|banner|signin-after|notice|quiet):
+    // Candidate accounts (?account=create|verify|captcha|exists|sms|double|silent|silent-chooser|lost|banner|signin-after|notice|quiet):
     // accounts live in localStorage (shared by the context's tabs), the signed-in session in
     // sessionStorage (per tab, so every new tab starts signed out).
     //   create: the account is created and the application opens; verify: Workday asks to verify
     //   the email; captcha: a challenge frame; exists: "already exists" and nothing is stored;
     //   sms: a text-message code; double: the account is stored, then "already exists" shows;
-    //   silent: the account is stored and nothing changes on screen; lost: nothing is stored and
+    //   silent: the account is stored and nothing changes on screen; silent-chooser: the
+    //   same, but the Sign In link opens an email-method chooser; lost: nothing is stored and
     //   nothing changes; banner: nothing is stored and an error banner shows; signin-after: the
     //   account is stored verified and the sign-in form shows with no session (the real sites'
     //   observed flow after a create); notice: the account is stored unverified and the sign-in
@@ -46,7 +47,7 @@
       document.getElementById("app").innerHTML = "<h2>Your account has been verified.</h2>";
     }
     const accountMode = params.get("account");
-    window.fixtureAccount = { honeypotTyped: false, termsChecked: false, creates: 0, signIns: 0, headerClicks: 0 };
+    window.fixtureAccount = { honeypotTyped: false, termsChecked: false, creates: 0, signIns: 0, emailMethodClicks: 0, headerClicks: 0 };
     if (params.get("header") === "filter") {
       document.querySelector('[data-automation-id="utilityButtonSignIn"]').outerHTML = `<div data-automation-id="utilityMenu"><div style="position:relative;display:inline-block"><div aria-label="Sign In" role="button" tabindex="0" data-automation-id="click_filter" style="position:absolute;inset:0;z-index:1"></div><button data-automation-id="utilityButtonSignIn" tabindex="-2" aria-hidden="true">Sign In</button></div></div>`;
     }
@@ -195,6 +196,19 @@
         </div>`;
     }
 
+    function renderSignInMethods() {
+      document.getElementById("app").innerHTML = `
+        <div data-automation-id="applyFlowPage">
+          <ol data-automation-id="progressBar"><li data-automation-id="progressBarActiveStep">current step 1 of 6Create Account/Sign In</li></ol>
+          <div data-automation-id="signInContent">
+            <h2>Sign In</h2>
+            <button type="button" data-automation-id="GoogleSignInButton">Sign in with Google</button>
+            <button type="button" data-automation-id="LinkedInSignInButton">Sign in with LinkedIn</button>
+            <button type="button" data-automation-id="SignInWithEmailButton">Sign in with email</button>
+          </div>
+        </div>`;
+    }
+
     /** Workday's account panel: the submit buttons sit under a click filter, as on Workday. */
     function renderAccount(kind) {
       if (params.get("markup") === "real") return renderRealAccount(kind);
@@ -210,6 +224,8 @@
           <button type="button" data-automation-id="signInLink">Sign In</button>` : `
           <label for="acct-email">Email Address*</label><input id="acct-email" type="text" data-automation-id="email">
           <label for="acct-password">Password*</label><input id="acct-password" type="password" data-automation-id="password">
+          <div><label for="input-website">Enter website. This input is for robots only, do not enter if you're human.</label>
+            <input data-automation-id="beecatcher" id="input-website" name="website" type="text" style="position:absolute;left:-9999px"></div>
           ${covered("signInSubmitButton", "Sign In")}
           <button type="button" data-automation-id="createAccountLink">Create Account</button>`;
       document.getElementById("app").innerHTML = `
@@ -319,12 +335,12 @@
           `<div data-automation-id="errorBanner" role="alert"><ul><li>We could not create your account right now. Try again later.</li></ul></div>`;
         return;
       }
-      const unverified = accountMode === "verify" || accountMode === "notice" || accountMode === "quiet";
+      const unverified = ["verify", "notice", "quiet", "silent-quiet"].includes(accountMode);
       accounts[email] = { password, verified: !unverified, token: Math.random().toString(36).slice(2) };
       writeAccounts(accounts);
       if (accountMode === "double") return accountError("An account already exists for this email address.");
       if (accountMode === "signin-after" || accountMode === "notice" || accountMode === "quiet") return renderAccount("sign-in");
-      if (accountMode === "silent") return;
+      if (["silent", "silent-chooser", "silent-quiet"].includes(accountMode)) return;
       if (accountMode === "verify") return accountNotice("<p>We sent an email to verify your account. Open it, then sign in.</p>");
       if (accountMode === "sms") return accountNotice(`<p>Enter the code we sent by text message to your phone.</p><input data-automation-id="verificationCode">`);
       sessionStorage.setItem(SESSION_KEY, email);
@@ -335,13 +351,17 @@
       window.fixtureAccount.signIns += 1;
       const email = accountInput("email").value.trim().toLowerCase();
       const password = accountInput("password").value;
+      if (document.querySelector('[data-automation-id="beecatcher"]')?.value) {
+        window.fixtureAccount.honeypotTyped = true;
+        return accountError("Something went wrong.");
+      }
       const account = readAccounts()[email];
       if (!account || account.password !== password) return accountError("Wrong email address or password.");
       if (!account.verified && accountMode === "notice") {
         document.getElementById("account-notice").innerHTML = "<p>Your account has not been verified. Check your email for the verification link.</p>";
         return;
       }
-      if (!account.verified && accountMode === "quiet") return;
+      if (!account.verified && (accountMode === "quiet" || accountMode === "silent-quiet")) return;
       if (!account.verified) return accountError("Please verify your account before signing in.");
       sessionStorage.setItem(SESSION_KEY, email);
       render();
@@ -405,6 +425,10 @@
         if (accountMode && !sessionStorage.getItem(SESSION_KEY)) { renderAccount("create"); return; }
         render();
       } else if (target.matches('[data-automation-id="signInLink"]')) {
+        if (accountMode === "silent-chooser") renderSignInMethods();
+        else renderAccount("sign-in");
+      } else if (target.matches('[data-automation-id="SignInWithEmailButton"]')) {
+        window.fixtureAccount.emailMethodClicks += 1;
         renderAccount("sign-in");
       } else if (target.matches('[data-automation-id="createAccountLink"]')) {
         renderAccount("create");

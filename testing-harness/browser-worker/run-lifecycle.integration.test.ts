@@ -17,6 +17,7 @@ import {
   getRequirementLabelHold,
   holdRequirementLabels,
   logApplicationEvent,
+  persistNormalizedPosting,
   saveSemanticFit,
   saveBrowserSession,
   saveCandidate,
@@ -1539,6 +1540,13 @@ describe("retrying a browser run", () => {
   describe("automatic submission", () => {
     const target = { season: "summer", year: 2027 } as const;
     const policy = (dailyCap = 5) => ({ minFit: 0, autoApply: true, target, autoSubmit: { minFit: 80, dailyCap } });
+    const unlimitedPolicy = () => pipelineSettings({
+      INTERNSHIP_AGENT_AUTO_APPLY: "1",
+      INTERNSHIP_AGENT_AUTO_SUBMIT: "1",
+      INTERNSHIP_AGENT_TARGET_TERM: "summer-2027",
+      INTERNSHIP_AGENT_AUTO_SUBMIT_MIN_FIT: "80",
+      INTERNSHIP_AGENT_AUTO_SUBMIT_DAILY_CAP: "unlimited"
+    });
     const strongFit = (database: DatabaseSync, jobId: string, score = 86, rating: "STRONG" | "MODERATE" = "STRONG") =>
       saveSemanticFit(database, jobId, getFitInputVersion(database, jobId), {
         score, rating, confidence: "MEDIUM", summary: "Fixture judgment.", strengths: [], gaps: [], unknowns: ["Applicant pool."],
@@ -1659,7 +1667,7 @@ describe("retrying a browser run", () => {
       const report = await advancePipeline({ database, dataDir, settings: policy(), voiceDrafter: null, openPage: async () => fakePage({ controls }) });
       expect(report.started).toEqual([{ jobId, runStatus: "paused-needs-input" }]);
       expect(report.submitted).toEqual([]);
-      expect(report.held[0]!.reasons).toContain("The form asked something the agent could not answer on its own.");
+      expect(report.held[0]!.reasons).toContain("The form has unanswered questions waiting for you.");
       database.close();
     });
 
@@ -1713,14 +1721,58 @@ describe("retrying a browser run", () => {
       database.close();
     });
 
-    it("holds a run that shows a visible CAPTCHA, and never submits it", async () => {
+    it("submits exactly once under the unlimited daily policy beyond the old ceiling", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDataDir();
+      const jobId = approvedJobId(database, "qualified");
+      strongFit(database, jobId);
+      const { jobId: historicalJobId } = persistNormalizedPosting(database, {
+        companyName: "Fixture History Company",
+        title: "Software Engineering Intern",
+        employmentType: "INTERNSHIP",
+        applicationType: "UNKNOWN",
+        sourceUrl: "https://example.test/internships/approval-history",
+        externalApplicationUrl: null,
+        companyCareersUrl: null,
+        contentHash: "fixture-approval-history",
+        normalizedText: "Software Engineering Intern at Fixture History Company.",
+        locations: [],
+        compensation: null,
+        requirements: [],
+        technologies: [],
+        constraints: { graduation: null, authorization: null, sponsorship: null, availability: null }
+      });
+      database.prepare("UPDATE jobs SET status = 'SUBMITTED' WHERE id = ?").run(historicalJobId);
+      for (let approval = 0; approval < 51; approval += 1) {
+        logApplicationEvent(database, {
+          jobId: historicalJobId,
+          fromStatus: "APPLYING",
+          toStatus: "APPLYING",
+          detail: AUTO_SUBMIT_EVENT + ": a historical approval today."
+        });
+      }
+
+      const page = fakePage();
+      const clickSubmit = vi.spyOn(page, "clickSubmit");
+      const report = await advancePipeline({
+        database, dataDir, settings: unlimitedPolicy(), voiceDrafter: null, openPage: async () => page
+      });
+      expect(report.held).toEqual([]);
+      expect(report.submitted).toEqual([{ jobId, confirmation: expect.stringContaining("application was received") }]);
+      expect(clickSubmit).toHaveBeenCalledTimes(1);
+      expect(getJobPosting(database, jobId)?.status).toBe("SUBMITTED");
+      expect(details(database, jobId).filter((event) => event.detail?.startsWith(AUTO_SUBMIT_EVENT))).toHaveLength(1);
+      database.close();
+    });
+
+    it("holds a run that shows a visible CAPTCHA, even with an unlimited daily cap", async () => {
       const database = disposableDatabase();
       const dataDir = disposableDataDir();
       const jobId = approvedJobId(database, "qualified");
       strongFit(database, jobId);
       const flag = { clicked: false };
       const report = await advancePipeline({
-        database, dataDir, settings: policy(), voiceDrafter: null,
+        database, dataDir, settings: unlimitedPolicy(), voiceDrafter: null,
         openPage: async () => ({ ...fakePage({ submitted: flag }), visibleChallenge: async () => ({ kind: "hcaptcha" as const, detail: "an hCaptcha challenge" }) })
       });
       expect(report.started).toEqual([{ jobId, runStatus: "paused-needs-input" }]);

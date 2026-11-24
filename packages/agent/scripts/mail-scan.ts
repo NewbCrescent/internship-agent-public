@@ -1,9 +1,10 @@
-import { resolveProfileDataDirectory } from "@internship-agent/db";
+import { closeProfileDatabase, findBrowserRunIds, getProfileDatabase, resolveProfileDataDirectory } from "@internship-agent/db";
 import { workspaceProfileSchema } from "@internship-agent/domain";
 
 import { discordSettings } from "../src/discord-notify";
 import { gmailMailSessionFactory, gmailSettings } from "../src/gmail-mailbox";
 import { MAIL_SETUP_MESSAGE, MailAuthFailed, parseMailSince, scanUids, workspaceMailStore, type MailSession } from "../src/mail-watch";
+import { catchUpSubmissionReceipt, workspaceReceiptStore } from "../src/submission-receipts";
 import { MailboxUnavailable } from "../src/workday-verification-mail";
 
 /**
@@ -13,12 +14,27 @@ import { MailboxUnavailable } from "../src/workday-verification-mail";
  * records nothing). It never moves the watcher's UID position.
  *
  *   pnpm mail:scan [--profile real|demo] [--since 7d] [--dry-run]
+ *   pnpm mail:scan [--profile real|demo] --receipt <run reference>
  */
 async function main() {
   const args = process.argv.slice(2);
   const value = (flag: string) => { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : undefined; };
   const profile = workspaceProfileSchema.parse(value("--profile") ?? "real");
   const dryRun = args.includes("--dry-run");
+  const dataDir = resolveProfileDataDirectory(profile);
+  if (args.includes("--receipt")) {
+    const reference = value("--receipt");
+    if (!reference || dryRun || args.includes("--since") || args.filter((arg) => arg === "--receipt").length !== 1) {
+      throw new Error("--receipt requires one run reference and cannot be combined with --since or --dry-run.");
+    }
+    let runs: string[];
+    try { runs = findBrowserRunIds(getProfileDatabase(profile), reference); }
+    finally { closeProfileDatabase(profile); }
+    if (runs.length !== 1) throw new Error("Give one unambiguous run reference.");
+    const result = await catchUpSubmissionReceipt({ runId: runs[0]!, store: workspaceReceiptStore(profile, dataDir), connect: gmailMailSessionFactory() });
+    console.log(result ? `Receipt check: ${result}.` : "No pending submission hold for that run.");
+    return;
+  }
   const since = parseMailSince(value("--since") ?? "7d");
   if (!since) {
     console.error("--since takes 1d to 14d, or 1h to 336h.");
@@ -37,7 +53,7 @@ async function main() {
     session = await connect();
     const uids = (await session.uidsAfter(0, { since })).slice(-300);
     const result = await scanUids(session, uids, {
-      dataDir: resolveProfileDataDirectory(profile),
+      dataDir,
       log: (line) => console.log(line),
       discord,
       candidateAddress: gmail.address,
@@ -54,4 +70,7 @@ async function main() {
   }
 }
 
-void main();
+void main().catch((error: unknown) => {
+  console.error(error instanceof Error ? error.message : "The mailbox scan failed.");
+  process.exitCode = 1;
+});

@@ -72,8 +72,10 @@ export const ATS_KIND_LABELS: Record<Exclude<AtsKind, "unknown">, string> = {
  * application page: the generic single-page filler would fill and submit the
  * wrong page. Jobvite's Apply opens a data-consent step (residence and
  * language, then accept or decline its policy) before any form, and iCIMS's
- * Apply lands on an email-first account step; the agent never gives consent
- * or creates accounts for the candidate. Rippling's application page
+ * Apply lands on an email-first account step. Jobvite's consent step is
+ * accepted only under INTERNSHIP_AGENT_ACCEPT_DATA_CONSENT and iCIMS accounts
+ * are created only under INTERNSHIP_AGENT_ICIMS_ACCOUNTS, but the agent walks
+ * neither application, so both stay approval-needed. Rippling's application page
  * (<posting>/apply, behind an "Apply now" button) shows a progress bar, and
  * its success text was not found in the page's own bundles (only a
  * translation key), so a submitted run could not be told from a stalled one.

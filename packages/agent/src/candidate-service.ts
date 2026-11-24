@@ -18,10 +18,13 @@ import {
   COURSEWORK_FACT_KEY,
   factDefinitions,
   formatFactValue,
+  localCalendarDate,
   parseFactAnswer,
   rememberAnswerInputSchema,
+  STANDARD_ANSWER_KEYS,
   type CandidatePreferenceInput,
   type CandidateProfileInput,
+  type MappedQuestion,
   type QuestionContext,
   type QuestionResolution,
   type RememberAnswerInput
@@ -29,6 +32,7 @@ import {
 
 import { courseworkAnswerFact } from "./coursework";
 import { DeterministicQuestionMapper, type SemanticQuestionMapper } from "./question-mapper";
+import { resolveStandardAnswer } from "./standard-answers";
 
 export function getCandidateWorkspace(database: DatabaseSync = getDatabase()) {
   return {
@@ -52,7 +56,7 @@ export function updateCandidatePreferences(
 export async function resolveCandidateQuestion(
   question: string,
   context: QuestionContext = {},
-  options: { database?: DatabaseSync; mapper?: SemanticQuestionMapper } = {}
+  options: { database?: DatabaseSync; mapper?: SemanticQuestionMapper; today?: string } = {}
 ): Promise<QuestionResolution> {
   const database = options.database ?? getDatabase();
   const mapper = options.mapper ?? new DeterministicQuestionMapper();
@@ -84,6 +88,11 @@ export async function resolveCandidateQuestion(
     return { status: "RESOLVED", question, mapping, fact, displayAnswer: formatFactValue(fact.value) };
   }
 
+  // Standard legal and background answers built or dated at resolve time (standard-answers.ts).
+  const today = options.today ?? localCalendarDate(new Date());
+  const standard = resolveStandardAnswer(database, LOCAL_CANDIDATE_ID, question, mapping, context, today);
+  if (standard) return narrowed(standard, mapping);
+
   // A channel- or company-scoped question may use the global answer when the
   // channel or company has none of its own. The reverse never happens: a
   // channel or company answer is not visible to global questions, other
@@ -109,13 +118,26 @@ export async function resolveCandidateQuestion(
       fact
     };
   }
-  return {
+  return narrowed({
     status: "RESOLVED",
     question,
     mapping,
     fact,
     displayAnswer: formatFactValue(fact.value)
-  };
+  }, mapping);
+}
+
+/** A question narrower than its saved fact ("a felony" for "a conviction") is answered only by a saved No. */
+function narrowed(resolution: QuestionResolution, mapping: MappedQuestion): QuestionResolution {
+  if (resolution.status === "RESOLVED" && mapping.narrower && resolution.fact.value === true) {
+    return {
+      status: "NEEDS_INPUT",
+      question: resolution.question,
+      mapping,
+      reason: "Your saved Yes covers more than this question asks; answer it directly."
+    };
+  }
+  return resolution;
 }
 
 export async function answerCandidateQuestion(
@@ -148,6 +170,15 @@ export async function answerCandidateQuestion(
       mapping,
       displayAnswer: formatFactValue(value),
       reason: "Coursework is saved only with pnpm profile:coursework; this answer was used once."
+    };
+  }
+  if (STANDARD_ANSWER_KEYS.has(mapping.key)) {
+    return {
+      status: "ANSWERED_ONCE",
+      question: parsed.question,
+      mapping,
+      displayAnswer: formatFactValue(value),
+      reason: "Legal and background answers are saved only with pnpm profile:facts; this answer was used once."
     };
   }
   if (!parsed.remember) {

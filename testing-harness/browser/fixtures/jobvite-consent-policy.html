@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture Robotics Careers - Software Intern</title></head>
+<body class="jv-desktop jv-page-consentform">
+  <!--
+    Jobvite's Data Consent step as the live template draws it (jobs.jobvite.com/fixturerobotics/job/
+    oFixture2/apply): the "Location of Residence and Language:" select (#jv-country-select), then,
+    only once a residence is chosen, that policy's text and its Accept button (rendered per chosen
+    policy), plus a Decline link. Derived from the read-only 2026-11-20 capture of a public Jobvite
+    apply page and its template; policy ids were stripped and every text here is fictional. The
+    form POSTs to /fixturerobotics/job/oFixture2/apply/consent. Accept clicks are counted on
+    window.fixtureJobvite.
+  -->
+  <article class="jv-page-body" role="main">
+    <h3>Data Consent</h3>
+    <form name="consentForm" class="jv-form" method="POST" action="/fixturerobotics/job/oFixture2/apply/consent">
+      <label for="jv-country-select">Location of Residence and Language:</label>
+      <select id="jv-country-select" name="consentPolicyId" required>
+        <option value="">Select your location of residence and language</option>
+        <option value="fixture-us">US Based Applicants (English)</option>
+        <option value="fixture-other">Other (English)</option>
+      </select>
+      <div class="jv-consent-policy" hidden>
+        <p>Fixture Robotics processes and stores your application data to consider you for employment, as described in this policy.</p>
+      </div>
+      <p class="jv-consent-actions">
+        <button type="submit" class="jv-button jv-button-primary" id="jv-consent-accept" hidden>Accept</button>
+        <a class="jv-button" href="/fixturerobotics/job/oFixture2">Decline</a>
+      </p>
+    </form>
+  </article>
+  <footer class="jv-footer"><p>Powered by Jobvite</p></footer>
+  <script>
+    (function () {
+      window.fixtureJobvite = { acceptClicks: 0 };
+      var select = document.getElementById("jv-country-select");
+      var policy = document.querySelector(".jv-consent-policy");
+      var accept = document.getElementById("jv-consent-accept");
+      select.addEventListener("change", function () {
+        var chosen = select.value !== "";
+        policy.hidden = !chosen;
+        accept.hidden = !chosen;
+      });
+      accept.addEventListener("click", function () { window.fixtureJobvite.acceptClicks += 1; });
+    })();
+  </script>
+</body>
+</html>

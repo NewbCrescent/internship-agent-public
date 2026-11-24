@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   closeProfileDatabase,
   createDatabase,
+  getBrowserRun,
   logApplicationEvent,
   persistNormalizedPosting,
   resolveProfileDatabasePath,
@@ -17,7 +18,7 @@ import {
 } from "@internship-agent/db";
 import type { BrowserRun, PauseRecord } from "@internship-agent/domain";
 
-import { runWatchTick } from "../../packages/agent/scripts/pipeline-pass";
+import { runPipelinePass, runWatchTick } from "../../packages/agent/scripts/pipeline-pass";
 import {
   buildDigest,
   classifyHold,
@@ -29,6 +30,7 @@ import {
   type DigestRun,
   type DigestSnapshot
 } from "../../packages/agent/src/daily-digest";
+import { runAnswerCommand, runQuestionsCommand } from "../../packages/agent/src/run-answer";
 import type { DiscordFetch } from "../../packages/agent/src/discord-notify";
 
 /**
@@ -157,6 +159,18 @@ describe("digest text", () => {
     const digest = buildDigest({ ...empty, sent: [{ jobId: randomUUID(), companyName: "Stripe" }], applying: [job("Lumora", "Intern", token)] }, at(20, 9))!;
     expect(digest.text).not.toContain("CAPTCHA");
     expect(digest.text).not.toContain("g-recaptcha-response");
+  });
+
+  it("shows manual field corrections by original question number apart from visible CAPTCHAs", () => {
+    const held = run("paused-needs-input", [
+      pause("Unlabeled input control 1"),
+      pause("Applicant jordan@example.test", { fieldId: "site-error-1", safeguard: true }),
+      pause("Verify that you are human", { fieldId: "captcha", safeguard: true })
+    ]);
+    const digest = buildDigest({ ...empty, holdDelivery: true, applying: [job("Fixture", "Intern", held)] }, at(20, 9))!;
+    expect(digest.text).toContain('solve a CAPTCHA; fix in the browser: Q2 "Applicant [email]"');
+    expect(digest.text).not.toMatch(/reply here|jordan@example.test/i);
+    expect(classifyHold(run("awaiting-approval", [], { submissionApprovedAt: at(20, 9).toISOString() }))).toEqual({ kind: "fixing" });
   });
 
   it("returns nothing when there is nothing to report", () => {
@@ -327,9 +341,9 @@ describe("watcher tick", () => {
     expect(lines).toEqual(["Discord digest: sent (2 waiting on you)."]);
     const text = discord.contents.join("\n");
     expect(text).toContain("Sent since last update: 1 (Stripe)");
-    expect(text).toContain(`Datadog SWE Intern — 2 questions: "Are you 21 or older?", "Earliest start date?"`);
+    expect(text).toContain(`Datadog SWE Intern — 2 questions: Q1 "Are you 21 or older?", Q2 "Earliest start date?"`);
     expect(text).toContain("Glowpath Platform Intern — solve a CAPTCHA");
-    expect(text).toContain("Being fixed automatically: 2");
+    expect(text).not.toContain("Being fixed automatically");
     expect(text).toContain("Replies from companies: 1 interview invite (Stripe)");
     expect(text).not.toContain("Oldco");
     expect(text).not.toContain("Unlabeled");
@@ -337,6 +351,54 @@ describe("watcher tick", () => {
     expect(text).not.toContain("Next steps");
     const state = readDigestState(resolveProfileDataDirectory("real"));
     expect(state.items.find((item) => item.company === "Datadog")?.runId).toBe(datadogRun);
+  });
+
+  it("shares candidate delivery with pass notices and retains digest mappings on summary-only delivery", async () => {
+    process.env.INTERNSHIP_AGENT_DISCORD_BOT_TOKEN = TOKEN;
+    process.env.INTERNSHIP_AGENT_DISCORD_USER_ID = USER_ID;
+    const seed = createDatabase(resolveProfileDatabasePath("real"));
+    const first = posting(seed, "First", "Intern", "APPLYING");
+    const firstRun = heldRun(seed, first, "paused-needs-input", [openPause("Unlabeled input control 1"), openPause("Which editor do you use?")]);
+    seed.close();
+    const dataDir = resolveProfileDataDirectory("real");
+    const discord = recordingFetch();
+    const now = new Date();
+    now.setHours(23, 50, 0, 0);
+    await runWatchTick({ profile: "real", log: () => undefined, fetcher: noLists, digest: { now: () => now, transport: { fetch: discord.fetch } } });
+    expect(readDigestState(dataDir).items[0]?.runId).toBe(firstRun);
+
+    const adding = createDatabase(resolveProfileDatabasePath("real"));
+    const second = posting(adding, "Second", "Intern", "APPLYING");
+    heldRun(adding, second, "paused-needs-input", [openPause("Unlabeled input control 1"), {
+      ...openPause("Applicant jordan@example.test"), fieldId: "site-error-1", safeguard: true
+    }]);
+    const sent = posting(adding, "Sentco", "Intern", "SUBMITTED");
+    logApplicationEvent(adding, { jobId: sent, fromStatus: "APPLYING", toStatus: "SUBMITTED", detail: "Fixture submitted" });
+    adding.prepare("UPDATE application_events SET created_at = ? WHERE job_id = ?").run(new Date(now.getTime() + 1000).toISOString(), sent);
+    adding.close();
+
+    await runPipelinePass({ profile: "real", sourceIds: [], log: () => undefined, notify: { fetch: discord.fetch },
+      advance: async () => ({ analyzed: [], prepared: [], started: [], stopped: [], waiting: [], held: [], skipped: [], submitted: [], errors: [] }) });
+    expect(discord.contents[1]).toContain('Q2 fix this field in the browser: "Applicant [email]"');
+    expect(discord.contents[1]).not.toContain("CAPTCHA");
+    expect(discord.contents[1]).not.toMatch(/Unlabeled|Q1|First/);
+
+    const following = new Date(now);
+    following.setDate(following.getDate() + 1);
+    await runWatchTick({ profile: "real", log: () => undefined, fetcher: noLists, digest: { now: () => following, transport: { fetch: discord.fetch } } });
+    expect(discord.contents[2]).toContain("Sent since last update: 1 (Sentco)");
+    expect(discord.contents[2]).not.toContain("Waiting on you");
+    expect(readDigestState(dataDir).items[0]?.runId).toBe(firstRun);
+    const listed: string[] = [];
+    expect(await runQuestionsCommand(["--digest", "1"], { log: (line) => listed.push(line) })).toBe(0);
+    expect(listed.join("\n")).toContain("asks in this order: Q2");
+    expect(listed.join("\n")).toContain('Q1: "Unlabeled input control 1"');
+    const answerLog: string[] = [];
+    const answerStatus = await runAnswerCommand(["--digest", "1", "--q", "2", "--answer", "Example editor", "--once"], { log: (line) => answerLog.push(line) });
+    expect(answerStatus, answerLog.join("\n")).toBe(0);
+    const checked = createDatabase(resolveProfileDatabasePath("real"));
+    expect(getBrowserRun(checked, firstRun)?.pauses.map((pause) => pause.status)).toEqual(["open", "answered"]);
+    checked.close();
   });
 
   it("never counts a security or verification code email as a company reply, under the new or the older label", () => {

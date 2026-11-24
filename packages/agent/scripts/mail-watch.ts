@@ -6,6 +6,7 @@ import { workspaceProfileSchema } from "@internship-agent/domain";
 
 import { discordSettings } from "../src/discord-notify";
 import { gmailMailSessionFactory, gmailSettings } from "../src/gmail-mailbox";
+import { workspaceReceiptStore } from "../src/submission-receipts";
 import { MAIL_SETUP_MESSAGE, parseMailSince, runMailWatch, workspaceMailStore } from "../src/mail-watch";
 
 /**
@@ -53,6 +54,7 @@ async function main() {
     candidateAddress: gmail.address,
     secrets: [discord.token, gmail.appPassword],
     store: workspaceMailStore(profile),
+    receipts: workspaceReceiptStore(profile, dataDir),
     connect,
     since,
     signal: controller.signal

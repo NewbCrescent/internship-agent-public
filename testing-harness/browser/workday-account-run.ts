@@ -49,7 +49,7 @@ const EMAIL = "jordan@example.test";
 const COMPANY = "Fixture Aerospace";
 const PASSWORD_RULE = /^(?=.*[A-HJ-NP-Z])(?=.*[a-km-z])(?=.*[2-9])(?=.*[!@#$%^&*])[A-HJ-NP-Za-km-z2-9!@#$%^&*]{16}$/;
 
-type FixtureAccount = { honeypotTyped: boolean; termsChecked: boolean; creates: number; signIns: number; headerClicks: number };
+type FixtureAccount = { honeypotTyped: boolean; termsChecked: boolean; creates: number; signIns: number; emailMethodClicks: number; headerClicks: number };
 
 /**
  * A virtual clock for the account step's waits: each sleep advances virtual
@@ -97,10 +97,19 @@ async function main(): Promise<void> {
 
     const fixture = readFileSync(join(process.cwd(), "testing-harness/browser/fixtures/workday-application.html"), "utf8");
     const context = await browser.newContext();
+    const activationAttempts = new Map<string, number>();
+    const navigationFailureHost = "fixture-silent-quiet-navigation.wd1.myworkdayjobs.com";
     await context.route("**/*", async (route) => {
       const request = route.request();
       let host = "";
-      try { host = new URL(request.url()).hostname; } catch { /* not a URL */ }
+      try {
+        const url = new URL(request.url());
+        host = url.hostname;
+        if (request.resourceType() === "document" && url.pathname.startsWith("/External/activate/")) {
+          activationAttempts.set(host, (activationAttempts.get(host) ?? 0) + 1);
+          if (host === navigationFailureHost) return route.abort();
+        }
+      } catch { /* not a URL */ }
       if (request.resourceType() === "document" && host.endsWith(".wd1.myworkdayjobs.com")) {
         await route.fulfill({ status: 200, contentType: "text/html", body: fixture });
       } else {
@@ -111,9 +120,11 @@ async function main(): Promise<void> {
     const savedBeforeSubmit = new Map<string, boolean>();
     // A slow create: Workday answers only once the host's gate opens (45 virtual seconds).
     const slowGates = new Map<string, Promise<void>>();
+    const accountSubmits = new Map<string, string[]>();
     await context.exposeBinding("onFixtureAccountSubmit", async (source, label: string) => {
-      if (label !== "Create Account") return;
       const host = new URL(source.page.url()).hostname;
+      accountSubmits.set(host, [...(accountSubmits.get(host) ?? []), label]);
+      if (label !== "Create Account") return;
       const entry = (() => { try { return getWorkdayAccount(file, host); } catch { return null; } })();
       savedBeforeSubmit.set(host, entry?.account === "pending" && typeof entry.password === "string" && entry.password.length >= 8);
       const gate = slowGates.get(host);
@@ -216,8 +227,70 @@ async function main(): Promise<void> {
     if (again.result !== "signed-in") failures.push(`sign-in: expected "signed-in", got ${again.result ?? again.error?.message}`);
     await opensFlow("sign-in", again.page);
     const againState = await fixtureState(again.tab);
+    if (againState.honeypotTyped) failures.push("sign-in: the robot honeypot was typed in");
     if (againState.signIns !== 1 || againState.creates !== 0) failures.push(`sign-in: ${againState.signIns} sign-ins and ${againState.creates} creates`);
     if (getWorkdayAccount(file, createHost)?.password !== createEntry?.password) failures.push("sign-in: the saved password changed");
+
+    // A plain submit stays mounted even after dispatch, with or without a response.
+    // A disabled submit must stop at the click. A neighboring control for a
+    // different action must not take the click from a visible Sign In button.
+    for (const mode of ["no-request", "response", "blocked", "unrelated-filter"] as const) {
+      const name = `${mode} sign-in submit`;
+      const host = `fixture-${mode}-submit.wd1.myworkdayjobs.com`;
+      const blocked = mode === "blocked";
+      const tab = await context.newPage();
+      if (mode === "response") await tab.route("**/account-fixture?diagnostic=private", (route) => route.fulfill({ status: 401 }));
+      await tab.goto(urlFor(host, "create"));
+      const page = createWorkdayPage(tab);
+      await page.enterApplication();
+      if (!page.signInToAccount) throw new Error("the Workday adapter does not expose sign-in");
+      await tab.locator('[data-automation-id="signInLink"]').click();
+      const submit = tab.locator('[data-automation-id="signInSubmitButton"]');
+      await submit.evaluate((button: HTMLButtonElement, mode) => {
+        button.nextElementSibling?.remove();
+        button.disabled = mode === "blocked";
+        button.dataset.clicks = "0";
+        if (mode === "unrelated-filter") {
+          const otherAction = document.createElement("button");
+          otherAction.type = "button";
+          otherAction.textContent = "Account Help";
+          otherAction.setAttribute("aria-label", "Account Help");
+          otherAction.setAttribute("data-automation-id", "click_filter");
+          otherAction.dataset.clicks = "0";
+          otherAction.addEventListener("click", (event) => {
+            event.stopPropagation();
+            otherAction.dataset.clicks = String(Number(otherAction.dataset.clicks) + 1);
+          });
+          button.before(otherAction);
+        }
+        button.addEventListener("click", () => {
+          button.dataset.clicks = String(Number(button.dataset.clicks) + 1);
+          if (mode === "response") void fetch("/account-fixture?diagnostic=private", { method: "POST" });
+        });
+      }, mode);
+
+      try {
+        const outcome = await page.signInToAccount({ email: EMAIL, password: "fixture-password" }, host, {
+          clock: virtualClock().clock,
+          timeoutMs: 1_000
+        });
+        if (blocked || outcome.result !== "no-answer") failures.push(`${name}: unexpected outcome ${outcome.result}`);
+        const traffic = mode === "response" ? "same-host response status: 401" : "no same-host request observed";
+        const expected = `Workday did not answer the sign-in submit within 1 seconds; ${traffic}; no page transition observed`;
+        if (!blocked && outcome.detail !== expected) failures.push(`${name}: incorrect timeout diagnostics`);
+      } catch (error) {
+        if (!blocked || !(error instanceof Error) || error.message !== "the Sign In button could not be clicked") {
+          failures.push(`${name}: unexpected click error`);
+        }
+      }
+      const clicks = await submit.getAttribute("data-clicks");
+      if (clicks !== (blocked ? "0" : "1")) failures.push(`${name}: ${clicks} click events`);
+      if (mode === "unrelated-filter") {
+        const otherAction = tab.locator('[data-automation-id="click_filter"][aria-label="Account Help"]');
+        if (await otherAction.getAttribute("data-clicks") !== "0") failures.push(`${name}: activated Account Help`);
+      }
+      await tab.close();
+    }
 
     // Verification: the link comes from the (fake) mailbox and opens in the run's context.
     const verifyHost = "fixture-verify.wd1.myworkdayjobs.com";
@@ -376,12 +449,69 @@ async function main(): Promise<void> {
     if (silentState.signIns !== 1 || silentState.creates !== 1) failures.push(`silent: ${silentState.signIns} sign-ins and ${silentState.creates} creates`);
     await opensFlow("silent", silent.page);
 
+    const chooserHost = "fixture-silent-chooser.wd1.myworkdayjobs.com";
+    const chooser = await scenario("silent-chooser", chooserHost, "silent-chooser", { clock: virtualClock().clock });
+    if (chooser.result !== "created") failures.push(`silent-chooser: expected "created", got ${chooser.result ?? chooser.error?.message}`);
+    const chooserState = await fixtureState(chooser.tab);
+    if (chooserState.creates !== 1 || chooserState.emailMethodClicks !== 1 || chooserState.signIns !== 1) {
+      failures.push(`silent-chooser: ${chooserState.creates} creates, ${chooserState.emailMethodClicks} email method clicks, and ${chooserState.signIns} sign-ins`);
+    }
+    await opensFlow("silent-chooser", chooser.page);
+
+    // A silent create and silent sign-in use a single tenant-correlated mailbox read.
+    for (const kind of ["found", "none", "ambiguous", "unavailable", "generic", "navigation"]) {
+      const name = `silent-quiet-${kind}`;
+      const host = `fixture-${name}.wd1.myworkdayjobs.com`;
+      let tab: Page | null = null;
+      let reads = 0;
+      const attemptsBefore = [...activationAttempts.values()].reduce((sum, count) => sum + count, 0);
+      mail = async () => {
+        reads += 1;
+        if (accountSubmits.get(host)?.join(",") !== "Create Account,Sign In") failures.push(`${name}: mailbox read outside the first sign-in timeout`);
+        if (kind === "unavailable") throw new Error("synthetic mailbox failure");
+        if (kind === "none") return [];
+        const messages = await linkFor(host, () => tab)();
+        const message = messages[0]!;
+        if (kind === "ambiguous") return [message, { ...message, html: `<a href="https://${host}/External/activate/another-fixture-token">Verify</a>` }];
+        if (kind === "generic") return [{ ...message, html: '<a href="https://www.myworkday.com/External/activate/generic-fixture-token">Verify</a>' }];
+        return messages;
+      };
+      const attempt = await scenario(name, host, "silent-quiet", { clock: virtualClock().clock }, (page) => { tab = page; });
+      if (reads !== 1) failures.push(`${name}: expected one mailbox read, got ${reads}`);
+      const entry = getWorkdayAccount(file, host);
+      const activationCount = [...activationAttempts.values()].reduce((sum, count) => sum + count, 0) - attemptsBefore;
+      const expectedClicks = kind === "found" ? "Create Account,Sign In,Sign In" : "Create Account,Sign In";
+      if (accountSubmits.get(host)?.join(",") !== expectedClicks) failures.push(`${name}: unexpected account submit sequence`);
+      if (activationCount !== (kind === "found" || kind === "navigation" ? 1 : 0)) failures.push(`${name}: unexpected verification navigation count`);
+      if (kind === "found") {
+        if (attempt.result !== "signed-in" || entry?.account !== "created" || entry.hold || !(await storedAccount(attempt.tab))?.verified) {
+          failures.push(`${name}: matching link did not recover the account`);
+        }
+        await opensFlow(name, attempt.page);
+      } else {
+        held(name, attempt, kind === "navigation" ? "verification page could not be opened" : "the sign-in after it stopped");
+        if (entry?.account !== "pending" || entry.hold?.kind !== "unexpected") failures.push(`${name}: pending account did not retain an unexpected hold`);
+        if (kind === "navigation") {
+          const token = (await storedAccount(attempt.tab))?.token;
+          if (!token || [attempt.error?.message, entry?.hold?.reason, ...events(), ...captured].some((line) => line?.includes(token))) {
+            failures.push(`${name}: verification token privacy check failed`);
+          }
+        }
+      }
+    }
+    mail = async () => [];
+
     // No answer within 60 seconds and no account: the one sign-in fails, so the host is held as interrupted.
     const lostHost = "fixture-lost.wd1.myworkdayjobs.com";
     const lost = await scenario("lost", lostHost, "lost", { clock: virtualClock().clock });
     held("lost", lost, "60 seconds");
     held("lost", lost, "did not work");
-    if (getWorkdayAccount(file, lostHost)?.hold?.kind !== "interrupted") failures.push("lost: the hold is not interrupted");
+    const lostHold = getWorkdayAccount(file, lostHost)?.hold;
+    if (lostHold?.kind !== "interrupted") failures.push("lost: the hold is not interrupted");
+    for (const diagnostic of ["no same-host request observed", "no page transition observed"]) {
+      held("lost", lost, diagnostic);
+      if (!lostHold?.reason.includes(diagnostic)) failures.push(`lost: the persisted hold does not mention "${diagnostic}"`);
+    }
     const lostState = await fixtureState(lost.tab);
     if (lostState.signIns !== 1 || lostState.creates !== 1) failures.push(`lost: ${lostState.signIns} sign-ins and ${lostState.creates} creates`);
 
@@ -417,7 +547,7 @@ async function main(): Promise<void> {
     console.error(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"failed","failures":${JSON.stringify(failures)}}`);
     process.exit(1);
   }
-  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":17}`);
+  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":28}`);
 }
 
 main().catch((error) => {

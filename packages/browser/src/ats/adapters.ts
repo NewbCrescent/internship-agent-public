@@ -95,3 +95,18 @@ export function adapterProfileFor(kind: AtsKind): AdapterProfile | null {
   if (kind === "unknown") return null;
   return ADAPTER_PROFILES[kind];
 }
+
+const DOVER_ASHBY_HOST_PATTERN = /(?:dover\.(?:io|com)|ashbyhq\.com)$/i;
+
+/** Whether a target URL or ATS kind represents a Dover or Ashby application. */
+export function isDoverOrAshby(url: string, atsKind?: AtsKind | null): boolean {
+  if (atsKind === "dover" || atsKind === "ashby") return true;
+  try {
+    const parsed = new URL(url);
+    if (DOVER_ASHBY_HOST_PATTERN.test(parsed.hostname)) return true;
+    if (parsed.searchParams.has("ashby_jid")) return true;
+  } catch {
+    // ignore unparseable URLs
+  }
+  return false;
+}

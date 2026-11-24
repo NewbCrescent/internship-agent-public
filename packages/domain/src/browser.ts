@@ -81,7 +81,18 @@ export const decisionBasisSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("variant"), variantId: z.string().uuid() }),
   z.object({ kind: z.literal("base_resume"), baseResumeId: z.string().uuid() }),
   z.object({ kind: z.literal("candidate_document"), documentId: z.string().uuid() }),
-  z.object({ kind: z.literal("question_answer"), answerId: z.string().uuid() })
+  z.object({ kind: z.literal("question_answer"), answerId: z.string().uuid() }),
+  /**
+   * Accepted or signed under the candidate's standing settings
+   * (standing-consent.ts): `group` is a StandingGroup, "e-signature", or
+   * "signature-date"; `statement` is the field label as read.
+   */
+  z.object({
+    kind: z.literal("standing_consent"),
+    setting: z.enum(["accept_data_consent", "sign_attestations", "both"]),
+    group: z.string().min(1).max(40),
+    statement: z.string().min(1).max(300)
+  })
 ]);
 
 export const pauseSuggestionSchema = z.object({

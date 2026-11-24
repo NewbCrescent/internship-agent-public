@@ -1,0 +1,70 @@
+/**
+ * Export-control status ("U.S. person" under ITAR/EAR) as categories, so a
+ * saved status text can pick the one matching option of a "which describes
+ * you" list. Deterministic: an option with no recognized category, or one
+ * naming several ("Refugee or asylee"), is never chosen.
+ */
+export const exportControlCategories = [
+  "citizen_or_national",
+  "permanent_resident",
+  "refugee",
+  "asylee",
+  "protected_individual",
+  "none"
+] as const;
+
+export type ExportControlCategory = (typeof exportControlCategories)[number];
+
+const US = /\b(?:us|usa|united states|american)\b/;
+const NONE = /\bnone of the (?:above|following)\b|\bnot (?:a |an )?(?:us|united states) (?:person|citizen)\b|\bnon[- ]?us person\b|\bforeign (?:person|national)\b|^none\b|^other\b|\bnon[- ]?(?:us|united states)\s+(?:person|citizen|national)s?\b|\bnot (?:a |an )?(?:us|united states)\b/;
+const CITIZEN_OR_NATIONAL = /\bcitizen\b|\bnational\b/;
+const NOT_CITIZEN = /\bnon[- ]?(?:(?:us|united states)\s+)?citizen\b|\bnot (?:a |an )?(?:us|united states)\b|\bnot a\b|\bforeign\b/;
+const PERMANENT_RESIDENT = /\bpermanent resident\b|\bgreen card\b/;
+const REFUGEE = /\brefugee\b/;
+const ASYLEE = /\basyl(?:ee|um)\b/;
+const PROTECTED_INDIVIDUAL = /\bprotected individual\b|\b1324b\b/;
+
+/** NFKD, lowercase, no "." ("U.S." is "us", "8 U.S.C." is "8 usc"), single spaces. */
+function normalize(text: string): string {
+  return text.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLocaleLowerCase("en-US")
+    .replace(/\./g, "").replace(/\s+/g, " ").trim();
+}
+
+/** Every export-control category a status text or option names. */
+export function exportControlCategoriesOf(text: string): Set<ExportControlCategory> {
+  const normalized = normalize(text);
+  const categories = new Set<ExportControlCategory>();
+  if (NONE.test(normalized)) categories.add("none");
+  if (CITIZEN_OR_NATIONAL.test(normalized) && US.test(normalized) && !NOT_CITIZEN.test(normalized)) categories.add("citizen_or_national");
+  if (PERMANENT_RESIDENT.test(normalized)) categories.add("permanent_resident");
+  if (REFUGEE.test(normalized)) categories.add("refugee");
+  if (ASYLEE.test(normalized)) categories.add("asylee");
+  if (PROTECTED_INDIVIDUAL.test(normalized)) categories.add("protected_individual");
+  return categories;
+}
+
+/** The one category a text names; null when it names none or several. */
+export function exportControlCategory(text: string): ExportControlCategory | null {
+  const categories = exportControlCategoriesOf(text);
+  return categories.size === 1 ? [...categories][0]! : null;
+}
+
+function only(categories: Set<ExportControlCategory>, wanted: ExportControlCategory): boolean {
+  return categories.size === 1 && categories.has(wanted);
+}
+
+/** The single option naming exactly the saved status's category; null when none or several do. */
+export function matchExportControlOption(saved: string, options: readonly string[]): string | null {
+  const wanted = exportControlCategory(saved);
+  if (!wanted) return null;
+  const matches = options.filter((option) => only(exportControlCategoriesOf(option), wanted));
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+/** The single U.S. citizen option of a citizenship list ("U.S. Citizen"); null when none or several. */
+export function usCitizenOption(options: readonly string[]): string | null {
+  const matches = options.filter((option) =>
+    only(exportControlCategoriesOf(option), "citizen_or_national") && /\bcitizen\b/.test(normalize(option))
+  );
+  return matches.length === 1 ? matches[0]! : null;
+}

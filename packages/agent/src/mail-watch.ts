@@ -24,6 +24,7 @@ import {
   type MailHeader,
   type MailItem
 } from "./mail-outcomes";
+import { evaluateSubmissionReceipt, receiptHeaderRelevant, type ReceiptStore } from "./submission-receipts";
 import { MailboxUnavailable } from "./workday-verification-mail";
 
 /**
@@ -43,6 +44,8 @@ export type MailSession = {
   headers(uids: number[]): Promise<MailHeader[]>;
   /** First inline text part (plain preferred, else HTML converted to text), at most maxBytes; memory only. */
   bodyText(uid: number, maxBytes: number): Promise<string>;
+  /** Reads the same body and reports whether the bounded download was incomplete. */
+  bodyForReceipt?(uid: number, maxBytes: number): Promise<{ body: string; truncated: boolean }>;
   /** Registers the IDLE new-mail callback. */
   onNewMail(listener: () => void): void;
   /** Resolves once the connection ends for any reason. */
@@ -163,6 +166,7 @@ export type MailContext = {
   /** The bot token and the app password: stripped from anything sent. */
   secrets: string[];
   store: MailStore;
+  receipts?: ReceiptStore;
 };
 
 function safeLog(ctx: MailContext): (line: string) => void {
@@ -192,6 +196,15 @@ export async function scanUids(
   const sorted = [...new Set(uids)].filter((uid) => Number.isInteger(uid) && uid > 0).sort(ascending);
   if (sorted.length === 0) return { checked: 0, items: [], delivered: true, lastProcessedUid: 0 };
   const jobs = ctx.store.appliedJobs();
+  let attempts: ReturnType<ReceiptStore["attempts"]> = [];
+  let firstReceiptUnhandled: number | null = null;
+  if (!options.dryRun && ctx.receipts) {
+    try { attempts = ctx.receipts.attempts(); }
+    catch {
+      firstReceiptUnhandled = sorted[0]!;
+      log("Gmail: receipt trace unavailable; will retry.");
+    }
+  }
   const state = readMailWatchState(ctx.dataDir);
   const known = new Set(state.notified);
 
@@ -206,11 +219,26 @@ export async function scanUids(
   for (const header of headers) {
     if (options.since && header.receivedAt.getTime() < options.since.getTime()) { checked += 1; continue; }
     const key = mailItemKey(header, session.uidValidity);
-    if (known.has(key) || !relevantHeader(header, jobs, ctx.candidateAddress)) { checked += 1; continue; }
+    const receiptRelevant = receiptHeaderRelevant(header, attempts);
+    const outcomeRelevant = !known.has(key) && relevantHeader(header, jobs, ctx.candidateAddress);
+    if (!receiptRelevant && !outcomeRelevant) { checked += 1; continue; }
     if (bodies >= MAX_BODIES_PER_SCAN) { firstUnhandled = header.uid; break; }
     bodies += 1;
-    const item = evaluateMail({ header, body: await session.bodyText(header.uid, BODY_BYTES), jobs, uidValidity: session.uidValidity });
+    const { body, truncated } = receiptRelevant && session.bodyForReceipt
+      ? await session.bodyForReceipt(header.uid, BODY_BYTES)
+      : { body: await session.bodyText(header.uid, BODY_BYTES), truncated: false };
     checked += 1;
+    if (receiptRelevant && ctx.receipts) {
+      try {
+        for (const match of evaluateSubmissionReceipt({ header, body, truncated, attempts, uidValidity: session.uidValidity })) {
+          ctx.receipts.record(match.attempt, match.result, match.proofRef, new Date().toISOString());
+        }
+      } catch {
+        firstReceiptUnhandled ??= header.uid;
+        log("Gmail: could not record receipt evidence; will retry.");
+      }
+    }
+    const item = outcomeRelevant ? evaluateMail({ header, body, jobs, uidValidity: session.uidValidity }) : null;
     if (!item) continue;
     known.add(item.key);
     found.push(item);
@@ -235,6 +263,7 @@ export async function scanUids(
     if (unrecorded > 0) log(`Gmail: could not record ${unrecorded} application event(s).`);
   }
 
+  if (firstReceiptUnhandled !== null) firstUnhandled = Math.min(firstUnhandled ?? firstReceiptUnhandled, firstReceiptUnhandled);
   let lastProcessedUid = sorted[sorted.length - 1]!;
   if (firstUnhandled !== null) {
     const index = sorted.indexOf(firstUnhandled);

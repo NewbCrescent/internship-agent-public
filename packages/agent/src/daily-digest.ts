@@ -5,16 +5,23 @@ import type { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 
 import {
+  acknowledgeApplicationHolds,
+  applicationHoldDelivered,
+  applicationHoldSchemaPresent,
   closeProfileDatabase,
+  getApplicationHold,
   getProfileDatabase,
   listAppliedJobsForMail,
   listApplicationEvents,
   listBrowserRuns,
   listJobSummaries,
-  resolveProfileDataDirectory
+  openApplicationAuditDatabase,
+  resolveProfileDataDirectory,
+  type ApplicationHold
 } from "@internship-agent/db";
-import { CAPTCHA_TOKEN_NAME } from "@internship-agent/browser";
-import { atsKindNeedsApproval, type WorkspaceProfile } from "@internship-agent/domain";
+import type { WorkspaceProfile } from "@internship-agent/domain";
+
+import { acquireHoldDeliveryGuard, candidateDeliveryRecipient, classifyOpenPauses, classifyRunHold, observeApplicationHolds, refreshApplicationHolds } from "./application-holds";
 
 import { discordFailureStatus, discordSettings, sendDiscordDm, type DiscordSettings, type DiscordTransport } from "./discord-notify";
 import { verificationSubject } from "./mail-outcomes";
@@ -36,11 +43,12 @@ const MAX_NAMES = 4;
 const FAILURE_RETRY_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-export type DigestPause = { label: string; status: "open" | "answered"; safeguard: boolean; upload: boolean };
+export type DigestPause = { label: string; status: "open" | "answered"; safeguard: boolean; upload: boolean; fieldId?: string };
 export type DigestRun = {
   id: string; status: string; atsConfirmed: boolean;
   /** The recognized site the candidate approves each run on (Oracle, SmartRecruiters); null or absent otherwise. */
   suggestedAtsKind?: string | null;
+  submissionApprovedAt?: string | null;
   voiceDraft: boolean; pauses: ReadonlyArray<DigestPause>;
 };
 export type ReplyKind = "assessment" | "interview" | "offer" | "rejection" | "recruiter";
@@ -49,6 +57,7 @@ export type DigestSnapshot = {
   applying: ReadonlyArray<{ jobId: string; companyName: string; title: string; run: DigestRun | null }>;
   /** Postings whose automatic run stopped because the generated resume ran over one page. */
   resumeTooLong: number;
+  holdDelivery?: boolean;
   sent: ReadonlyArray<{ jobId: string; companyName: string }>;
   replies: ReadonlyArray<{ companyName: string; kind: ReplyKind }>;
 };
@@ -56,36 +65,26 @@ export type DigestEntry = { number: number; runId: string; jobId: string; compan
 export type Digest = { text: string; items: DigestEntry[] };
 
 type Hold =
-  | { kind: "candidate"; captcha: boolean; asks: string[]; ready: false }
+  | { kind: "candidate"; captcha: boolean; asks: string[]; corrections?: string[]; ready: false }
   | { kind: "candidate"; captcha: false; asks: []; ready: true; voiceDraft: boolean }
   | { kind: "fixing" }
   | null;
 
-const HELD_STATUSES = new Set(["paused-needs-input", "awaiting-approval"]);
-
-/** Form recognition names a control with no label "Unlabeled <tag> control <n>": the agent's bug, not a question for the candidate. */
-function unlabeled(label: string): boolean {
-  return /^Unlabeled \S+ control \d+$/.test(label.trim());
-}
-
-/** Older runs recorded the hidden CAPTCHA token field as a safeguard pause: page machinery, neither a CAPTCHA nor a question. */
-function captchaToken(label: string): boolean {
-  return CAPTCHA_TOKEN_NAME.test(label.trim());
-}
-
-/** What a held run needs, in plain terms; "fixing" for holds the agent fixes itself, null when the run is not held. */
-export function classifyHold(run: DigestRun | null): Hold {
-  if (!run || !HELD_STATUSES.has(run.status)) return null;
-  const open = run.pauses.filter((pause) => pause.status === "open");
-  const captcha = open.some((pause) => pause.safeguard && !captchaToken(pause.label));
-  const asks = open.filter((pause) => !pause.safeguard && !unlabeled(pause.label) && !captchaToken(pause.label))
-    .map((pause) => quote(pause.label, 60) + (pause.upload ? " (file)" : ""));
-  if (captcha || asks.length > 0) return { kind: "candidate", captcha, asks, ready: false };
-  if (open.length > 0) return { kind: "fixing" };
-  if (run.status !== "awaiting-approval") return null;
-  // A recognized site the candidate approves each run on (Oracle, SmartRecruiters) is ready for them, not being fixed.
-  if (!run.atsConfirmed && !atsKindNeedsApproval(run.suggestedAtsKind)) return { kind: "fixing" };
-  return { kind: "candidate", captcha: false, asks: [], ready: true, voiceDraft: run.voiceDraft };
+/** What a held run needs, in plain terms. */
+export function classifyHold(run: DigestRun | null, numbered = false): Hold {
+  if (!run) return null;
+  const reason = classifyRunHold(run);
+  if (!reason) return null;
+  if (reason === "approval") return { kind: "candidate", captcha: false, asks: [], ready: true, voiceDraft: run.voiceDraft };
+  if (reason !== "candidate-question" && reason !== "manual-challenge" && reason !== "manual-field-correction") return { kind: "fixing" };
+  const open = classifyOpenPauses(run.pauses);
+  const captcha = open.some(({ kind }) => kind === "challenge");
+  const asks = open.filter(({ kind }) => kind === "question").map(({ pause, index }) =>
+    (numbered ? `Q${index + 1} ` : "") + quote(pause.label, 60) + (pause.upload ? " (file)" : "")
+  );
+  const corrections = open.filter(({ kind }) => kind === "correction")
+    .map(({ pause, index }) => `Q${index + 1} ${quote(pause.label, 60)}`);
+  return { kind: "candidate", captcha, asks, ready: false, ...(corrections.length ? { corrections } : {}) };
 }
 
 function clip(text: string, max: number): string {
@@ -124,7 +123,7 @@ export function buildDigest(snapshot: DigestSnapshot, now: Date): Digest | null 
   const waiting: Array<{ line: string; entry: DigestEntry; asks: boolean }> = [];
   let fixing = snapshot.resumeTooLong;
   for (const job of snapshot.applying) {
-    const hold = classifyHold(job.run);
+    const hold = classifyHold(job.run, snapshot.holdDelivery);
     if (!hold || !job.run) continue;
     if (hold.kind === "fixing") { fixing += 1; continue; }
     const company = plain(job.companyName, 40);
@@ -133,6 +132,11 @@ export function buildDigest(snapshot: DigestSnapshot, now: Date): Digest | null 
       parts.push(hold.voiceDraft ? `ready, check the drafted answer, then say "send ${company}"` : `ready, say "send ${company}"`);
     } else {
       if (hold.captcha) parts.push("solve a CAPTCHA");
+      if (hold.corrections?.length) {
+        const shown = hold.corrections.slice(0, MAX_QUESTIONS);
+        const more = hold.corrections.length - shown.length;
+        parts.push(`fix in the browser: ${shown.join(", ")}${more > 0 ? ` +${more} more` : ""}`);
+      }
       if (hold.asks.length > 0) {
         const n = hold.asks.length;
         const more = n > MAX_QUESTIONS ? ` +${n - MAX_QUESTIONS} more` : "";
@@ -143,7 +147,7 @@ export function buildDigest(snapshot: DigestSnapshot, now: Date): Digest | null 
     waiting.push({
       line: `${number}. ${postingName(job.companyName, job.title)} — ${parts.join("; ")}`,
       entry: { number, runId: job.run.id, jobId: job.jobId, company },
-      asks: !hold.ready
+      asks: !hold.ready && hold.asks.length > 0
     });
   }
   const sent = snapshot.sent.map((entry) => plain(entry.companyName, 40));
@@ -188,9 +192,9 @@ export function collectDigestSnapshot(database: DatabaseSync, sinceIso: string):
       applying.push({
         jobId: job.id, companyName: job.companyName, title: job.title,
         run: run ? {
-          id: run.id, status: run.status, atsConfirmed: run.atsConfirmed, suggestedAtsKind: run.suggestedAtsKind,
+          id: run.id, status: run.status, atsConfirmed: run.atsConfirmed, suggestedAtsKind: run.suggestedAtsKind, submissionApprovedAt: run.submissionApprovedAt,
           voiceDraft: run.decisions.some((decision) => decision.basis?.kind === "voice_draft"),
-          pauses: run.pauses.map(({ label, status, safeguard, upload }) => ({ label, status, safeguard, upload }))
+          pauses: run.pauses.map(({ label, status, safeguard, upload, fieldId }) => ({ label, status, safeguard, upload, fieldId }))
         } : null
       });
     }
@@ -271,35 +275,73 @@ export type DigestOutcome = "off" | "not-due" | "nothing" | "sent" | "failed";
  */
 export async function sendDailyDigest(input: {
   dataDir: string; settings: DiscordSettings | null; now: Date; read: (sinceIso: string) => DigestSnapshot;
-  transport?: DiscordTransport; log: (line: string) => void; force?: boolean;
+  transport?: DiscordTransport; log: (line: string) => void; force?: boolean; profile?: WorkspaceProfile;
 }): Promise<DigestOutcome> {
   const { dataDir, settings, now } = input;
   const log = (line: string) => { try { input.log(line); } catch { /* a failing log never escapes */ } };
   if (!settings) return "off";
   let state = EMPTY_STATE;
+  const release = acquireHoldDeliveryGuard(dataDir, "candidate");
+  if (!release) return "not-due";
+  const recipient = candidateDeliveryRecipient(settings.userId);
+  const withDatabase = <T>(work: (database: DatabaseSync) => T): T | undefined => {
+    if (!input.profile) return;
+    try { return work(getProfileDatabase(input.profile)); }
+    finally { closeProfileDatabase(input.profile); }
+  };
   try {
     state = readDigestState(dataDir);
     if (!input.force && !digestDue(state, now)) return "not-due";
-    const digest = buildDigest(input.read(digestSince(state, now)), now);
+    const snapshot = input.read(digestSince(state, now));
+    const pending = withDatabase((database) => new Map(refreshApplicationHolds(database, dataDir, now)
+      .filter((hold) => hold.runId && hold.owner === "candidate" && !applicationHoldDelivered(database, hold, recipient))
+      .map((hold) => [hold.runId!, hold])));
+    const digest = buildDigest(pending ? candidateDigestSnapshot(snapshot, pending) : snapshot, now);
     if (!digest) return "nothing";
     await sendDiscordDm(settings, digest.text.split(settings.token).join("[redacted]"), input.transport);
-    writeDigestState(dataDir, { version: 1, lastSentDate: localDate(now), lastSentAt: now.toISOString(), lastFailedAt: null, items: digest.items });
+    writeDigestState(dataDir, { version: 1, lastSentDate: localDate(now), lastSentAt: now.toISOString(),
+      lastFailedAt: null, items: digest.items.length > 0 ? digest.items : state.items });
+    if (pending) {
+      const included = digest.items.map((item) => pending.get(item.runId)).filter((hold): hold is ApplicationHold => !!hold);
+      withDatabase((database) => acknowledgeApplicationHolds(database, included, recipient, now.toISOString()));
+    }
     log(`Discord digest: sent (${digest.items.length} waiting on you).`);
     return "sent";
   } catch (error) {
     log(`Discord digest failed: ${discordFailureStatus(error)}`);
     try { writeDigestState(dataDir, { ...state, lastFailedAt: now.toISOString() }); } catch { /* the next tick retries */ }
     return "failed";
+  } finally {
+    release();
   }
 }
 
-/** Reads the workspace database for the digest and closes the cached handle again. */
-export function workspaceDigestReader(profile: WorkspaceProfile): (sinceIso: string) => DigestSnapshot {
+function candidateDigestSnapshot(snapshot: DigestSnapshot, pending: { has(runId: string): boolean }): DigestSnapshot {
+  return {
+    ...snapshot, resumeTooLong: 0, holdDelivery: true,
+    applying: snapshot.applying.filter((job) => job.run && pending.has(job.run.id))
+  };
+}
+
+/** Reads the workspace database for the digest and closes it after the snapshot. */
+export function workspaceDigestReader(profile: WorkspaceProfile, preview?: { dataDir: string; recipient: string | null }): (sinceIso: string) => DigestSnapshot {
   return (sinceIso) => {
+    const database = preview ? openApplicationAuditDatabase(profile) : getProfileDatabase(profile);
     try {
-      return collectDigestSnapshot(getProfileDatabase(profile), sinceIso);
+      const snapshot = collectDigestSnapshot(database, sinceIso);
+      if (!preview || !applicationHoldSchemaPresent(database)) return snapshot;
+      const { observations } = observeApplicationHolds(database, preview.dataDir);
+      const pending = new Set(observations.flatMap((hold) => {
+        if (hold.owner !== "candidate" || !hold.runId) return [];
+        const current = getApplicationHold(database, hold.jobId, hold.runId);
+        if (preview.recipient && current?.active && current.identity === hold.identity
+          && applicationHoldDelivered(database, current, preview.recipient)) return [];
+        return [hold.runId];
+      }));
+      return candidateDigestSnapshot(snapshot, pending);
     } finally {
-      closeProfileDatabase(profile);
+      if (preview) database.close();
+      else closeProfileDatabase(profile);
     }
   };
 }
@@ -311,7 +353,7 @@ export async function dailyDigestTick(profile: WorkspaceProfile, log: (line: str
   try {
     await sendDailyDigest({
       dataDir: resolveProfileDataDirectory(profile), settings: discordSettings(), now: (options.now ?? (() => new Date()))(),
-      read: options.read ?? workspaceDigestReader(profile), transport: options.transport, log
+      read: options.read ?? workspaceDigestReader(profile), profile: options.read ? undefined : profile, transport: options.transport, log
     });
   } catch (error) {
     try { log(`Discord digest failed: ${discordFailureStatus(error)}`); } catch { /* never fails the tick */ }

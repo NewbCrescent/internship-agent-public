@@ -1,6 +1,8 @@
 import { z } from "zod";
 
+import { browserFieldKindSchema } from "./browser";
 import { applicationChannelSchema, candidateFactKeySchema, candidateFactSchema, factScopeSchema } from "./candidate-facts";
+import { postingPaySchema } from "./standard-answers";
 
 export const questionContextSchema = z.object({
   countryCode: z.string().trim().min(2).max(3).transform((value) => value.toUpperCase()).optional(),
@@ -10,7 +12,11 @@ export const questionContextSchema = z.object({
   /** The posting's employer, for company-scoped answers. */
   companyName: z.string().trim().min(1).max(200).optional(),
   /** The posting's one stated country; used only by relocation questions. */
-  postingCountryCode: z.string().trim().length(2).transform((value) => value.toUpperCase()).optional()
+  postingCountryCode: z.string().trim().length(2).transform((value) => value.toUpperCase()).optional(),
+  /** The form field's kind, when the question comes from a browser run's field. */
+  fieldKind: browserFieldKindSchema.optional(),
+  /** The posting's stated pay; only the salary rule reads it. */
+  postingPay: postingPaySchema.optional()
 });
 
 export const mappedQuestionSchema = z.object({
@@ -19,7 +25,9 @@ export const mappedQuestionSchema = z.object({
   scope: factScopeSchema,
   confidence: z.number().min(0).max(1),
   method: z.enum(["deterministic", "classifier"]),
-  explanation: z.string()
+  explanation: z.string(),
+  /** The question asks about a subset of the saved fact; only a saved No answers it. */
+  narrower: z.boolean().optional()
 });
 
 export const questionMappingSchema = z.discriminatedUnion("status", [

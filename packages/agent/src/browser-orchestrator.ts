@@ -29,6 +29,7 @@ import {
   type CurrentPackage
 } from "@internship-agent/db";
 import {
+  applicationWallKind,
   applicationWallReason,
   applyDecisions,
   atsFlowFor,
@@ -36,8 +37,11 @@ import {
   challengePause,
   classifyAts,
   classifyFieldRole,
-  createPlaywrightPage,
+  createApplicationPage,
   createWorkdayPage,
+  hasIcimsSteps,
+  hasJobviteConsent,
+  icimsHostOf,
   hasTranscriptField,
   invalidFieldPauses,
   isHandshakeHost,
@@ -60,6 +64,7 @@ import {
   type BrowserPage,
   type EducationInputs,
   type FieldResolution,
+  type IcimsAccountSteps,
   type PostSubmitEvidence,
   type UnfilledField,
   type WorkdayPage,
@@ -75,7 +80,9 @@ import {
   manualOnly,
   parseWorkdayUrl,
   planApplicationHistory,
-  scopeKey
+  scopeKey,
+  standingConsentSettings,
+  type StandingConsentSettings
 } from "@internship-agent/domain";
 import type {
   ApplicationChannel,
@@ -105,9 +112,12 @@ import { gmailMailboxFactory } from "./gmail-mailbox";
 import { greenhouseSecurityCodeLookup } from "./greenhouse-security-code";
 import { assertHandshakeSignedIn } from "./handshake-session-service";
 import { applyVoiceDrafts, createDefaultVoiceDrafter, draftSourcesFor, type VoiceDrafter } from "./voice-drafting";
-import { AutomaticRunStopped, WorkdayAccountHeld } from "./run-errors";
+import { AutomaticRunStopped, IcimsAccountHeld, WorkdayAccountHeld } from "./run-errors";
 import { postingQuestionContext, savedSelfIdentification } from "./saved-answers";
-import { savePostSubmitEvidenceQuietly, saveWorkdayEvidenceQuietly } from "./submit-evidence";
+import { saveIcimsEvidenceQuietly, savePostSubmitEvidenceQuietly, saveWorkdayEvidenceQuietly } from "./submit-evidence";
+import { ensureIcimsAccount, type IcimsAccountRuntime } from "./icims-account-service";
+import { getIcimsAccount } from "./icims-account-store";
+import { acceptJobviteConsentStep, logStandingAcceptances, standingPlannerInputs } from "./standing-consent";
 import {
   answerForPause,
   answeredPauseDecision,
@@ -126,6 +136,7 @@ export type PageFactory = (url: string) => Promise<BrowserPage>;
 
 export { AutomaticRunStopped } from "./run-errors";
 export { WorkdayAccountHeld } from "./run-errors";
+export { IcimsAccountHeld } from "./run-errors";
 
 /**
  * Where the application form lives: Lever and Ashby host it on a sibling
@@ -196,7 +207,8 @@ function requireApprovedPackage(database: DatabaseSync, jobId: string, automatic
 }
 
 async function defaultOpenPage(url: string, dataDir: string): Promise<BrowserPage> {
-  return openProfilePage(url, dataDir, createPlaywrightPage);
+  // The Playwright page plus iCIMS's account steps and Jobvite's consent step (taken only when their settings are on).
+  return openProfilePage(url, dataDir, createApplicationPage);
 }
 
 async function openProfilePage<T extends BrowserPage>(url: string, dataDir: string, adapt: (page: Page) => T): Promise<T> {
@@ -569,7 +581,7 @@ async function resolveFields(
       resolutions.set(field.id, saved ? { status: "SELF_IDENTIFIED", key: saved.key, option: saved.option } : { status: "UNAVAILABLE" });
       continue;
     }
-    const resolution = await resolveCandidateQuestion(field.label, context, { database });
+    const resolution = await resolveCandidateQuestion(field.label, { ...context, fieldKind: field.kind }, { database });
     if (resolution.status === "RESOLVED" && resolution.fact) {
       resolutions.set(field.id, {
         status: "RESOLVED",
@@ -622,11 +634,16 @@ export async function startBrowserRun(
     workdayAccounts?: WorkdayAccountRuntime | null;
     /** The graduation profile earlier applications to this company used (automatic runs only); the run keeps to it or is held. */
     companyProfile?: ApplicationProfile | null;
+    /** The candidate's standing consent and attestation settings; default from INTERNSHIP_AGENT_ACCEPT_DATA_CONSENT and INTERNSHIP_AGENT_SIGN_ATTESTATIONS. */
+    standingConsent?: StandingConsentSettings;
+    /** iCIMS account automation; used by automatic runs only, which may create an account. */
+    icimsAccounts?: IcimsAccountRuntime | null;
   } = {}
 ): Promise<RunReport> {
   const database = options.database ?? getDatabase();
   const candidateId = options.candidateId ?? LOCAL_CANDIDATE_ID;
   const automatic = options.automatic === true;
+  const standing = options.standingConsent ?? standingConsentSettings(process.env);
   const { posting, current, variant } = requireApprovedPackage(database, jobId, automatic);
   // Automatic runs keep to the profile the company already saw; candidate-started runs are only warned.
   const lock = automatic ? options.companyProfile ?? null : null;
@@ -640,7 +657,7 @@ export async function startBrowserRun(
   if (parseWorkdayUrl(applicationUrl)) {
     const report = await startWorkdayRun(database, { jobId, candidateId, applicationUrl, posting, current, variantId: variant.id, automatic, lock }, {
       dataDir, openPage: options.openPage, renderPdf, voiceDrafter: options.voiceDrafter,
-      account: automatic && options.workdayAccounts ? { runtime: options.workdayAccounts, mode: "create" } : null
+      account: automatic && options.workdayAccounts ? { runtime: options.workdayAccounts, mode: "create" } : null, standing
     });
     noteMixedProfile(database, report.run, posting.companyName, candidateId, manualPin);
     return report;
@@ -664,11 +681,28 @@ export async function startBrowserRun(
         formUrl = reached;
       }
     }
-    // iCIMS's account step and Jobvite's data-consent step: never typed into, on any run.
-    const wall = applicationWallReason(page.url(), await page.bodyText());
-    if (wall) {
-      if (automatic) throw new AutomaticRunStopped(wall);
-      throw new Error(wall);
+    // iCIMS's account step and Jobvite's data-consent step: taken only when
+    // their settings are on (Jobvite's on any run, iCIMS's on automatic runs);
+    // otherwise never typed into.
+    const body = await page.bodyText();
+    const wallKind = applicationWallKind(page.url(), body);
+    if (wallKind === "jobvite-consent" && standing.acceptDataConsent && hasJobviteConsent(page)) {
+      const stop = await acceptJobviteConsentStep(database, page, { jobId, country: candidate?.addressCountry });
+      if (stop) {
+        if (automatic) throw new AutomaticRunStopped(stop);
+        throw new Error(stop);
+      }
+      form = await recognizeCurrentForm(page);
+    } else if (wallKind === "icims-account" && automatic && options.icimsAccounts && hasIcimsSteps(page)) {
+      await runIcimsAccountStep(database, page, {
+        jobId, dataDir, company: posting.companyName, candidate, runtime: options.icimsAccounts, acceptDataConsent: standing.acceptDataConsent
+      });
+    } else {
+      const wall = applicationWallReason(page.url(), body);
+      if (wall) {
+        if (automatic) throw new AutomaticRunStopped(wall);
+        throw new Error(wall);
+      }
     }
     if (automatic) {
       // Never type into a sign-in or account form, and never record an empty
@@ -714,7 +748,8 @@ export async function startBrowserRun(
         addressPostalCode: candidate?.addressPostalCode,
         addressCountry: candidate?.addressCountry,
         phoneType: candidate?.phoneType,
-        fieldOfStudy: candidate?.fieldOfStudy
+        fieldOfStudy: candidate?.fieldOfStudy,
+        gpa: candidate?.gpa
       },
       resolutions,
       packageAnswers: current.package.answers.map((answer) => ({ prompt: answer.prompt, text: answer.text })),
@@ -725,7 +760,8 @@ export async function startBrowserRun(
         degree: candidate?.degree,
         startMonth: candidate?.educationStartMonth,
         graduation: runGraduation(database, candidateId, profile, candidate)
-      }
+      },
+      standing: standingPlannerInputs(candidate, standing)
     });
     const decisions = withUploadedResume(channel
       ? plan.decisions.map((decision): FillDecision => decision.action === "upload" && decision.basis?.kind === "variant"
@@ -767,6 +803,8 @@ export async function startBrowserRun(
         : "Browser run started from the approved package.");
     const { applied, unfilled } = await applyDecisions(page, form, decisions, uploadPathFor);
     const filled = pauseUnfilled(form, decisions, plan.pauses, unfilled);
+    // Each statement accepted or signed under the standing settings, with its exact text (unfilled ones are pauses now).
+    logStandingAcceptances(database, jobId, filled.decisions);
     const now = new Date().toISOString();
     const run = saveBrowserRun(database, {
       id: randomUUID(),
@@ -797,6 +835,77 @@ export async function startBrowserRun(
   } finally {
     await page.close();
   }
+}
+
+/**
+ * Values evidence must never store for an iCIMS host: the account email, and
+ * the host's saved email and password (the account email alone when the
+ * accounts file cannot be read).
+ */
+function icimsAccountSecrets(runtime: IcimsAccountRuntime, host: string | null): string[] {
+  const secrets = [runtime.email];
+  try {
+    const entry = host ? getIcimsAccount(runtime.file, host) : null;
+    if (entry) secrets.push(entry.email, entry.password ?? "");
+  } catch {
+    return [runtime.email].filter(Boolean);
+  }
+  return secrets.filter(Boolean);
+}
+
+/**
+ * iCIMS's account step on an automatic run with the iCIMS account opt-in:
+ * creates or signs in to the account (icims-account-service.ts), then stops
+ * at iCIMS's application, which the agent does not walk yet, saving evidence
+ * for the job either way. Always throws: IcimsAccountHeld for a hold,
+ * AutomaticRunStopped once the application is reached. No run is saved.
+ */
+async function runIcimsAccountStep(
+  database: DatabaseSync,
+  page: BrowserPage & { icims: IcimsAccountSteps },
+  input: {
+    jobId: string; dataDir: string; company: string; candidate: ReturnType<typeof getCandidate>;
+    runtime: IcimsAccountRuntime; acceptDataConsent: boolean;
+  }
+): Promise<never> {
+  const host = icimsHostOf(page.url());
+  const evidence = (outcome: "icims-account" | "icims-application", detail: string) => saveIcimsEvidenceQuietly({
+    database, dataDir: input.dataDir, jobId: input.jobId, page, outcome, detail, secrets: icimsAccountSecrets(input.runtime, host)
+  });
+  let result: "signed-in" | "created";
+  try {
+    result = await ensureIcimsAccount(page, {
+      database, jobId: input.jobId, applicationUrl: page.url(), company: input.company,
+      candidate: {
+        email: input.candidate?.email, legalFirstName: input.candidate?.legalFirstName,
+        legalLastName: input.candidate?.legalLastName, phone: input.candidate?.phone
+      },
+      runtime: input.runtime, acceptDataConsent: input.acceptDataConsent
+    });
+  } catch (error) {
+    if (error instanceof IcimsAccountHeld) await evidence("icims-account", error.message);
+    throw error;
+  }
+  const site = host ?? "the iCIMS site";
+  const stop = `iCIMS ${site}: the agent ${result === "created" ? "created your iCIMS account and signed in" : "signed in with the saved account"}, but it does not fill iCIMS's multi-page application yet. Finish the application at ${site}; \`pnpm icims:account --site ${site}\` prints the saved password.`;
+  await evidence("icims-application", stop);
+  throw new AutomaticRunStopped(stop);
+}
+
+/**
+ * A reopened Jobvite form that shows its Data Consent step again: accepted
+ * under the standing data-consent setting, else the run stops with today's
+ * reason before anything is filled.
+ */
+async function passJobviteConsentAgain(database: DatabaseSync, page: BrowserPage, jobId: string, standing: StandingConsentSettings): Promise<void> {
+  const body = await page.bodyText();
+  if (applicationWallKind(page.url(), body) !== "jobvite-consent") return;
+  if (standing.acceptDataConsent && hasJobviteConsent(page)) {
+    const stop = await acceptJobviteConsentStep(database, page, { jobId, country: getCandidate(database, LOCAL_CANDIDATE_ID)?.addressCountry });
+    if (stop) throw new Error(stop);
+    return;
+  }
+  throw new Error(applicationWallReason(page.url(), body) ?? "Jobvite shows its data-consent step.");
 }
 
 /** A candidate-started run is never blocked by the company's year; it is only noted on the timeline. */
@@ -840,7 +949,8 @@ export async function answerRunPause(
   // only, and the timeline records why. The caller reports whether anything
   // was stored, so a checked "remember" box never silently does nothing.
   const posting = getJobPosting(database, run.jobId);
-  const context = pauseContext(pause.suggestedScope) ?? {};
+  // The posting's own context (its one country, its pay), then the pause's suggested scope.
+  const context: QuestionContext = { ...postingQuestionContext(posting), ...(pauseContext(pause.suggestedScope) ?? {}) };
   const chosen = answerForPause(pause, answer);
   const plan = await planPauseMemory(pause, { companyName: posting?.companyName ?? null, context, answer: chosen.value });
   let outcome: PauseAnswerOutcome;
@@ -947,6 +1057,8 @@ export async function continueBrowserRun(
     renderPdf?: PdfRenderer;
     /** Workday only; undefined keeps the default drafter, null drafts nothing (pnpm run:answer). */
     voiceDrafter?: VoiceDrafter | null;
+    /** The candidate's standing consent and attestation settings; default from the environment. */
+    standingConsent?: StandingConsentSettings;
   } = {}
 ): Promise<RunReport> {
   const database = options.database ?? getDatabase();
@@ -954,9 +1066,11 @@ export async function continueBrowserRun(
   if (!run) throw new Error("The browser run is unknown.");
   if (run.status !== "paused-needs-input") throw new Error("Only paused runs continue.");
   const dataDir = resolveDataDir(options.dataDir);
+  const standing = options.standingConsent ?? standingConsentSettings(process.env);
   if (parseWorkdayUrl(run.applicationUrl)) {
     const { walk, url, title } = await continueWorkdayRun(database, run, {
-      dataDir, openPage: options.openPage, renderPdf: options.renderPdf ?? renderHtmlToPdf, voiceDrafter: options.voiceDrafter, mode: "fill", account: null, lock: null
+      dataDir, openPage: options.openPage, renderPdf: options.renderPdf ?? renderHtmlToPdf, voiceDrafter: options.voiceDrafter, mode: "fill", account: null, lock: null,
+      standing
     });
     const { status, pauses } = workdayOutcome(walk, run.pauses);
     const settled = updateBrowserRun(database, runId, {
@@ -977,6 +1091,7 @@ export async function continueBrowserRun(
     await enterHandshakeDialog(page, getJobPosting(database, run.jobId)?.source.applicationType);
     // A resume the candidate confirmed must not have changed while the run waited.
     await assertKeptAttachment(page, run.decisions);
+    await passJobviteConsentAgain(database, page, run.jobId, standing);
     const form = await recognizeCurrentForm(page);
     const resolutions = await resolveFields(form, database, { ...questionContextFor(channel), ...postingQuestionContext(getJobPosting(database, run.jobId)) });
     const decisions: FillDecision[] = [];
@@ -1103,9 +1218,12 @@ export async function submitBrowserRun(
     securityCodeMailbox?: VerificationMailboxFactory | null;
     /** Tests only: how the code is polled (default every 10 s for up to 3 minutes). */
     securityCodeWait?: { pollMs?: number; timeoutMs?: number; sleep?: (ms: number) => Promise<void> };
+    /** The candidate's standing consent and attestation settings; default from the environment. */
+    standingConsent?: StandingConsentSettings;
   } = {}
 ): Promise<BrowserRun> {
   const database = options.database ?? getDatabase();
+  const standing = options.standingConsent ?? standingConsentSettings(process.env);
   const run = getBrowserRun(database, runId);
   if (!run) throw new Error("The browser run is unknown.");
   if (!run.submissionApprovedAt) {
@@ -1125,7 +1243,7 @@ export async function submitBrowserRun(
       ({ walk } = await continueWorkdayRun(database, run, {
         dataDir, openPage: options.openPage, renderPdf: options.renderPdf ?? renderHtmlToPdf, mode: "submit",
         account: options.workdayAccounts ? { runtime: options.workdayAccounts, mode: "sign-in" } : null,
-        lock: options.companyProfile ?? null
+        lock: options.companyProfile ?? null, standing
       }));
     } catch (error) {
       updateBrowserRun(database, runId, { status: "failed" });
@@ -1169,6 +1287,8 @@ export async function submitBrowserRun(
     assertHandshakeSignedIn(database, page.url());
     await enterHandshakeDialog(page, getJobPosting(database, run.jobId)?.source.applicationType);
     await assertKeptAttachment(page, run.decisions);
+    // Jobvite's Data Consent step shown again: accepted under the standing setting, else the run keeps waiting for approval.
+    await passJobviteConsentAgain(database, page, run.jobId, standing);
     // A challenge the candidate would see is never solved: the run goes back to them, approval withdrawn.
     const challenge = page.visibleChallenge ? await page.visibleChallenge() : null;
     if (challenge) {
@@ -1222,7 +1342,7 @@ export async function submitBrowserRun(
     });
     let confirmation: string;
     try {
-      confirmation = await submitAndConfirm(page, { ...options.submitWait, securityCode });
+      confirmation = await submitAndConfirm(page, { ...options.submitWait, securityCode, atsKind: run.atsKind });
     } catch (error) {
       // Anything after the click (even a failed click) keeps what the page showed.
       postSubmit = postSubmitEvidenceOf(error) ?? await capturePostSubmitEvidence(page, "unknown");
@@ -1316,6 +1436,7 @@ function workdayContext(
   drafter: VoiceDrafter | null,
   answers: Map<string, string>,
   account: WorkdayRunContext["account"],
+  standing: StandingConsentSettings,
   transcript = false,
   lock: ApplicationProfile | null = null
 ): WorkdayRunContext {
@@ -1345,6 +1466,7 @@ function workdayContext(
       answers
     },
     profileLock: lock,
+    standing: standingPlannerInputs(candidate, standing),
     transcriptDocumentId: () => currentCandidateDocument("transcript", database, input.candidateId)?.id ?? null,
     deps: {
       resolveFields: (form, usesTranscript) => resolveFields(form, database, { ...questionContextFor(usesTranscript ? "handshake_internal" : null), ...postingQuestionContext(input.posting) }),
@@ -1382,7 +1504,10 @@ async function startWorkdayRun(
     jobId: string; candidateId: string; applicationUrl: string; posting: JobPosting; current: CurrentPackage; variantId: string; automatic: boolean;
     lock: ApplicationProfile | null;
   },
-  options: { dataDir: string; openPage?: PageFactory; renderPdf: PdfRenderer; voiceDrafter?: VoiceDrafter | null; account: WorkdayRunContext["account"] }
+  options: {
+    dataDir: string; openPage?: PageFactory; renderPdf: PdfRenderer; voiceDrafter?: VoiceDrafter | null; account: WorkdayRunContext["account"];
+    standing: StandingConsentSettings;
+  }
 ): Promise<RunReport> {
   const openPage = options.openPage ?? ((url: string) => openProfilePage(url, options.dataDir, createWorkdayPage));
   const drafter = options.voiceDrafter === undefined ? createDefaultVoiceDrafter({ dataDir: options.dataDir, database }) : options.voiceDrafter;
@@ -1391,10 +1516,11 @@ async function startWorkdayRun(
     const context = workdayContext(database, {
       jobId: input.jobId, candidateId: input.candidateId, posting: input.posting, variantId: input.variantId,
       packageAnswers: input.current.package.answers.map((answer) => ({ prompt: answer.prompt, text: answer.text }))
-    }, options.dataDir, options.renderPdf, drafter, new Map(), options.account, input.lock === "transcript", input.lock);
+    }, options.dataDir, options.renderPdf, drafter, new Map(), options.account, options.standing, input.lock === "transcript", input.lock);
     const walk = await walkWorkdayWithEvidence(database, page, input.applicationUrl, context, "fill", {
       dataDir: options.dataDir, run: { id: null, jobId: input.jobId }, account: options.account
     });
+    logStandingAcceptances(database, input.jobId, walk.decisions);
     const { status, pauses } = workdayOutcome(walk);
     setJobStatus(database, input.jobId, null, "APPLYING", input.automatic
       ? "Workday run started automatically from the verified package; your approval is required before submission."
@@ -1426,6 +1552,7 @@ async function continueWorkdayRun(
     account: WorkdayRunContext["account"];
     /** The company's pinned profile on the auto-submit path; null on candidate-started steps. */
     lock: ApplicationProfile | null;
+    standing: StandingConsentSettings;
   }
 ): Promise<{ walk: WorkdayWalkResult; url: string; title: string }> {
   const posting = getJobPosting(database, run.jobId);
@@ -1438,13 +1565,14 @@ async function continueWorkdayRun(
   const context = workdayContext(database, {
     jobId: run.jobId, candidateId: LOCAL_CANDIDATE_ID, posting, variantId: run.variantId,
     packageAnswers: current.package.answers.map((answer) => ({ prompt: answer.prompt, text: answer.text }))
-  }, options.dataDir, options.renderPdf, drafter, answers, options.account,
+  }, options.dataDir, options.renderPdf, drafter, answers, options.account, options.standing,
   run.applicationProfile === "transcript" || usesTranscript(run.decisions), options.lock);
   try {
     const target = { id: run.id, jobId: run.jobId };
     const walk = await walkWorkdayWithEvidence(database, page, run.applicationUrl, context, options.mode, {
       dataDir: options.dataDir, run: target, account: options.account
     }, options.mode === "submit" ? readWorkdayConfirmation : undefined);
+    logStandingAcceptances(database, run.jobId, walk.decisions, run.decisions);
     if (walk.outcome === "blocked") {
       await saveWorkdayEvidenceQuietly({
         database, dataDir: options.dataDir, run: target, page, outcome: "workday-errors",

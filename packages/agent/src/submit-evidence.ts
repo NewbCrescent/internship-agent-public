@@ -16,6 +16,7 @@ import {
   resolveProfileDataDirectory
 } from "@internship-agent/db";
 import {
+  capturePostSubmitEvidence,
   captureWorkdayEvidence,
   submitEvidenceRoot,
   type BrowserPage,
@@ -38,10 +39,15 @@ import { redactNoticeText } from "./pass-notice";
  * step held the host (before any run was saved, so the folder is the job's,
  * `<time>-workday-account`, with no run id) and `workday-errors` when Workday
  * would not save a step. `pnpm run:evidence --job` shows a job's evidence.
+ * iCIMS stops are saved for the job too: `icims-account` when the account
+ * step held the host and `icims-application` when the agent reached iCIMS's
+ * application and stopped there (folder `<time>-<outcome>`, no run id).
  */
 
 export const SUBMIT_EVIDENCE_EVENT = "Post-submit evidence saved";
 export const WORKDAY_EVIDENCE_EVENT = "Workday evidence saved";
+export const ICIMS_EVIDENCE_EVENT = "iCIMS evidence saved";
+const ICIMS_NOT_SAVED_EVENT = "iCIMS evidence not saved.";
 const NOT_SAVED_EVENT = "Post-submit evidence not saved.";
 const WORKDAY_NOT_SAVED_EVENT = "Workday evidence not saved.";
 const MAX_TEXT = 20_000;
@@ -62,7 +68,7 @@ export const submitEvidenceFileSchema = z.object({
   runId: z.string().min(1).nullable(),
   jobId: z.string().min(1),
   capturedAt: z.iso.datetime(),
-  outcome: z.enum(["field-errors", "refused", "challenged", "verification-code", "unknown", "workday-account", "workday-errors"]),
+  outcome: z.enum(["field-errors", "refused", "challenged", "verification-code", "unknown", "workday-account", "workday-errors", "icims-account", "icims-application"]),
   url: z.string().max(2_000),
   invalidFields: z.array(z.object({
     ref: z.string().max(200).nullable(),
@@ -114,6 +120,13 @@ function scrubSecrets(text: string, secrets: string[]): string {
 }
 
 const isWorkdayOutcome = (outcome: PostSubmitEvidence["outcome"]) => outcome === "workday-account" || outcome === "workday-errors";
+const isIcimsOutcome = (outcome: PostSubmitEvidence["outcome"]) => outcome === "icims-account" || outcome === "icims-application";
+
+function evidenceEvent(outcome: PostSubmitEvidence["outcome"]): string {
+  if (isWorkdayOutcome(outcome)) return WORKDAY_EVIDENCE_EVENT;
+  if (isIcimsOutcome(outcome)) return ICIMS_EVIDENCE_EVENT;
+  return SUBMIT_EVIDENCE_EVENT;
+}
 
 /**
  * Writes one evidence folder for the run: a full-page screenshot (none once
@@ -127,7 +140,7 @@ export async function savePostSubmitEvidence(input: SaveSubmitEvidenceInput): Pr
   const secrets = (input.secrets ?? []).filter((secret) => secret.length > 0);
   const scrub = (text: string) => scrubSecrets(text, secrets);
   const capturedAt = (input.now ?? new Date()).toISOString();
-  const folder = `${capturedAt.replace(/[:.]/g, "-")}-${run.id ?? "workday-account"}`;
+  const folder = `${capturedAt.replace(/[:.]/g, "-")}-${run.id ?? evidence.outcome}`;
   const root = submitEvidenceRoot(dataDir, run.jobId);
   const dir = join(root, folder);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -171,7 +184,7 @@ export async function savePostSubmitEvidence(input: SaveSubmitEvidenceInput): Pr
   const status = getJobPosting(database, run.jobId)?.status ?? "APPLYING";
   logApplicationEvent(database, {
     jobId: run.jobId, fromStatus: status, toStatus: status,
-    detail: `${isWorkdayOutcome(evidence.outcome) ? WORKDAY_EVIDENCE_EVENT : SUBMIT_EVIDENCE_EVENT} (${evidence.outcome}): ${relativeDir}; view it with pnpm run:evidence ${run.id ? `--run ${run.id.slice(0, 8)}` : `--job ${run.jobId.slice(0, 8)}`}.`
+    detail: `${evidenceEvent(evidence.outcome)} (${evidence.outcome}): ${relativeDir}; view it with pnpm run:evidence ${run.id ? `--run ${run.id.slice(0, 8)}` : `--job ${run.jobId.slice(0, 8)}`}.`
   });
   return { relativeDir, screenshotSaved };
 }
@@ -218,6 +231,41 @@ export async function saveWorkdayEvidenceQuietly(input: SaveWorkdayEvidenceInput
     try {
       const status = getJobPosting(input.database, input.run.jobId)?.status ?? "READY_FOR_REVIEW";
       logApplicationEvent(input.database, { jobId: input.run.jobId, fromStatus: status, toStatus: status, detail: WORKDAY_NOT_SAVED_EVENT });
+    } catch {
+      // The run's own outcome stands.
+    }
+  }
+}
+
+export type SaveIcimsEvidenceInput = {
+  database: DatabaseSync;
+  dataDir: string;
+  jobId: string;
+  page: BrowserPage;
+  outcome: "icims-account" | "icims-application";
+  /** What happened, in the agent's words (the hold reason, or the stop after reaching the application). */
+  detail: string;
+  /** The account email and the host's saved email and password: never stored. */
+  secrets?: string[];
+  now?: Date;
+};
+
+/**
+ * Saves the evidence of an iCIMS stop for the job (no run was saved) while
+ * its page is still open: the screenshot and redacted text a follow-up iCIMS
+ * adapter can be built from. Never throws; a failure logs a plain event.
+ */
+export async function saveIcimsEvidenceQuietly(input: SaveIcimsEvidenceInput): Promise<void> {
+  try {
+    const evidence = await capturePostSubmitEvidence(input.page, input.outcome, { detail: input.detail });
+    await savePostSubmitEvidence({
+      database: input.database, dataDir: input.dataDir, run: { id: null, jobId: input.jobId }, page: input.page, evidence,
+      secrets: input.secrets, now: input.now
+    });
+  } catch {
+    try {
+      const status = getJobPosting(input.database, input.jobId)?.status ?? "READY_FOR_REVIEW";
+      logApplicationEvent(input.database, { jobId: input.jobId, fromStatus: status, toStatus: status, detail: ICIMS_NOT_SAVED_EVENT });
     } catch {
       // The run's own outcome stands.
     }
@@ -274,7 +322,9 @@ const OUTCOME_TEXT: Record<StoredSubmitEvidence["outcome"], string> = {
   "verification-code": "the site asked for a security code it emailed",
   unknown: "no confirmation was recognized",
   "workday-account": "the Workday account step stopped",
-  "workday-errors": "Workday would not save a step"
+  "workday-errors": "Workday would not save a step",
+  "icims-account": "the iCIMS account step stopped",
+  "icims-application": "the agent reached iCIMS's application and stopped"
 };
 
 type EvidenceFlags = { target: { kind: "run" | "job"; ref: string }; profile: WorkspaceProfile; all: boolean };

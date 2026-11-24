@@ -231,7 +231,7 @@ export async function ensureWorkdayAccount(
     throw new WorkdayAccountHeld(reason);
   }
 
-  const verifyFlow = async (): Promise<"signed-in"> => {
+  const verifyFlow = async (unconfirmedCreateHold?: () => never): Promise<"signed-in"> => {
     if (!runtime.mailbox) {
       return hold("verify-email", `Workday ${host}: verify the account email Workday sent you; the agent signs in again on a later pass.`);
     }
@@ -239,11 +239,19 @@ export async function ensureWorkdayAccount(
     let result: Awaited<ReturnType<typeof pollVerificationLink>>;
     try {
       result = await pollVerificationLink(runtime.mailbox, { host, tenant, company, since: new Date(current!.createdAt) }, {
-        pollMs: runtime.mailPollMs, timeoutMs
+        ...(unconfirmedCreateHold ? { timeoutMs: 0 } : { pollMs: runtime.mailPollMs, timeoutMs })
       });
     } catch (error) {
-      if (error instanceof MailboxUnavailable) return hold("verify-email", `Workday ${host}: the verification email could not be read (${error.message}).`);
+      if (error instanceof MailboxUnavailable) {
+        if (unconfirmedCreateHold) return unconfirmedCreateHold();
+        return hold("verify-email", `Workday ${host}: the verification email could not be read (${error.message}).`);
+      }
       throw error;
+    }
+    // A timeout alone does not establish account creation. Require the exact
+    // tenant origin as well as the normal mailbox checks before opening a link.
+    if (unconfirmedCreateHold && (result.kind !== "found" || new URL(result.link).origin !== `https://${host}`)) {
+      return unconfirmedCreateHold();
     }
     if (result.kind === "none") {
       const minutes = Math.max(1, Math.round(timeoutMs / 60_000));
@@ -252,8 +260,12 @@ export async function ensureWorkdayAccount(
     if (result.kind === "ambiguous") {
       return hold("verify-email", `Workday ${host}: several verification links arrived; open the newest one yourself, and the agent signs in on a later pass.`);
     }
-    const link = result.link;
-    await safely(() => openInNewTab(link));
+    // Navigation errors can include the full URL, including its activation token.
+    try {
+      await openInNewTab(result.link);
+    } catch {
+      return unexpected("the verification page could not be opened");
+    }
     event(`Workday ${host}: verification email found and opened.`);
     await safely(() => goto(applicationUrl));
     const entered = await safely(() => page.enterApplication());
@@ -326,36 +338,41 @@ export async function ensureWorkdayAccount(
   // "Already exists" or no answer: the account may exist with the password
   // just saved, so the agent signs in once with it (it never resets a
   // password and never submits the create form again).
-  const NO_ANSWER = "Workday did not answer the create-account submit within 60 seconds";
-  const signInOnce = async (after: "exists" | "no-answer"): Promise<"signed-in" | "created"> => {
+  const signInOnce = async (
+    after: "exists" | "no-answer",
+    createTimeout = "Workday did not answer the create-account submit within 60 seconds"
+  ): Promise<"signed-in" | "created"> => {
     const exists = after === "exists";
     const signedIn: WorkdayAccountOutcome = await safely(() => signInToAccount({ email: runtime.email, password }, host, runtime.accountWait));
     switch (signedIn.result) {
       case "signed-in":
         connected(`The agent signed in to ${company}'s Workday with the saved account.`, exists
           ? `Workday ${host}: Workday said an account already exists for your email; the agent signed in with the saved password.`
-          : `Workday ${host}: ${NO_ANSWER}; the agent then signed in with the saved password, so the account exists.`);
+          : `Workday ${host}: ${createTimeout}; the agent then signed in with the saved password, so the account exists.`);
         return "created";
       case "verify-email":
         save({ account: "created" });
         event(exists
           ? `Workday ${host}: Workday said an account already exists; signing in asks to verify the email.`
-          : `Workday ${host}: ${NO_ANSWER}; signing in shows the account exists and asks to verify the email.`);
+          : `Workday ${host}: ${createTimeout}; signing in shows the account exists and asks to verify the email.`);
         return verifyFlow();
       case "wrong-password":
       case "no-account":
         if (exists) {
           return hold("exists", `Workday ${host}: Workday says an account already exists for this email, and signing in once with the saved password did not work; the agent never resets passwords. ${YOURSELF}`, { account: "refused" });
         }
-        return hold("interrupted", `Workday ${host}: ${NO_ANSWER}, and signing in once with the saved password did not work, so the account was probably not created. ${YOURSELF}`);
+        return hold("interrupted", `Workday ${host}: ${createTimeout}, and signing in once with the saved password did not work, so the account was probably not created. ${YOURSELF}`);
       case "locked":
         return hold("locked", `Workday ${host}: Workday says the account is locked or disabled; the agent does not try again. ${YOURSELF}`);
       case "captcha":
         return hold("captcha", `Workday ${host}: Workday shows a CAPTCHA, and the agent never solves CAPTCHAs. ${YOURSELF}`);
       case "error":
         return workdayError("the sign-in", signedIn);
-      default:
-        return unexpected(`${exists ? "Workday said an account already exists" : NO_ANSWER}, and the sign-in after it stopped (${signedIn.detail ?? "a page the agent does not recognize"})`);
+      default: {
+        const stopped = () => unexpected(`${exists ? "Workday said an account already exists" : createTimeout}, and the sign-in after it stopped (${signedIn.detail ?? "a page the agent does not recognize"})`);
+        if (!exists && signedIn.result === "no-answer" && runtime.mailbox) return verifyFlow(stopped);
+        return stopped();
+      }
     }
   };
   switch (outcome.result) {
@@ -371,8 +388,9 @@ export async function ensureWorkdayAccount(
       event(`Workday ${host}: account created; Workday asks to verify the email.`);
       return verifyFlow();
     case "exists":
+      return signInOnce("exists");
     case "no-answer":
-      return signInOnce(outcome.result);
+      return signInOnce("no-answer", outcome.detail);
     case "error":
       return workdayError("the create-account submit", outcome);
     case "password-refused":

@@ -4,12 +4,13 @@ import type {
   PauseRecord,
   RecognizedForm
 } from "@internship-agent/domain";
-import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, matchOfferedOption, promptSearchTerms, sameNameKey, sameNamedOption } from "@internship-agent/domain";
+import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, isStandardAnswerKey, matchOfferedOption, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption } from "@internship-agent/domain";
 
 import { classifyFieldRole, classifyUploadRole, isSensitiveRole } from "./ats/field-roles";
 import { isHearAboutQuestion, pickHearAboutOption } from "./ats/hear-about";
 import { usStateAlternate } from "./ats/us-states";
 import { isSafeguardField, stripRequiredMarker } from "./form-recognition";
+import { standingFieldDecision, type StandingInputs } from "./standing-fields";
 
 export type FieldResolution =
   | { status: "RESOLVED"; key: string; scope: string; display: string; value: boolean | string }
@@ -38,6 +39,8 @@ export type ContactProfile = {
   addressCountry?: string;
   phoneType?: string;
   fieldOfStudy?: string;
+  /** The GPA on the profile ("3.691"); filled only into whole-label GPA fields (gpaDecision). */
+  gpa?: string;
 };
 
 export type PlannerInputs = {
@@ -50,6 +53,8 @@ export type PlannerInputs = {
   transcriptDocumentId?: string | null;
   /** The profile's education, for an education block (School, Degree, start and end month and year). */
   education?: EducationInputs;
+  /** The candidate's standing consent and attestation settings; absent, consent boxes pause and signatures wait. */
+  standing?: StandingInputs;
 };
 
 export type EducationInputs = {
@@ -90,7 +95,19 @@ export function planAutofill(form: RecognizedForm, inputs: PlannerInputs): Autof
       pauses.push(pauseRecord(field, decisions[decisions.length - 1], false));
       continue;
     }
-    if (isSensitiveRole(classifyFieldRole(field))) {
+    const role = classifyFieldRole(field);
+    // Consent, attestation, and signature fields under the candidate's standing
+    // settings (standing-fields.ts). A sensitive list or radio set never reaches
+    // them; a single checkbox (an EEO acknowledgment) may.
+    if (!isSensitiveRole(role) || field.kind === "checkbox") {
+      const standing = standingFieldDecision(field, form, inputs.standing);
+      if (standing) {
+        decisions.push(standing);
+        if (standing.action === "pause" && standing.pause) pauses.push(pauseRecord(field, standing, false));
+        continue;
+      }
+    }
+    if (isSensitiveRole(role)) {
       // Demographic and equal-opportunity questions are filled only from the
       // candidate's saved voluntary self-identification answers, and only when
       // exactly one offered option matches; otherwise the candidate answers
@@ -180,6 +197,8 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
 
   const education = educationDecision(field, inputs.education);
   if (education) return education;
+  const gpa = gpaDecision(field, inputs.profile.gpa);
+  if (gpa) return gpa;
 
   if (field.kind === "email") {
     if (inputs.profile.email) {
@@ -218,16 +237,24 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
     });
   }
   if (field.kind === "file") {
-    const role = classifyUploadRole(field.label);
-    if (role === "resume" && inputs.variantId) {
-      return {
-        fieldId: field.id,
-        action: "upload",
-        value: null,
-        basis: { kind: "variant", variantId: inputs.variantId },
-        reason: "Uploads the prepared resume variant.",
-        pause: null
-      };
+    const role = classifyUploadRole(field.label, field.id);
+    if (role === "resume") {
+      if (inputs.variantId) {
+        return {
+          fieldId: field.id,
+          action: "upload",
+          value: null,
+          basis: { kind: "variant", variantId: inputs.variantId },
+          reason: "Uploads the prepared resume variant.",
+          pause: null
+        };
+      }
+      return pauseDecision(field, {
+        question: `"${field.label}" asks for your resume. Upload it on the profile page, then start the run again.`,
+        key: null,
+        scope: null,
+        safeguard: false
+      });
     }
     if (role === "transcript" && inputs.transcriptDocumentId) {
       return {
@@ -240,6 +267,7 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
       };
     }
     // An optional cover letter or other document stays empty; only a required one waits for the candidate.
+    // A resume is NEVER skipped, whether marked required or optional (handled above).
     if (!field.required && role !== "transcript") {
       return skip(field, "Optional upload left empty; the agent attaches only your resume and transcript.");
     }
@@ -350,7 +378,17 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
     if ((field.kind === "select" || field.kind === "radio") && field.options) {
       const match = field.options.find((option) =>
         option.toLocaleLowerCase("en-US") === resolution.display.toLocaleLowerCase("en-US")
-      ) ?? (resolution.key === "pronouns" ? matchPronounOption(resolution.display, field.options) : undefined);
+      ) ?? (resolution.key === "pronouns" ? matchPronounOption(resolution.display, field.options) : undefined)
+        ?? (standardAnswerOption(resolution.key, resolution.value, field.options) ?? undefined);
+      if (!match && isStandardAnswerKey(resolution.key)) {
+        // A legal or background answer is never echoed in the pause.
+        return pauseDecision(field, {
+          question: `The saved answer is not among the options for "${field.label}". How should it be answered?`,
+          key: resolution.key,
+          scope: resolution.scope,
+          safeguard: false
+        });
+      }
       if (!match) {
         return pauseDecision(field, {
           question: `The remembered answer is "${resolution.display}", which is not among the options for "${field.label}". How should it be answered?`,
@@ -494,10 +532,14 @@ function fill(
   basis: FillDecision["basis"],
   reason: string
 ): FillDecision {
+  // A legal or background answer is never echoed in a pause.
+  const hidden = basis?.kind === "fact" && isStandardAnswerKey(basis.key);
   // A radio set, checkbox, list, or upload is a choice: a known answer is never typed into it.
   if (CHOICE_KINDS.has(field.kind)) {
     return pauseDecision(field, {
-      question: `"${field.label}" is a choice; the known answer "${value.slice(0, 80)}" is not one of its options. How should it be answered?`,
+      question: hidden
+        ? `"${field.label}" is a choice, and the saved answer is not one of its options. How should it be answered?`
+        : `"${field.label}" is a choice; the known answer "${value.slice(0, 80)}" is not one of its options. How should it be answered?`,
       key: basis?.kind === "fact" ? basis.key : null,
       scope: basis?.kind === "fact" ? basis.scope : null,
       safeguard: false
@@ -507,7 +549,9 @@ function fill(
   // reformatted to fit it, so the candidate answers instead.
   if (field.kind === "number" && !/^-?\d+(?:\.\d+)?$/.test(value.trim())) {
     return pauseDecision(field, {
-      question: `"${field.label}" takes a number, and the known answer ("${value.slice(0, 80)}") is not one. How should it be answered?`,
+      question: hidden
+        ? `"${field.label}" takes a number, and the saved answer is not one. How should it be answered?`
+        : `"${field.label}" takes a number, and the known answer ("${value.slice(0, 80)}") is not one. How should it be answered?`,
       key: basis?.kind === "fact" ? basis.key : null,
       scope: basis?.kind === "fact" ? basis.scope : null,
       safeguard: false
@@ -681,6 +725,69 @@ function educationDecision(field: BrowserField, education: EducationInputs | und
   return null;
 }
 
+/**
+ * A whole GPA label on a 4.0 scale ("GPA", "Undergraduate GPA", "Cumulative GPA",
+ * "What is your GPA?", "GPA (out of 4.0)"). A major, departmental, high-school,
+ * weighted, term, or other-scale GPA never matches, so it is never answered
+ * with the profile GPA.
+ */
+const GPA_LABEL = /^(?:what is your )?(?:(?:undergraduate|cumulative|current|overall|college|university)\s+)*(?:gpa|grade point average)(?:\s*\(?(?:out of|on a)\s+4(?:\.0+)?(?:\s+scale)?\)?)?(?:\s*\(?(?:if applicable)\)?)?\??$/;
+const PROFILE_GPA = /^[0-4]\.\d{1,3}$/;
+const GPA_NUMBER = String.raw`(\d(?:\.\d+)?)`;
+
+/** "3.691" as "3.69": truncated, never rounded up, so it never overstates. */
+function twoDecimalGpa(gpa: string): string {
+  const [whole, fraction = ""] = gpa.split(".");
+  return `${whole}.${fraction.padEnd(2, "0").slice(0, 2)}`;
+}
+
+/** Whether a GPA list option's range holds the GPA; null when the option names no range it can read. */
+function gpaOptionContains(option: string, gpa: number, twoDecimals: string): boolean | null {
+  const text = option.toLocaleLowerCase("en-US").replace(/\s+/g, " ").trim();
+  const between = new RegExp(`${GPA_NUMBER}\\s*(?:-|–|—|to)\\s*${GPA_NUMBER}`).exec(text);
+  if (between) return gpa >= Number(between[1]) && gpa <= Number(between[2]);
+  const below = new RegExp(`\\b(?:below|under|less than)\\s+${GPA_NUMBER}`).exec(text);
+  if (below) return gpa < Number(below[1]);
+  const atLeast = new RegExp(`${GPA_NUMBER}\\s*\\+|${GPA_NUMBER}\\s+(?:and above|or higher)\\b|\\b(?:above|at least)\\s+${GPA_NUMBER}`).exec(text);
+  if (atLeast) return gpa >= Number(atLeast[1] ?? atLeast[2] ?? atLeast[3]) && gpa <= 4;
+  const plain = new RegExp(`^${GPA_NUMBER}$`).exec(text);
+  if (plain) return Number(plain[1]) === Number(twoDecimals);
+  return null;
+}
+
+/**
+ * A GPA field answered from the profile's GPA: a text or number box takes it
+ * with two decimals (truncated; the saved precision only when the label asks
+ * for three decimals), and a list or radio set takes the one option whose
+ * range holds it. Null when the label is not a whole 4.0-scale GPA label or
+ * no valid GPA is saved, so the usual rules apply (a required field pauses).
+ */
+function gpaDecision(field: BrowserField, gpa: string | undefined): FillDecision | null {
+  const label = normalizedLabel(field.label);
+  if (!GPA_LABEL.test(label) || field.widget === "autocomplete") return null;
+  const saved = gpa?.trim();
+  if (!saved || !PROFILE_GPA.test(saved)) return null;
+  const basis = { kind: "profile" as const, field: "gpa" };
+  const twoDecimals = twoDecimalGpa(saved);
+  if (field.kind === "text" || field.kind === "number") {
+    return fill(field, /\b(?:three|3) decimal/.test(label) ? saved : twoDecimals, basis, "The GPA on your profile.");
+  }
+  if ((field.kind === "select" || field.kind === "radio") && field.options?.length) {
+    const value = Number(saved);
+    const matches = field.options.filter((option) => gpaOptionContains(option, value, twoDecimals) === true);
+    if (matches.length === 1) {
+      return { fieldId: field.id, action: "choose", value: matches[0]!, basis, reason: "The GPA on your profile falls in this option's range.", pause: null };
+    }
+    return pauseDecision(field, {
+      question: `Your profile GPA fits none or several of the options for "${field.label}". Which option should be chosen?`.slice(0, 500),
+      key: null,
+      scope: null,
+      safeguard: false
+    });
+  }
+  return null;
+}
+
 /** "he/him" matches "He/Him/His": the saved pronouns are a prefix of exactly one option's. */
 function matchPronounOption(saved: string, options: string[]): string | undefined {
   const tokens = (text: string) => text.split("/").map((token) => token.trim().toLocaleLowerCase("en-US")).filter(Boolean);
@@ -788,7 +895,7 @@ const CONTACT_LABELS: Array<{ key: ContactKey; pattern: RegExp }> = [
   { key: "linkedinUrl", pattern: /^linked ?in(?: profile)?(?: url)?$/ },
   { key: "githubUrl", pattern: /^git ?hub(?: profile)?(?: url)?$/ },
   { key: "currentLocation", pattern: /^(?:current )?location$|^location \(city\)$|^where are you (?:currently )?(?:located|based)\??$/ },
-  { key: "preferredName", pattern: /^preferred(?: first)? name$/ },
+  { key: "preferredName", pattern: /^preferred(?: first)? name(?: \((?:if )?(?:different|applicable)[^)]*\))?\??$|^what is your preferred (?:first )?name\??$|^(?:what )?name (?:do you|would you like to) (?:prefer to )?(?:go by|be called)\??$/ },
   { key: "legalFirstName", pattern: /^(legal )?(first|given) name$/ },
   { key: "legalLastName", pattern: /^(legal )?(last|family) name$|^surname$/ },
   { key: "addressLine1", pattern: /^(street )?address( line)? ?1$|^street address$|^address$/ },

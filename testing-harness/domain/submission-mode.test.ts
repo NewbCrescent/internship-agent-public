@@ -30,12 +30,30 @@ describe("auto-submit policy", () => {
     expect(autoSubmitSettings({ ...on, INTERNSHIP_AGENT_AUTO_SUBMIT_MIN_FIT: "120" })?.minFit).toBe(100);
   });
 
+  it("removes the daily cap for the exact unlimited setting, subject to manual mode", () => {
+    const unlimited = { ...on, INTERNSHIP_AGENT_AUTO_SUBMIT_DAILY_CAP: "  unlimited  " };
+    expect(autoSubmitSettings(unlimited)).toEqual({ minFit: 50, dailyCap: null });
+    expect(autoSubmitSettings({ ...unlimited, INTERNSHIP_AGENT_MANUAL_ONLY: "1" })).toBeNull();
+    expect(autoSubmitSettings({ ...on, INTERNSHIP_AGENT_AUTO_SUBMIT_DAILY_CAP: "7" })?.dailyCap).toBe(7);
+    expect(autoSubmitSettings({ ...on, INTERNSHIP_AGENT_AUTO_SUBMIT_DAILY_CAP: " " })?.dailyCap).toBe(10);
+    expect(autoSubmitSettings({ ...on, INTERNSHIP_AGENT_AUTO_SUBMIT_DAILY_CAP: "Unlimited" })?.dailyCap).toBe(10);
+  });
+
   it("names every reason a filled run stays with the candidate", () => {
     const clean = { status: "awaiting-approval", atsConfirmed: true, pauses: [], decisions: [{ action: "fill", basis: { kind: "fact" } }] };
     expect(autoSubmitBlockers(clean)).toEqual([]);
     expect(autoSubmitBlockers({ ...clean, status: "paused-needs-input" })).toHaveLength(1);
-    expect(autoSubmitBlockers({ ...clean, pauses: [{ safeguard: true }] })).toHaveLength(2);
-    expect(autoSubmitBlockers({ ...clean, pauses: [{ safeguard: false }] })).toEqual(["The form asked something the agent could not answer on its own."]);
+    expect(autoSubmitBlockers({ ...clean, pauses: [{ safeguard: false, status: "answered" }] })).toEqual([]);
+    expect(autoSubmitBlockers({ ...clean, pauses: [{ safeguard: false, status: "open" }] })).toEqual([
+      "The form has unanswered questions waiting for you."
+    ]);
+    expect(autoSubmitBlockers({ ...clean, pauses: [{ safeguard: true, status: "open" }] })).toEqual([
+      "The site showed a safeguard challenge.",
+      "The form has unanswered questions waiting for you."
+    ]);
+    expect(autoSubmitBlockers({ ...clean, pauses: [{ safeguard: true, status: "answered" }] })).toEqual([
+      "The site showed a safeguard challenge."
+    ]);
     expect(autoSubmitBlockers({ ...clean, atsConfirmed: false })).toEqual(["The application site type was not recognized automatically."]);
     expect(autoSubmitBlockers({ ...clean, decisions: [{ action: "fill", basis: { kind: "voice_draft" } }] })).toHaveLength(1);
     expect(autoSubmitBlockers({ ...clean, decisions: [{ action: "keep", basis: null }] })).toHaveLength(1);

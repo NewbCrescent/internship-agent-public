@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { normalizeCompanyName } from "./company-name";
+import { exportControlCategory } from "./export-control";
 
 /**
  * Application channels that can carry their own answer for a fact. The one
@@ -225,6 +226,208 @@ export const factDefinitions = {
     sensitivity: "protected",
     reusePolicy: "auto",
     explicitUserSourceRequired: true
+  },
+  // The candidate's standard legal and background answers (pnpm profile:facts, 2026-11-20).
+  us_citizen: {
+    label: "U.S. citizen",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  us_person_export_controls: {
+    label: "U.S. person status (export controls)",
+    valueType: "text",
+    valueSchema: z.string().trim().min(1).max(200).refine((value) => exportControlCategory(value) !== null, "Not a recognized export-control status"),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  security_clearance_eligible: {
+    label: "Eligible for a security clearance",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  holds_security_clearance: {
+    label: "Holds an active security clearance",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  criminal_conviction: {
+    label: "Criminal conviction",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  government_debarment_or_exclusion: {
+    label: "Government debarment or exclusion",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  non_compete: {
+    label: "Subject to a non-compete agreement",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  non_solicitation: {
+    label: "Subject to a non-solicitation agreement",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  non_solicitation_ends: {
+    label: "Non-solicitation agreement end date",
+    valueType: "date",
+    valueSchema: z.iso.date(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  non_solicitation_explanation: {
+    label: "Non-solicitation agreement explanation",
+    valueType: "text",
+    valueSchema: z.string().trim().min(1).max(2_000),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  non_compete_or_non_solicitation: {
+    label: "Subject to a non-compete or non-solicitation agreement",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  non_solicitation_restricts_this_job: {
+    label: "Non-solicitation agreement restricts the role",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  conflict_of_interest: {
+    label: "Conflict of interest",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  relative_government_official: {
+    label: "Relative who is a government official",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  immediate_family_health_care_professional: {
+    label: "Immediate family member who is a health care professional",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  // Scoped to one named place only; a San Francisco answer never answers another city.
+  lives_within_50_miles: {
+    label: "Lives within 50 miles",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["location"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  // A rule, not a value: the posting's stated pay as an hourly figure (standard-answers.ts).
+  salary_expectation_rule: {
+    label: "Salary expectation rule",
+    valueType: "text",
+    valueSchema: z.enum(["posting_pay_hourly"]),
+    allowedScopes: ["global"],
+    sensitivity: "standard",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  concerns_working_on_dod_projects: {
+    label: "Concerns about working on Department of Defense projects",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  // Built from the saved answers above at resolve time (standard-answers.ts); never stored as facts.
+  us_person: {
+    label: "U.S. person (ITAR/EAR)",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  us_citizen_or_national: {
+    label: "U.S. citizen or national",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  us_citizen_or_permanent_resident: {
+    label: "U.S. citizen or permanent resident",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  salary_expectation: {
+    label: "Salary expectation",
+    valueType: "text",
+    valueSchema: z.string().trim().min(1).max(200),
+    allowedScopes: ["global"],
+    sensitivity: "standard",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
   }
 } satisfies Record<string, FactDefinition>;
 
@@ -246,7 +449,29 @@ export const candidateFactKeySchema = z.enum([
   "eeo_gender",
   "eeo_race_ethnicity",
   "eeo_veteran_status",
-  "eeo_disability_status"
+  "eeo_disability_status",
+  "us_citizen",
+  "us_person_export_controls",
+  "security_clearance_eligible",
+  "holds_security_clearance",
+  "criminal_conviction",
+  "government_debarment_or_exclusion",
+  "non_compete",
+  "non_solicitation",
+  "non_solicitation_ends",
+  "non_solicitation_explanation",
+  "non_compete_or_non_solicitation",
+  "non_solicitation_restricts_this_job",
+  "conflict_of_interest",
+  "relative_government_official",
+  "immediate_family_health_care_professional",
+  "lives_within_50_miles",
+  "salary_expectation_rule",
+  "concerns_working_on_dod_projects",
+  "us_person",
+  "us_citizen_or_national",
+  "us_citizen_or_permanent_resident",
+  "salary_expectation"
 ]);
 
 export type CandidateFactKey = z.infer<typeof candidateFactKeySchema>;

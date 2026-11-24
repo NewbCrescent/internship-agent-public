@@ -31,6 +31,7 @@
     "test:profile-resume": "vitest --root ../.. run testing-harness/agent/profile-resume.integration.test.ts",
     "test:workday-account": "vitest --root ../.. run testing-harness/agent/workday-account.test.ts",
     "test:workday-account:local": "vitest --root ../.. run testing-harness/agent/workday-account-store.integration.test.ts",
+    "test:icims-account": "vitest --root ../.. run testing-harness/agent/icims-account.test.ts",
     "test:record": "vitest --root ../.. run testing-harness/agent/application-record.integration.test.ts",
     "test:record:chromium": "vitest --root ../.. run testing-harness/agent/application-record.chromium.test.ts"
   },

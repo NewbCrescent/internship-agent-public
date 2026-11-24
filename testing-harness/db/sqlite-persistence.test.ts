@@ -20,6 +20,7 @@ import {
   getCandidatePreferences,
   getCurrentFact,
   getCurrentFacts,
+  getJobPosting,
   listJobSummaries,
   LOCAL_CANDIDATE_ID,
   listCurrentBaseResumes,
@@ -81,6 +82,17 @@ describe("SQLite persistence", () => {
     // milestones do not need a second migration to move a posting forward.
     database.prepare("UPDATE jobs SET status = ? WHERE id = ?").run("READY_FOR_REVIEW", summaries[0].id);
     expect(listJobSummaries(database)[0].status).toBe("READY_FOR_REVIEW");
+
+    // SQLite datetime formats (e.g. from datetime('now'), 'YYYY-MM-DD HH:MM:SS')
+    // are normalized so Zod datetime validation succeeds on getJobPosting and listJobSummaries.
+    database.prepare("UPDATE jobs SET created_at = datetime('now'), updated_at = datetime('now') WHERE id = ?").run(summaries[0].id);
+    const parsedPosting = getJobPosting(database, summaries[0].id);
+    expect(parsedPosting).not.toBeNull();
+    expect(parsedPosting?.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/);
+    expect(parsedPosting?.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/);
+    const parsedSummaries = listJobSummaries(database);
+    expect(parsedSummaries[0]?.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/);
+
     database.close();
   });
 

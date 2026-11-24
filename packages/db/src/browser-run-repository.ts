@@ -9,6 +9,7 @@ import {
   type FillDecision,
   type PauseRecord
 } from "@internship-agent/domain";
+import { normalizeSqliteDateTime } from "./job-posting-repository";
 
 type RunRow = {
   id: string;
@@ -54,9 +55,11 @@ function parseRow(row: RunRow): BrowserRun {
     ),
     submittedAnswers: row.submitted_answers_json ? JSON.parse(row.submitted_answers_json) : null,
     confirmationText: row.confirmation_text,
-    submissionApprovedAt: row.submission_approved_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at
+    submissionApprovedAt: row.submission_approved_at
+      ? normalizeSqliteDateTime(row.submission_approved_at)
+      : null,
+    createdAt: normalizeSqliteDateTime(row.created_at),
+    updatedAt: normalizeSqliteDateTime(row.updated_at)
   });
 }
 

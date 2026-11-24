@@ -2,6 +2,8 @@ import { isHearAboutQuestion } from "@internship-agent/browser";
 import { mentionsCompany, normalizeCompanyName, type FactScope, type QuestionContext, type QuestionMapping } from "@internship-agent/domain";
 import { readPlace } from "@internship-agent/jobs";
 
+import { mapStandardQuestion } from "./standard-question-mapper";
+
 export interface SemanticQuestionMapper {
   map(question: string, context?: QuestionContext): Promise<QuestionMapping>;
 }
@@ -203,6 +205,9 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
         explanation: "Relatives working at this company."
       };
     }
+
+    const standard = mapStandardQuestion(trimmed, context);
+    if (standard) return standard;
 
     if (/\b(?:at\s+least|over|older\s+than|above)\s+(?:the\s+age\s+of\s+)?(?:18|eighteen)\b|\b(?:18|eighteen)\s*(?:\+|years?(?:\s+of\s+age|\s+old)?\s+or\s+older|or\s+older)|\blegal(?:\s+working)?\s+age\b/i.test(normalized) &&
       !/\b(?:under|younger|below|less\s+than|not\s+yet)\b/i.test(normalized)) {

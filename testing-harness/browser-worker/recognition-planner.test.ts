@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 
+import { promptSearchTerms } from "@internship-agent/domain";
+
 import {
   attachedNamesFromText,
   classifyFieldRole,
   classifyUploadRole,
   hasTranscriptField,
+  isChatbotControl,
   isSubmitControl,
   planAutofill,
   readConfirmationFromText,
@@ -23,8 +26,12 @@ import {
   unfilledPause,
   CONSENT_QUESTION,
   classifyUnconfirmed,
+  isBenignAlertText,
+  isRefusalAlert,
   invalidFieldPauses,
   isConfirmationUrl,
+  isDialogCloseConfirmed,
+  isDoverOrAshby,
   postSubmitEvidenceOf,
   readNewConfirmationUrl,
   stripUrlQuery,
@@ -101,6 +108,33 @@ describe("form recognition", () => {
     ));
     const form = recognizeForm("https://example.com/apply", "Apply", many);
     expect(form.fields.length).toBeLessThanOrEqual(120);
+  });
+
+  it("ignores Oracle Digital Assistant (oda-) chatbot inputs", () => {
+    expect(isChatbotControl(control({ tag: "textarea", id: "oda-work-summary-text-area" }))).toBe(true);
+    expect(isChatbotControl(control({ tag: "input", id: "oda-input" }))).toBe(true);
+    expect(isChatbotControl(control({ tag: "input", name: "chatbot_query" }))).toBe(true);
+    expect(isChatbotControl(control({ tag: "input", id: "normal-field" }))).toBe(false);
+
+    const fields = recognizeFields([
+      control({ tag: "textarea", id: "oda-work-summary-text-area" }),
+      control({ tag: "input", type: "text", id: "oda-chat-input" }),
+      control({ tag: "input", type: "text", name: "chatbot_message" }),
+      control({ tag: "input", type: "text", id: "real-field", label: "Work Summary" })
+    ]);
+    expect(fields.length).toBe(1);
+    expect(fields[0]!.id).toBe("real-field");
+    expect(fields[0]!.label).toBe("Work Summary");
+  });
+
+  it("ignores MUI TextareaAutosize shadow textareas when resolving question labels", () => {
+    // When the shadow textarea is omitted, the visible textarea is recognized with its proper label
+    const fields = recognizeFields([
+      control({ tag: "textarea", id: ":rb:", label: "Why do you want to join Fixture Robotics?" })
+    ]);
+    expect(fields[0]!.label).toBe("Why do you want to join Fixture Robotics?");
+    expect(fields[0]!.kind).toBe("textarea");
+    expect(fields[0]!.label).not.toMatch(UNLABELED_CONTROL_LABEL);
   });
 });
 
@@ -226,6 +260,131 @@ describe("upload routing", () => {
     expect(transcript?.action).toBe("pause");
     expect(transcript?.pause?.question).toContain("transcript");
   });
+
+  it("recognizes Jobvite file-input-0 with Add Resume* label and sibling paste textarea as required resume upload", () => {
+    const fields = recognizeFields([
+      control({ tag: "input", type: "file", id: "file-input-0", label: "Add Resume*" }),
+      control({ tag: "textarea", id: "jv-paste-resume-textarea0", label: "Paste resume" })
+    ]);
+    expect(fields[0]!.required).toBe(true);
+    expect(classifyFieldRole(fields[0]!)).toBe("resume");
+    expect(classifyUploadRole(fields[0]!.label, fields[0]!.id)).toBe("resume");
+    const form = recognizeForm("https://jobs.jobvite.com/careers/apply", "Apply", [
+      control({ tag: "input", type: "file", id: "file-input-0", label: "Add Resume*" })
+    ]);
+    const plan = planAutofill(form, { profile: {}, resolutions: new Map(), packageAnswers: [], variantId: VARIANT_ID });
+    expect(plan.decisions[0]).toMatchObject({
+      fieldId: "file-input-0",
+      action: "upload",
+      basis: { kind: "variant", variantId: VARIANT_ID }
+    });
+  });
+
+  it("always plans resume upload for resume fields even when marked optional", () => {
+    const optionalResumeForm = recognizeForm("https://example.com/apply", "Apply", [
+      control({ tag: "input", type: "file", id: "optional-resume", label: "Resume (optional)", required: false }),
+      control({ tag: "input", type: "file", id: "file-input-0", label: "Select", required: false })
+    ]);
+    const planWithResume = planAutofill(optionalResumeForm, {
+      profile: {},
+      resolutions: new Map(),
+      packageAnswers: [],
+      variantId: VARIANT_ID
+    });
+    expect(planWithResume.decisions[0]).toMatchObject({
+      fieldId: "optional-resume",
+      action: "upload",
+      basis: { kind: "variant", variantId: VARIANT_ID }
+    });
+    expect(planWithResume.decisions[1]).toMatchObject({
+      fieldId: "file-input-0",
+      action: "upload",
+      basis: { kind: "variant", variantId: VARIANT_ID }
+    });
+
+    const planWithoutResume = planAutofill(optionalResumeForm, {
+      profile: {},
+      resolutions: new Map(),
+      packageAnswers: [],
+      variantId: null
+    });
+    expect(planWithoutResume.decisions[0]).toMatchObject({
+      fieldId: "optional-resume",
+      action: "pause"
+    });
+    expect(planWithoutResume.pauses[0]?.question).toContain("asks for your resume");
+  });
+
+  it("recognizes file inputs labeled 'Add Resume*' or 'Add Resume' as resume upload even when optional or custom id", () => {
+    // 1. "Add Resume" without asterisk and optional
+    const formUnstarred = recognizeForm("https://jobs.jobvite.com/careers/apply", "Apply", [
+      control({ tag: "input", type: "file", id: "file-input-0", label: "Add Resume", required: false })
+    ]);
+    expect(classifyUploadRole(formUnstarred.fields[0]!.label, formUnstarred.fields[0]!.id)).toBe("resume");
+    expect(classifyFieldRole(formUnstarred.fields[0]!)).toBe("resume");
+    const planUnstarred = planAutofill(formUnstarred, {
+      profile: {},
+      resolutions: new Map(),
+      packageAnswers: [],
+      variantId: VARIANT_ID
+    });
+    expect(planUnstarred.decisions[0]).toMatchObject({
+      fieldId: "file-input-0",
+      action: "upload",
+      basis: { kind: "variant", variantId: VARIANT_ID }
+    });
+
+    // 2. Custom id (not file-input-0) with "Add Resume*"
+    const formCustomId = recognizeForm("https://jobs.jobvite.com/careers/apply", "Apply", [
+      control({ tag: "input", type: "file", id: "custom-upload-field", label: "Add Resume*" })
+    ]);
+    expect(classifyUploadRole(formCustomId.fields[0]!.label, formCustomId.fields[0]!.id)).toBe("resume");
+    expect(classifyFieldRole(formCustomId.fields[0]!)).toBe("resume");
+    const planCustomId = planAutofill(formCustomId, {
+      profile: {},
+      resolutions: new Map(),
+      packageAnswers: [],
+      variantId: VARIANT_ID
+    });
+    expect(planCustomId.decisions[0]).toMatchObject({
+      fieldId: "custom-upload-field",
+      action: "upload",
+      basis: { kind: "variant", variantId: VARIANT_ID }
+    });
+
+    // 3. Custom id with "Add Resume" (no asterisk) and optional
+    const formCustomOptional = recognizeForm("https://jobs.jobvite.com/careers/apply", "Apply", [
+      control({ tag: "input", type: "file", id: "custom-upload-field", label: "Add Resume", required: false })
+    ]);
+    expect(classifyUploadRole(formCustomOptional.fields[0]!.label, formCustomOptional.fields[0]!.id)).toBe("resume");
+    const planCustomOptional = planAutofill(formCustomOptional, {
+      profile: {},
+      resolutions: new Map(),
+      packageAnswers: [],
+      variantId: VARIANT_ID
+    });
+    expect(planCustomOptional.decisions[0]).toMatchObject({
+      fieldId: "custom-upload-field",
+      action: "upload",
+      basis: { kind: "variant", variantId: VARIANT_ID }
+    });
+
+    // 4. Missing variantId causes pause rather than skip for "Add Resume*"
+    const formWithoutVariant = recognizeForm("https://jobs.jobvite.com/careers/apply", "Apply", [
+      control({ tag: "input", type: "file", id: "file-input-0", label: "Add Resume*", required: false })
+    ]);
+    const planWithoutVariant = planAutofill(formWithoutVariant, {
+      profile: {},
+      resolutions: new Map(),
+      packageAnswers: [],
+      variantId: null
+    });
+    expect(planWithoutVariant.decisions[0]).toMatchObject({
+      fieldId: "file-input-0",
+      action: "pause"
+    });
+    expect(planWithoutVariant.decisions[0]!.action).not.toBe("skip");
+  });
 });
 
 describe("Handshake Quick apply dialog", () => {
@@ -261,11 +420,11 @@ describe("submission confirmation", () => {
     expect(readNewConfirmation(formText, `${formText}\nThanks for applying!`)).toBeTruthy();
   });
 
-  function submitPage(options: { confirmAfterReads: number; dialogOpen?: boolean }): BrowserPage {
+  function submitPage(options: { confirmAfterReads: number; dialogOpen?: boolean; url?: string }): BrowserPage {
     let reads = 0;
     let clicked = false;
     return {
-      url: () => "https://example.com/apply",
+      url: () => options.url ?? "https://example.com/apply",
       title: async () => "Apply",
       collectControls: async () => [],
       bodyText: async () => {
@@ -279,7 +438,7 @@ describe("submission confirmation", () => {
       clickSubmit: async () => { clicked = true; },
       screenshot: async () => {},
       close: async () => {},
-      applicationDialogOpen: async () => options.dialogOpen ?? true
+      applicationDialogOpen: async () => (clicked ? (options.dialogOpen ?? true) : true)
     };
   }
 
@@ -292,6 +451,20 @@ describe("submission confirmation", () => {
       .rejects.toThrow(/dialog closed, but no confirmation text was recognized/);
     await expect(submitAndConfirm(submitPage({ confirmAfterReads: Infinity }), { timeoutMs: 20, pollMs: 1 }))
       .rejects.toThrow(/no new confirmation appeared/);
+  });
+
+  it("classifies a closed dialog on Dover or Ashby without errors as a confirmed submission", async () => {
+    const dover = submitPage({ confirmAfterReads: Infinity, dialogOpen: false, url: "https://jobs.dover.com/job/123" });
+    await expect(submitAndConfirm(dover, { timeoutMs: 20, pollMs: 1 })).resolves.toContain("Application submitted");
+
+    const ashby = submitPage({ confirmAfterReads: Infinity, dialogOpen: false, url: "https://jobs.ashbyhq.com/company/123/application" });
+    await expect(submitAndConfirm(ashby, { timeoutMs: 20, pollMs: 1 })).resolves.toContain("Application submitted");
+
+    const explicitDover = submitPage({ confirmAfterReads: Infinity, dialogOpen: false });
+    await expect(submitAndConfirm(explicitDover, { timeoutMs: 20, pollMs: 1, atsKind: "dover" })).resolves.toContain("Application submitted");
+
+    const explicitAshby = submitPage({ confirmAfterReads: Infinity, dialogOpen: false });
+    await expect(submitAndConfirm(explicitAshby, { timeoutMs: 20, pollMs: 1, atsKind: "ashby" })).resolves.toContain("Application submitted");
   });
 });
 
@@ -729,6 +902,17 @@ describe("real-form question coverage (education block, country, city, preferred
     expect(matchSuggestion("University of Example, Springfield", ["University of Example - Springfield", "University of Example: Springfield"])).toBeNull();
   });
 
+  it("matches type-ahead suggestions using hyphenated campus names and prompt search terms", () => {
+    const berkeley = "University of California, Berkeley";
+    const catalog = ["University of California - Berkeley", "University of California - Davis", "University of California - Los Angeles"];
+    expect(matchSuggestion(berkeley, catalog)).toBe("University of California - Berkeley");
+    const hyphenated = berkeley.replace(/,\s*/g, " - ");
+    expect(hyphenated).toBe("University of California - Berkeley");
+    expect(matchSuggestion(hyphenated, catalog)).toBe("University of California - Berkeley");
+    expect(promptSearchTerms(berkeley)).toContain("berkeley");
+    expect(matchSuggestion("UC Berkeley", catalog)).toBe("University of California - Berkeley");
+  });
+
   it("names a control with no id or name by its adapter tag", () => {
     expect(recognizeFields([control({ tag: "input", type: "text", ref: "ia-control-3", label: "Location" })])[0]!.id).toBe("ia-control-3");
   });
@@ -842,6 +1026,17 @@ describe("post-submit outcomes", () => {
     expect(isConfirmationUrl("https://example.com/jobs/1/confirmation")).toBe(false);
     expect(isConfirmationUrl("https://example.com/jobs/1?confirmation=1")).toBe(false);
     expect(isConfirmationUrl("not a url")).toBe(false);
+
+    // Ashby confirmation URLs
+    expect(isConfirmationUrl("https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a1/confirmation")).toBe(true);
+    expect(isConfirmationUrl("https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a1/submitted")).toBe(true);
+    expect(isConfirmationUrl("https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a1/application?submitted=1")).toBe(true);
+
+    // Dover confirmation URLs
+    expect(isConfirmationUrl("https://jobs.dover.com/job/00000000-0000-4000-8000-0000000000d1/applied")).toBe(true);
+    expect(isConfirmationUrl("https://app.dover.io/apply/job/00000000-0000-4000-8000-0000000000d1/confirmation")).toBe(true);
+    expect(isConfirmationUrl("https://jobs.dover.com/job/00000000-0000-4000-8000-0000000000d1?applied=true")).toBe(true);
+
     expect(readNewConfirmationUrl(GREENHOUSE, `${GREENHOUSE}/confirmation?token=abc#top`)).toBe(`${GREENHOUSE}/confirmation`);
     expect(readNewConfirmationUrl(`${GREENHOUSE}/confirmation`, `${GREENHOUSE}/confirmation`)).toBe(null);
     expect(readNewConfirmationUrl(GREENHOUSE, GREENHOUSE)).toBe(null);
@@ -863,6 +1058,56 @@ describe("post-submit outcomes", () => {
     expect(classifyUnconfirmed({ invalidBefore: [school], invalidAfter: [school], submitShown: true, alertText: "There was a problem" })).toBe("refused");
     expect(classifyUnconfirmed({ invalidBefore: [], invalidAfter: [], submitShown: true, alertText: "There was a problem" })).toBe("refused");
     expect(classifyUnconfirmed({ invalidBefore: [], invalidAfter: [], submitShown: true, alertText: "  " })).toBe("unknown");
+
+    // Benign title banners (e.g. Rippling aria-live banner) do not trigger refusal
+    expect(classifyUnconfirmed({ invalidBefore: [], invalidAfter: [], submitShown: true, alertText: "Apply - Engineering Intern (Summer 2027)" })).toBe("unknown");
+    expect(classifyUnconfirmed({ invalidBefore: [], invalidAfter: [], submitShown: false, alertText: "Application: Software Engineer" })).toBe("unknown");
+    expect(classifyUnconfirmed({ invalidBefore: [], invalidAfter: [], submitShown: true, alertText: "Engineering Intern", pageTitle: "Engineering Intern" })).toBe("unknown");
+    expect(classifyUnconfirmed({ invalidBefore: [], invalidAfter: [], submitShown: true, alertText: "Application error: Submission failed" })).toBe("refused");
+  });
+
+  it("distinguishes genuine refusal alerts from benign page headers and titles", () => {
+    // Rippling title banner cases
+    expect(isRefusalAlert("Apply - Engineering Intern (Summer 2027)")).toBe(false);
+    expect(isRefusalAlert("Apply – Product Design Intern")).toBe(false);
+    expect(isRefusalAlert("Application: Software Engineer")).toBe(false);
+    expect(isRefusalAlert("Apply")).toBe(false);
+    expect(isRefusalAlert("")).toBe(false);
+    expect(isRefusalAlert("   ")).toBe(false);
+
+    // Matching page title / heading
+    expect(isRefusalAlert("Engineering Intern (Summer 2027)", { pageTitle: "Engineering Intern (Summer 2027) - Rippling" })).toBe(false);
+    expect(isRefusalAlert("Senior Backend Engineer", { headingText: "Senior Backend Engineer" })).toBe(false);
+
+    // Real refusal alerts
+    expect(isRefusalAlert("There was a problem")).toBe(true);
+    expect(isRefusalAlert("This field is required.")).toBe(true);
+    expect(isRefusalAlert("An error occurred while submitting your application.")).toBe(true);
+    expect(isRefusalAlert("Submission failed. Please try again.")).toBe(true);
+    expect(isRefusalAlert("You have already applied for this position.")).toBe(true);
+    expect(isRefusalAlert("Application error: invalid input")).toBe(true);
+    expect(isRefusalAlert("Application deadline has passed")).toBe(true);
+  });
+
+  it("checks whether dialog closure is confirmed on Dover or Ashby", () => {
+    expect(isDoverOrAshby("https://jobs.dover.com/job/123")).toBe(true);
+    expect(isDoverOrAshby("https://app.dover.io/apply/job/123")).toBe(true);
+    expect(isDoverOrAshby("https://jobs.ashbyhq.com/company/123/application")).toBe(true);
+    expect(isDoverOrAshby("https://careers.example.com/job?ashby_jid=123")).toBe(true);
+    expect(isDoverOrAshby("https://example.com/apply", "dover")).toBe(true);
+    expect(isDoverOrAshby("https://example.com/apply", "ashby")).toBe(true);
+    expect(isDoverOrAshby("https://example.com/apply")).toBe(false);
+
+    // Closed dialog on Dover/Ashby without errors/refusals is confirmed
+    expect(isDialogCloseConfirmed({ dialogClosed: true, invalidBefore: [], invalidAfter: [], submitShown: false, alertText: "", isDoverOrAshby: true })).toBe(true);
+    // Closed dialog on unknown ATS is not confirmed
+    expect(isDialogCloseConfirmed({ dialogClosed: true, invalidBefore: [], invalidAfter: [], submitShown: false, alertText: "", isDoverOrAshby: false })).toBe(false);
+    // Field errors or refusals prevent confirmation
+    const school: InvalidField = { ref: "school--0", label: "School", error: "This field is required." };
+    expect(isDialogCloseConfirmed({ dialogClosed: true, invalidBefore: [], invalidAfter: [school], submitShown: true, alertText: "", isDoverOrAshby: true })).toBe(false);
+    expect(isDialogCloseConfirmed({ dialogClosed: true, invalidBefore: [], invalidAfter: [], submitShown: false, alertText: "Submission failed", isDoverOrAshby: true })).toBe(false);
+    // Dialog not closed
+    expect(isDialogCloseConfirmed({ dialogClosed: false, invalidBefore: [], invalidAfter: [], submitShown: false, alertText: "", isDoverOrAshby: true })).toBe(false);
   });
 
   type OutcomePage = {
@@ -902,7 +1147,7 @@ describe("post-submit outcomes", () => {
       alertText: async () => (clicked ? options.alertAfter ?? "" : ""),
       visibleChallenge: async () => (clicked && options.challengeAfter ? { kind: "recaptcha", detail: "a reCAPTCHA image challenge" } : null)
     };
-    if (options.dialogOpen !== undefined) page.applicationDialogOpen = async () => options.dialogOpen!;
+    if (options.dialogOpen !== undefined) page.applicationDialogOpen = async () => (clicked ? options.dialogOpen! : true);
     return page;
   };
   const fast = { timeoutMs: 20, pollMs: 1 };

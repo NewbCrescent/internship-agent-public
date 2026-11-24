@@ -143,6 +143,7 @@ function reconstructedLabel(decision: FillDecision, run: BrowserRun): string {
     case "variant":
     case "base_resume": return "Resume";
     case "candidate_document": return "Transcript";
+    case "standing_consent": return basis.statement;
     default: return decision.fieldId.replace(/::/g, ": ");
   }
 }
@@ -159,6 +160,10 @@ function sourceOf(decision: FillDecision): string {
     case "base_resume": return "Uploaded base resume";
     case "candidate_document": return "Transcript";
     case "question_answer": return "Saved answer (question memory)";
+    case "standing_consent":
+      return basis.setting === "accept_data_consent" ? "Standing data-consent setting"
+        : basis.setting === "sign_attestations" ? "Standing attestation setting"
+          : "Standing data-consent and attestation settings";
     default: return clip(decision.reason, 160);
   }
 }

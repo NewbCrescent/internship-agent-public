@@ -30,6 +30,23 @@ import {
 
 import { hourlyUsdPaySql } from "./posting-filter-sql";
 
+/**
+ * Normalizes SQLite datetime strings (e.g. from `datetime('now')` formatted as
+ * "YYYY-MM-DD HH:MM:SS" or without timezone offset) into valid ISO-8601 strings
+ * required by Zod datetime schema parsing.
+ */
+export function normalizeSqliteDateTime(value: string): string {
+  const trimmed = value.trim();
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(trimmed)) {
+    return trimmed.replace(" ", "T") + "Z";
+  }
+  const parsed = new Date(trimmed);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toISOString();
+  }
+  return trimmed;
+}
+
 type SpanColumns = { span_start: number; span_end: number; span_excerpt: string };
 
 type JobRow = {
@@ -469,8 +486,8 @@ export function getJobPosting(database: DatabaseSync, jobId: string): JobPosting
     technologies,
     constraints,
     publication: job.publication_json ? postingPublicationSchema.parse(JSON.parse(job.publication_json)) : null,
-    createdAt: job.created_at,
-    updatedAt: job.updated_at
+    createdAt: normalizeSqliteDateTime(job.created_at),
+    updatedAt: normalizeSqliteDateTime(job.updated_at)
   });
 }
 
@@ -530,7 +547,7 @@ export function listJobSummaries(
     hardRequirementCount: row.hard_count,
     preferredRequirementCount: row.preferred_count,
     publication: row.publication_json ? postingPublicationSchema.parse(JSON.parse(row.publication_json)) : null,
-    createdAt: row.created_at
+    createdAt: normalizeSqliteDateTime(row.created_at)
   }));
 }
 

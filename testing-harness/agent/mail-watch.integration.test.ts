@@ -10,7 +10,8 @@ import {
   getJobStatus,
   listApplicationEvents,
   resolveProfileDatabasePath,
-  resolveProfileDataDirectory
+  resolveProfileDataDirectory,
+  type ApplicationReceiptAttempt
 } from "@internship-agent/db";
 
 import type { DiscordFetch } from "../../packages/agent/src/discord-notify";
@@ -22,11 +23,13 @@ import {
   processNewMail,
   readMailWatchState,
   runMailWatch,
+  scanUids,
   workspaceMailStore,
   writeMailWatchState,
   type MailContext,
   type MailSession
 } from "../../packages/agent/src/mail-watch";
+import { catchUpSubmissionReceipt, type ReceiptStore } from "../../packages/agent/src/submission-receipts";
 import { MailboxUnavailable } from "../../packages/agent/src/workday-verification-mail";
 
 /**
@@ -215,6 +218,84 @@ function workspaceEvents(jobId: string) {
     database.close();
   }
 }
+
+describe("submission receipt checks", () => {
+  const attemptedAt = "2026-11-22T10:00:00Z";
+  const now = new Date("2026-11-22T11:00:00Z");
+  const attempt: ApplicationReceiptAttempt = {
+    jobId: ACME_ID, runId: "fixture-run", companyName: "Acme Robotics", title: "Software Engineering Intern",
+    atsKind: "greenhouse", sourceUrl: "https://boards.greenhouse.io/acmerobotics/jobs/123456",
+    applicationUrl: null, companyCareersUrl: null, attemptedAt, pending: 1
+  };
+  const receipt: Draft = {
+    fromAddress: "accounts@greenhouse-mail.io", fromName: "Acme Robotics",
+    receivedAt: new Date("2026-11-22T10:05:00Z"), subject: "Acme Robotics — Application received",
+    body: "We have received your application for Software Engineering Intern. PRIVATE_RECEIPT_TEXT."
+  };
+
+  it("checks receipt messages before outcome filtering and never sends their content", async () => {
+    const box = new FakeMailbox();
+    const message = box.add(receipt);
+    const { ctx, contents } = harness();
+    const seen: unknown[] = [];
+    const receipts: ReceiptStore = {
+      attempts: () => [attempt],
+      record: (target, result, proof) => seen.push({ id: target.runId, result, proof })
+    };
+    const session = box.session();
+    const report = await scanUids(session, [message.uid], { ...ctx, receipts }, { dryRun: false });
+    expect(report.items).toEqual([]);
+    expect(contents).toEqual([]);
+    expect(seen).toEqual([{ id: attempt.runId, result: "confirmed", proof: expect.stringMatching(/^[a-f0-9]{32}$/) }]);
+    expect(JSON.stringify(seen)).not.toContain("PRIVATE_RECEIPT_TEXT");
+    await session.close();
+  });
+
+  it("does not advance beyond an unrecorded receipt while unrelated outcome delivery succeeds", async () => {
+    const box = new FakeMailbox();
+    const pending = box.add(receipt);
+    const later = box.add(HACKERRANK);
+    const { ctx, contents } = harness();
+    let failed = true;
+    const receipts: ReceiptStore = {
+      attempts: () => [attempt],
+      record: () => { if (failed) throw new Error("local trace unavailable"); }
+    };
+    const session = box.session();
+    const scan = () => scanUids(session, [pending.uid, later.uid], { ...ctx, receipts }, { dryRun: false });
+    expect((await scan()).lastProcessedUid).toBe(pending.uid - 1);
+    expect(contents).toHaveLength(1);
+    failed = false;
+    expect((await scan()).lastProcessedUid).toBe(later.uid);
+    expect(contents).toHaveLength(1);
+    await session.close();
+  });
+
+  it("keeps an ambiguous older attempt and an unavailable mailbox unresolved", async () => {
+    const box = new FakeMailbox();
+    box.add(receipt);
+    const outcomes: string[] = [];
+    const store: ReceiptStore = {
+      attempts: () => [attempt, { ...attempt, runId: "older-submitted", pending: 0, attemptedAt: "2026-11-21T10:00:00Z" }],
+      record: (_target, result) => outcomes.push(result)
+    };
+    expect(await catchUpSubmissionReceipt({ runId: "fixture-run", store, connect: async () => box.session(), now })).toBe("ambiguous");
+    expect(await catchUpSubmissionReceipt({ runId: "fixture-run", store, connect: null, now })).toBe("unavailable");
+    expect(outcomes).toEqual(["ambiguous", "unavailable"]);
+  });
+
+  it("does not accept pre-attempt mail, generic thanks, or incomplete body reads", async () => {
+    const box = new FakeMailbox();
+    box.add({ ...receipt, receivedAt: new Date("2026-11-22T09:00:00Z") });
+    box.add({ ...receipt, subject: "Thank you", body: "Thanks for your interest in Software Engineering Intern." });
+    box.add({ ...receipt, subject: "Software Engineering Intern", body: "We have not yet received your application for Software Engineering Intern at Acme Robotics." });
+    box.add({ ...receipt, subject: "No application received", body: "There is no application received for Software Engineering Intern at Acme Robotics." });
+    const store: ReceiptStore = { attempts: () => [attempt], record: () => undefined };
+    expect(await catchUpSubmissionReceipt({ runId: "fixture-run", store, connect: async () => box.session(), now })).toBe("absent");
+    box.add({ ...receipt, body: receipt.body + "x".repeat(20_001) });
+    expect(await catchUpSubmissionReceipt({ runId: "fixture-run", store, connect: async () => box.session(), now })).toBe("truncated");
+  });
+});
 
 describe("Gmail IDLE watcher", () => {
   it("starts at UIDNEXT, DMs a new assessment from the IDLE push once, and notes it on the job's timeline", async () => {

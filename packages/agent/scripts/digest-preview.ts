@@ -1,6 +1,7 @@
 import { resolveProfileDataDirectory } from "@internship-agent/db";
 import { workspaceProfileSchema } from "@internship-agent/domain";
 
+import { candidateDeliveryRecipient } from "../src/application-holds";
 import { buildDigest, digestSince, readDigestState, sendDailyDigest, workspaceDigestReader } from "../src/daily-digest";
 import { discordSettings } from "../src/discord-notify";
 
@@ -14,10 +15,10 @@ async function main() {
   const index = args.indexOf("--profile");
   const profile = workspaceProfileSchema.parse(index >= 0 ? args[index + 1] : "real");
   const dataDir = resolveProfileDataDirectory(profile);
-  const read = workspaceDigestReader(profile);
   const now = new Date();
   const settings = discordSettings();
   if (!args.includes("--send")) {
+    const read = workspaceDigestReader(profile, { dataDir, recipient: settings ? candidateDeliveryRecipient(settings.userId) : null });
     const digest = buildDigest(read(digestSince(readDigestState(dataDir), now)), now);
     const text = digest?.text ?? "Nothing to report today.";
     console.log(settings ? text.split(settings.token).join("[redacted]") : text);
@@ -28,7 +29,7 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  const outcome = await sendDailyDigest({ dataDir, settings, now, read, force: true, log: (line) => console.log(line) });
+  const outcome = await sendDailyDigest({ dataDir, settings, now, read: workspaceDigestReader(profile), profile, force: true, log: (line) => console.log(line) });
   if (outcome === "nothing") console.log("Nothing to report today; nothing sent.");
   if (outcome === "failed") process.exitCode = 1;
 }

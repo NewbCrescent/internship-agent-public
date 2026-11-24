@@ -25,17 +25,18 @@ import {
 import { prepareApplication } from "./application-orchestrator";
 import { relabelHeldPostings } from "./requirement-relabel";
 import { getMatchReport, evaluateAndPersistMatch } from "./match-orchestrator";
-import { applicationUrlFor, approveRunSubmissionAutomatically, AutomaticRunStopped, startBrowserRun, submitBrowserRun,
+import { applicationUrlFor, approveRunSubmissionAutomatically, AutomaticRunStopped, IcimsAccountHeld, startBrowserRun, submitBrowserRun,
   WorkdayAccountHeld, type PageFactory, type PdfRenderer } from "./browser-orchestrator";
 import { resolveWorkdayAccounts, workdayAccountSettings, workdayAccountWait, type WorkdayAccountSettings } from "./workday-account-service";
+import { icimsAccountSettings, icimsAccountWait, resolveIcimsAccounts, type IcimsAccountSettings } from "./icims-account-service";
 import { fitTargetDecision, postingTargetDecision, targetTerm } from "./application-target";
 import { companyStanding } from "./company-policy";
 import type { VoiceDrafter } from "./voice-drafting";
 import type { VerificationMailboxFactory } from "./workday-verification-mail";
 import { AUTO_SUBMIT_EVENT, autoSubmitBlockers, autoSubmitSettings, combineTargetDecisions, manualOnly, parseWorkdayUrl,
   workdaySiteKey, type AutoSubmitSettings, type BrowserRun, type TargetDecision, type TargetTerm } from "@internship-agent/domain";
-import { COMPANY_CAP_PREFIX, companyCapReason, companyCapSetting, DEFAULT_COMPANY_CAP } from "@internship-agent/domain";
-import { SubmissionHeld } from "@internship-agent/browser";
+import { COMPANY_CAP_PREFIX, companyCapReason, companyCapSetting, DEFAULT_COMPANY_CAP, standingConsentSettings } from "@internship-agent/domain";
+import { icimsHostOf, SubmissionHeld } from "@internship-agent/browser";
 
 export type PipelineSettings = {
   /** Qualified postings at or above this fit score are prepared. */
@@ -48,6 +49,8 @@ export type PipelineSettings = {
   autoSubmit?: AutoSubmitSettings | null;
   /** Create and sign in to Workday accounts with this email (INTERNSHIP_AGENT_WORKDAY_ACCOUNT_EMAIL; needs auto-apply). */
   workdayAccounts?: WorkdayAccountSettings | null;
+  /** Create and sign in to iCIMS accounts (INTERNSHIP_AGENT_ICIMS_ACCOUNTS=1 with the account email; needs auto-apply). */
+  icimsAccounts?: IcimsAccountSettings | null;
   /** Most automatic applications per company per target term (INTERNSHIP_AGENT_COMPANY_CAP, default 2): runs the pipeline started that are in flight or submitted. */
   companyCap?: number;
 };
@@ -119,6 +122,8 @@ export function pipelineSettings(env: Record<string, string | undefined> = proce
   if (target && autoSubmit) settings.autoSubmit = autoSubmit;
   const accounts = workdayAccountSettings(env);
   if (accounts) settings.workdayAccounts = accounts;
+  const icims = icimsAccountSettings(env);
+  if (icims) settings.icimsAccounts = icims;
   const cap = companyCapSetting(env);
   if (cap !== null) settings.companyCap = cap;
   return settings;
@@ -132,9 +137,10 @@ export type PipelineReport = {
   stopped: Array<{ jobId: string; reason: string }>;
   /**
    * Workday applications held without opening a browser until the candidate
-   * signs in to that site, or held by an account step (`detail` says why).
+   * signs in to that site, or held by an account step (`detail` says why);
+   * iCIMS applications held by their account step (siteKey `icims:<host>`).
    */
-  waiting: Array<{ jobId: string; siteKey: string; reason: "workday-sign-in" | "workday-account"; detail?: string }>;
+  waiting: Array<{ jobId: string; siteKey: string; reason: "workday-sign-in" | "workday-account" | "icims-account"; detail?: string }>;
   /** Submitted by the auto-submit policy, with the confirmation the site showed. */
   submitted: Array<{ jobId: string; confirmation: string }>;
   /** Filled runs left at the submit step for the candidate, and why. */
@@ -253,6 +259,9 @@ export async function advancePipeline(options: {
   if (!settings.autoApply || manualOnly()) return report;
   const accounts = settings.workdayAccounts ? resolveWorkdayAccounts(settings.workdayAccounts, options.dataDir) : null;
   const runtime = accounts && "runtime" in accounts ? accounts.runtime : null;
+  const icimsAccounts = settings.icimsAccounts ? resolveIcimsAccounts(settings.icimsAccounts, options.dataDir) : null;
+  const icimsRuntime = icimsAccounts && "runtime" in icimsAccounts ? icimsAccounts.runtime : null;
+  const acceptDataConsent = standingConsentSettings().acceptDataConsent;
   // Postings at one company compete for its cap: the higher current AI fit runs first (a stable sort keeps import order on ties).
   const fitScore = new Map<string, number>();
   const ready = listJobSummaries(database).filter((job) => job.status === "READY_FOR_REVIEW");
@@ -298,10 +307,20 @@ export async function advancePipeline(options: {
         continue;
       }
     }
+    // With the iCIMS account opt-in, a held iCIMS host waits without opening a browser.
+    const icimsHost = icimsHostOf(url);
+    if (icimsHost && icimsAccounts) {
+      const held = icimsAccountWait(icimsAccounts, icimsHost, getCandidate(database, candidateId)?.email, new Date(), acceptDataConsent);
+      if (held) {
+        report.waiting.push({ jobId: job.id, siteKey: `icims:${icimsHost}`, reason: "icims-account", detail: held });
+        continue;
+      }
+    }
     try {
       const { run } = await startBrowserRun(job.id, url, {
         database, candidateId, dataDir: options.dataDir, openPage: options.openPage, renderPdf: options.renderPdf,
-        voiceDrafter: options.voiceDrafter, automatic: true, workdayAccounts: runtime, companyProfile: standing?.profile ?? null
+        voiceDrafter: options.voiceDrafter, automatic: true, workdayAccounts: runtime, companyProfile: standing?.profile ?? null,
+        icimsAccounts: icimsRuntime
       });
       report.started.push({ jobId: job.id, runStatus: run.status });
       if (autoSubmit && withFit) {
@@ -309,8 +328,10 @@ export async function advancePipeline(options: {
       }
     } catch (error) {
       const reason = messageOf(error);
-      const waiting = error instanceof WorkdayAccountHeld;
-      if (waiting && workday) report.waiting.push({ jobId: job.id, siteKey: workdaySiteKey(workday), reason: "workday-account", detail: reason });
+      const icimsHeld = error instanceof IcimsAccountHeld;
+      const waiting = error instanceof WorkdayAccountHeld || icimsHeld;
+      if (waiting && workday && !icimsHeld) report.waiting.push({ jobId: job.id, siteKey: workdaySiteKey(workday), reason: "workday-account", detail: reason });
+      else if (icimsHeld) report.waiting.push({ jobId: job.id, siteKey: `icims:${icimsHost ?? "unknown"}`, reason: "icims-account", detail: reason });
       else report.stopped.push({ jobId: job.id, reason });
       // Keep enough of the error to diagnose it (validation errors span lines).
       const prefix = waiting ? AUTOMATIC_WAIT : error instanceof AutomaticRunStopped ? AUTOMATIC_STOP : AUTOMATIC_FAILURE;
@@ -330,17 +351,23 @@ export async function advancePipeline(options: {
     const reasons = [...(decision.outcome === "apply" ? [] : decision.reasons), ...autoSubmitBlockers(run)];
     const standing = companyStanding(database, run.jobId, { term: target });
     if (standing && standing.applications >= cap) reasons.push(companyCapReason(standing.company, standing.applications));
-    const midnight = new Date();
-    midnight.setHours(0, 0, 0, 0);
-    if (reasons.length === 0 && automaticSubmissionsSince(database, midnight.toISOString()) >= policy.dailyCap) {
-      reasons.push(`Today's ${policy.dailyCap} automatic submissions are used up.`);
+    if (reasons.length === 0 && policy.dailyCap !== null) {
+      const midnight = new Date();
+      midnight.setHours(0, 0, 0, 0);
+      if (automaticSubmissionsSince(database, midnight.toISOString()) >= policy.dailyCap) {
+        reasons.push(`Today's ${policy.dailyCap} automatic submissions are used up.`);
+      }
     }
     if (reasons.length > 0) { report.held.push({ jobId: run.jobId, reasons }); return; }
     const fit = getSemanticFit(database, run.jobId);
     const ai = fit && !fit.stale && fit.assessment.version === 2
       ? `, AI fit ${fit.assessment.score} (${fit.assessment.rating.toLocaleLowerCase("en-US")}, ${fit.assessment.confidence.toLocaleLowerCase("en-US")} confidence) at or above your bar of ${policy.minFit}` : "";
+    const standingClause = run.decisions.some((entry) => entry.basis?.kind === "standing_consent")
+      ? ["consent and attestation statements were accepted under your standing settings (each is on the timeline);"]
+      : [];
     approveRunSubmissionAutomatically(run.id, [
       `${target!.season} ${target!.year} term, software or adjacent role, US location${ai};`,
+      ...standingClause,
       "every answer came from your saved facts and materials."
     ], { database });
     try {

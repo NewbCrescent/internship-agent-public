@@ -3,6 +3,13 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { z } from "zod";
+import {
+  acknowledgeApplicationHolds, applicationHoldDelivered, closeProfileDatabase, getApplicationHold,
+  getProfileDatabase, type ApplicationHold
+} from "@internship-agent/db";
+import type { WorkspaceProfile } from "@internship-agent/domain";
+
+import { acquireHoldDeliveryGuard, candidateDeliveryRecipient, classifyOpenPauses } from "./application-holds";
 
 import { discordFailureStatus, sendDiscordDm, type DiscordSettings, type DiscordTransport } from "./discord-notify";
 import type { PipelineReport } from "./pipeline-orchestrator";
@@ -16,14 +23,16 @@ import type { PipelineReport } from "./pipeline-orchestrator";
  * was saved; the record itself is never read or attached.
  */
 export type NoticeSection = "held" | "sent" | "stopped" | "errors";
-export type NoticeItem = { key: string; section: NoticeSection; lines: string[] };
+export type NoticeItem = { key: string; section: NoticeSection; lines: string[]; hold?: ApplicationHold };
 /** Only what a notice may show: no answers, drafts, or question rewordings. */
-export type NoticePause = { label: string; status: "open" | "answered"; safeguard: boolean; sensitive: boolean; upload: boolean };
+export type NoticePause = { label: string; status: "open" | "answered"; safeguard: boolean; sensitive: boolean; upload: boolean; fieldId?: string };
 export type NoticeLookup = {
   posting(jobId: string): { companyName: string; title: string } | null;
   latestRun(jobId: string): { id: string; status: string; pauses: ReadonlyArray<NoticePause> } | null;
   /** True when the local record of a sent application exists. Only this fact is shown, never the file, its path, or its contents. */
   recordSaved?(jobId: string): boolean;
+  /** When supplied, persistent classification replaces report heuristics. */
+  holds?: ReadonlyArray<ApplicationHold>;
 };
 
 const MAX_QUESTIONS = 8;
@@ -67,20 +76,32 @@ export function passNoticeItems(report: PipelineReport, lookup: NoticeLookup): N
     add({ key, section: "held", lines });
   };
 
-  for (const entry of report.held) held(entry.jobId, entry.reasons.join(" "), lookup.latestRun(entry.jobId));
-  const heldOrSent = new Set([...report.held, ...report.submitted].map((entry) => entry.jobId));
-  for (const entry of report.started) {
-    if (heldOrSent.has(entry.jobId)) continue;
-    const run = lookup.latestRun(entry.jobId);
-    // The current status, not the one the run started with: a failed automatic submit is reported under errors.
-    if (run?.status === "paused-needs-input") held(entry.jobId, "The form asked something the agent could not answer on its own.", run);
-    else if (run?.status === "awaiting-approval") held(entry.jobId, "Filled and waiting for your submit approval.", run);
+  for (const hold of lookup.holds ?? []) {
+    if (hold.owner !== "candidate" || !hold.runId) continue;
+    const run = lookup.latestRun(hold.jobId);
+    if (!run || run.id !== hold.runId) continue;
+    const lines = [`• ${name(hold.jobId)} (run ${ref(run.id)})`];
+    if (hold.reason === "approval") lines.push("  Filled and waiting for your submit approval.");
+    else lines.push(...questionLines(run.pauses, true));
+    if (lines.length > 1) add({ key: `${hold.key}:${hold.revision}`, section: "held", lines, hold });
+  }
+  if (!lookup.holds) {
+    for (const entry of report.held) held(entry.jobId, entry.reasons.join(" "), lookup.latestRun(entry.jobId));
+    const heldOrSent = new Set([...report.held, ...report.submitted].map((entry) => entry.jobId));
+    for (const entry of report.started) {
+      if (heldOrSent.has(entry.jobId)) continue;
+      const run = lookup.latestRun(entry.jobId);
+      // The current status, not the one the run started with: a failed automatic submit is reported under errors.
+      if (run?.status === "paused-needs-input") held(entry.jobId, "The form asked something the agent could not answer on its own.", run);
+      else if (run?.status === "awaiting-approval") held(entry.jobId, "Filled and waiting for your submit approval.", run);
+    }
   }
   for (const entry of report.submitted) {
     const lines = [`• ${name(entry.jobId)} (job ${ref(entry.jobId)})`];
     if (lookup.recordSaved?.(entry.jobId)) lines.push("  Record saved locally.");
     add({ key: `submitted:${entry.jobId}`, section: "sent", lines });
   }
+  if (lookup.holds) return items;
   for (const entry of report.stopped) {
     add({
       key: `stopped:${entry.jobId}:${digest(entry.reason)}`,
@@ -108,18 +129,19 @@ const CAPTCHA_TOKEN = /^(?:g-recaptcha-response|h-captcha-response|cf-turnstile-
  * time. Unlabeled controls are summed up in one line, and the CAPTCHA token
  * field is never listed.
  */
-function questionLines(pauses: ReadonlyArray<NoticePause>): string[] {
+function questionLines(pauses: ReadonlyArray<NoticePause>, actionableOnly = false): string[] {
   const lines: string[] = [];
   let more = 0;
   let unlabeled = 0;
-  pauses.forEach((pause, index) => {
-    if (pause.status !== "open") return;
+  classifyOpenPauses(pauses).forEach(({ pause, index, kind }) => {
+    if (pause.fieldId === "site-security-code" || (actionableOnly && kind === "fault")) return;
     if (CAPTCHA_TOKEN.test(pause.label.trim())) return;
     if (UNLABELED.test(pause.label.trim())) { unlabeled += 1; return; }
     if (lines.length >= MAX_QUESTIONS) { more += 1; return; }
     const label = clip(redactNoticeText(pause.label), 200);
     const q = `Q${index + 1}`;
-    if (pause.safeguard) lines.push(`  ${q} CAPTCHA or safeguard, solve it in the browser: "${label}"`);
+    if (kind === "correction") lines.push(`  ${q} fix this field in the browser: "${label}"`);
+    else if (pause.safeguard) lines.push(`  ${q} CAPTCHA or safeguard, solve it in the browser: "${label}"`);
     else if (pause.upload) lines.push(`  ${q} needs a document: "${label}"`);
     else if (pause.sensitive) lines.push(`  ${q} demographic, answered for this application only: "${label}"`);
     else lines.push(`  ${q}: "${label}"`);
@@ -181,26 +203,42 @@ function writeNotifiedKeys(dataDir: string, keys: string[]): void {
  * nothing, so the next pass retries.
  */
 export async function notifyPass(input: {
-  dataDir: string; items: ReadonlyArray<NoticeItem>; settings: DiscordSettings | null; transport?: DiscordTransport; log: (line: string) => void;
+  dataDir: string; items: ReadonlyArray<NoticeItem>; profile?: WorkspaceProfile; settings: DiscordSettings | null; transport?: DiscordTransport; log: (line: string) => void;
 }): Promise<void> {
   const { dataDir, items, settings } = input;
   const log = (line: string) => { try { input.log(line); } catch { /* a failing log never escapes */ } };
   if (!settings || items.length === 0) return;
+  const release = acquireHoldDeliveryGuard(dataDir, "candidate");
+  if (!release) return;
+  const recipient = candidateDeliveryRecipient(settings.userId);
+  const withDatabase = <T>(work: (database: ReturnType<typeof getProfileDatabase>) => T): T | undefined => {
+    if (!input.profile) return;
+    try { return work(getProfileDatabase(input.profile)); }
+    finally { closeProfileDatabase(input.profile); }
+  };
   try {
     const known = readNotifiedKeys(dataDir);
     const recorded = new Set(known);
     const fresh: NoticeItem[] = [];
-    for (const item of items) {
-      if (recorded.has(item.key)) continue;
+    const eligible = withDatabase((database) => items.filter(({ hold }) => {
+      if (!hold) return true;
+      const current = getApplicationHold(database, hold.jobId, hold.runId);
+      return current?.active && current.revision === hold.revision && !applicationHoldDelivered(database, current, recipient);
+    })) ?? items;
+    for (const item of eligible) {
+      if (!item.hold && recorded.has(item.key)) continue;
       recorded.add(item.key);
       fresh.push(item);
     }
     if (fresh.length === 0) return;
     const content = formatNotice(fresh).split(settings.token).join("[redacted]");
     const posted = await sendDiscordDm(settings, content, input.transport);
-    writeNotifiedKeys(dataDir, [...known, ...fresh.map((item) => item.key)]);
+    withDatabase((database) => acknowledgeApplicationHolds(database, fresh.flatMap(({ hold }) => hold ? [hold] : []), recipient, new Date().toISOString()));
+    writeNotifiedKeys(dataDir, [...known, ...fresh.filter(({ hold }) => !hold).map((item) => item.key)]);
     log(`Discord: sent ${fresh.length} update(s) in ${posted} message(s).`);
   } catch (error) {
     log(`Discord notify failed: ${discordFailureStatus(error)}`);
+  } finally {
+    release();
   }
 }

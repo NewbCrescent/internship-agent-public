@@ -14,7 +14,9 @@
  * --reopen-unsubmitted --reason … cancels a failed submit only with evidence
  * the site did not complete it (Greenhouse's security-code email after the
  * click, or a verification-code evidence capture), then the job is ready for
- * review again.
+ * review again unless a trusted receipt has been recorded.
+ * --verified-hold --revision <n> --recheck <hex ref> --reason "<text>" names
+ * one verified pre-submit repair and requeues only its manager-owned hold.
  *
  * Usage: pnpm pipeline:retry [--profile real|demo] (--run <id or 8-character prefix> ... | --held) [--dry-run] [--start] [--reason "<text>"]
  *        pnpm pipeline:retry [--profile real|demo] --run <id or 8-character prefix> ... --reopen-unsubmitted --reason "<text>" [--dry-run] [--start]
