@@ -20,8 +20,10 @@
  * header "Sign In" filter earlier on the page (decoy, synthetic); a plain-text
  * "not been verified" notice after the sign-in submit goes to the
  * verification email (notice); and a sign-in Workday ignores right after the
- * create goes to the verification email too (quiet). Never reads process.env
- * for accounts or Gmail.
+ * create goes to the verification email too (quiet). A sign-in form whose
+ * click filter is labelled "Submit" (submit-label, as rockwellautomation.wd1
+ * draws it) is clicked through the filter over the form's own submit button
+ * and signs in. Never reads process.env for accounts or Gmail.
  *
  * Usage: pnpm test:browser:workday-account
  */
@@ -405,6 +407,19 @@ async function main(): Promise<void> {
     if (!events().includes(`Workday ${decoyHost}: account created with your email; the password is saved locally.`)) failures.push("decoy: no account-created event");
     await opensFlow("decoy", decoy.page);
 
+    // The sign-in form's click filter labelled "Submit", not "Sign In", as rockwellautomation.wd1 drew it
+    // (read-only capture, 2026-11-24): the click goes to the filter in the noCaptchaWrapper over the form's own
+    // submit button, and the account signs in. Real markup draws the form 800 ms late, so the real clock is used.
+    const submitLabelHost = "fixture-submit-label.wd1.myworkdayjobs.com";
+    const submitLabel = await scenario("submit-label", submitLabelHost, "signin-after&markup=real&filter=submit");
+    if (submitLabel.result !== "signed-in") failures.push(`submit-label: expected "signed-in", got ${submitLabel.result ?? submitLabel.error?.message}`);
+    const submitLabelState = await fixtureState(submitLabel.tab);
+    if (submitLabelState.creates !== 1 || submitLabelState.signIns !== 1) {
+      failures.push(`submit-label: ${submitLabelState.creates} creates and ${submitLabelState.signIns} sign-ins`);
+    }
+    if (submitLabelState.honeypotTyped) failures.push("submit-label: the robot honeypot was typed in");
+    await opensFlow("submit-label", submitLabel.page);
+
     // The verification link for a host's unverified fixture account, from the (fake) mailbox.
     const linkFor = (host: string, tab: () => Page | null) => async (): Promise<MailMessage[]> => {
       const current = tab();
@@ -547,7 +562,7 @@ async function main(): Promise<void> {
     console.error(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"failed","failures":${JSON.stringify(failures)}}`);
     process.exit(1);
   }
-  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":28}`);
+  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":29}`);
 }
 
 main().catch((error) => {

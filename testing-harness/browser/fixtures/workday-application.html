@@ -31,6 +31,10 @@
     // employer-g.wd5's /login showed only the form's own "Sign In" filter, beside
     // signInSubmitButton in noCaptchaWrapper): the header's Sign In is drawn under its own
     // click_filter labelled "Sign In", earlier on the page than the form's; clicking it only counts.
+    // ?filter=submit (with markup=real): the sign-in form's click filter is labelled "Submit" while
+    // its button reads Sign In, as a read-only capture of rockwellautomation.wd1's sign-in step showed
+    // on 2026-11-24 (Workday labels the filter by its internal auth view; the create filter there
+    // reads "Create Account").
     // Save and Continue validation draws Workday-style errors: an errorMessage alert inside each
     // missing field's formField-* container, an errorBanner listing them, and a plain
     // errorMessage for missing items that have no container (history rows, Resume/CV).
@@ -252,9 +256,9 @@
       const field = (id, label, type) => `
         <div data-automation-id="formField-${id}"><label for="input-${id}"><span>${label}<abbr aria-hidden="true">*</abbr></span></label>
           <div><div><input type="${type}" data-automation-id="${id}" id="input-${id}" aria-required="true" autocomplete="${type === "password" ? "new-password" : "email"}"></div></div></div>`;
-      const covered = (id, label) => `
+      const covered = (id, label, filterLabel = label) => `
         <div data-automation-id="noCaptchaWrapper"><div style="position:relative;display:inline-block">
-          <div aria-label="${label}" role="button" tabindex="0" data-automation-id="click_filter" style="position:absolute;inset:0;z-index:1"></div>
+          <div aria-label="${filterLabel}" role="button" tabindex="0" data-automation-id="click_filter" style="position:absolute;inset:0;z-index:1"></div>
           <button type="submit" data-automation-id="${id}" tabindex="-2" aria-hidden="true">${label}</button></div></div>`;
       const allSteps = ["Create Account/Sign In", "My Information", "My Experience", "Application Questions 1 of 2", "Application Questions 2 of 2", "Voluntary Disclosures", "Review"];
       const bar = allSteps.map((name, index) => index === 0
@@ -292,7 +296,7 @@
         <form data-automation-id="signInFormo" onsubmit="return false">
           ${field("email", "Email Address", "text")}
           ${field("password", "Password", "password")}
-          ${covered("signInSubmitButton", "Sign In")}
+          ${covered("signInSubmitButton", "Sign In", params.get("filter") === "submit" ? "Submit" : "Sign In")}
         </form>
         <div>Don't have an account yet?<button type="button" data-automation-id="createAccountLink">Create Account</button></div>`;
       setTimeout(() => { document.querySelector('[data-automation-id="signInContent"]').innerHTML = form; }, 800);
@@ -436,9 +440,11 @@
         // ?header=filter: the header's covered Sign In button; a click on it is only counted.
         window.fixtureAccount.headerClicks += 1;
       } else if (target.matches('[data-automation-id="click_filter"]')) {
-        // Only the click filter is clickable, as on Workday; the test may watch the moment of submit.
-        const label = target.getAttribute("aria-label");
-        Promise.resolve(window.onFixtureAccountSubmit?.(label)).then(() => (label === "Create Account" ? createAccount() : signIn()));
+        // Only the click filter is clickable, as on Workday; it submits the button it covers, whatever its
+        // label ("Submit" on ?filter=submit). The test may watch the moment of submit.
+        const covered = target.parentElement?.querySelector('[data-automation-id="createAccountSubmitButton"], [data-automation-id="signInSubmitButton"]');
+        const action = covered?.getAttribute("data-automation-id") === "createAccountSubmitButton" ? "Create Account" : "Sign In";
+        Promise.resolve(window.onFixtureAccountSubmit?.(action)).then(() => (action === "Create Account" ? createAccount() : signIn()));
       } else if (target.matches("[data-add]")) {
         syncHistory();
         state[target.dataset.add].push({});

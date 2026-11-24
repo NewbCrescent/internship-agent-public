@@ -72,6 +72,25 @@ integration fixtures avoid the word "experience" for that reason (the
 `PYTHON_LABEL` comment). Fix direction: offer package answers only to text
 and textarea fields, so such questions reach question memory or pause.
 
+### Workday ignores an account submit made within 500 ms of the form appearing
+
+From 2026-11-20 to 2026-11-24 the account submit got no answer at employer-f.wd1,
+employer-h.wd501, tmobile.wd1, saabusa.wd1, neogen.wd5 and littelfuse.wd1;
+where the diagnostics were recorded they read "no same-host request
+observed; no page transition observed". A cookie banner was on some of these
+sites and not on others. Cause: Workday's sign-in widget
+(candidate-experience-apply-flow 2026.47.19, read 2026-11-24) installs three
+"NoCaptcha" tests when an account submit button mounts: a 500 ms timer, the
+empty `beecatcher` honeypot, and a click on the click filter over that
+button. Its form `onSubmit` calls `preventDefault()` with no message while
+one of them has not passed. Against the synthetic fixture, `signInToWorkday`
+clicked the sign-in filter 62–82 ms after the sign-in submit button appeared
+(after the Sign In link or the email chooser), and `createWorkdayAccount`
+116–598 ms after the create button, so the timer test fails silently. Not
+fixed: waiting out Workday's anti-bot timer before the click needs the
+candidate's decision under AGENTS.md's site-safeguard rule. The live proof is
+a real sign-in.
+
 ### Oracle Candidate Experience textarea with no readable label
 
 Corvane's Oracle Candidate Experience form (run <run id>, 2026-11-20) paused
@@ -149,6 +168,27 @@ Jobvite Chromium fixture reproduces that error when a radio's visible label
 differs from its accessible name. The browser now selects named radios by the
 same labels it reads from their group and refuses duplicate matches. The
 fixture verifies both successful selections and the duplicate-label hold.
+
+### Workday's sign-in click filter labelled "Submit" was not clicked
+
+On 2026-11-24 Rockwell Automation (rockwellautomation.wd1) held the host
+with "the account step failed in the browser (the Sign In button could not
+be clicked)"; KLA (employer-i.wd1) logged the same on 2026-11-20 (not re-checked
+live). A read-only live capture of Rockwell's sign-in step (2026-11-24,
+disposable profile, nothing typed or submitted) showed the click filter over
+`signInSubmitButton` labelled "Submit", not "Sign In"; Workday labels the
+filter by its internal auth view, and the create filter there reads "Create
+Account". `press` in `packages/browser/src/ats/workday-account.ts` took only a
+filter carrying the button's label, so it fell back to the hidden button
+under the filter, and the click timed out after 10 seconds. The cookie banner
+was not the cause: it sits in normal page flow at the top (position static,
+no full-viewport backdrop), and `elementFromPoint` at the button's centre
+returned the "Submit" filter. The click now goes first to the one visible
+click filter inside the `noCaptchaWrapper` holding the form's own submit
+button, whatever its label; the label rules remain as fallbacks. Rockwell's
+sign-in then meets the open 500 ms gate above. Regression: the submit-label
+scenario in `testing-harness/browser/workday-account-run.ts` (`pnpm
+test:browser:workday-account`).
 
 ### Workday's sign-in after account creation got no answer
 

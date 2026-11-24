@@ -116,6 +116,10 @@ const VERIFY_PASSWORD = 'input[data-automation-id="verifyPassword"]';
 const TERMS = 'input[data-automation-id="createAccountCheckbox"]';
 const SIGN_IN_SUBMIT = '[data-automation-id="signInSubmitButton"], [data-automation-id="signInContent"] [data-automation-id="click_filter"][aria-label="Sign In" i], [data-automation-id="applyFlowPage"] [data-automation-id="click_filter"][aria-label="Sign In" i], form [data-automation-id="click_filter"][aria-label="Sign In" i]';
 const CREATE_SUBMIT = '[data-automation-id="createAccountSubmitButton"], [data-automation-id="signInContent"] [data-automation-id="click_filter"][aria-label="Create Account" i], [data-automation-id="applyFlowPage"] [data-automation-id="click_filter"][aria-label="Create Account" i], form [data-automation-id="click_filter"][aria-label="Create Account" i]';
+/** The form's own submit button for each action (Workday hides it under its click filter). */
+const OWN_SUBMIT = { "Sign In": '[data-automation-id="signInSubmitButton"]', "Create Account": '[data-automation-id="createAccountSubmitButton"]' } as const;
+/** The click filters inside the nearest noCaptchaWrapper around a button: Workday's cover for that button. */
+const WRAPPER_FILTER = 'xpath=ancestor::*[@data-automation-id="noCaptchaWrapper"][1]//*[@data-automation-id="click_filter"]';
 const METHOD_EMAIL = '[data-automation-id="SignInWithEmailButton"]';
 const OTHER_PROVIDERS = '[data-automation-id="GoogleSignInButton"], [data-automation-id="AppleSignInButton"], [data-automation-id="LinkedInSignInButton"]';
 const SIGN_IN_LINK = '[data-automation-id="signInLink"]';
@@ -213,20 +217,31 @@ async function typeInto(field: Locator, value: string, failure: string): Promise
 }
 
 /**
- * Workday covers its submit buttons with a click filter carrying the
- * button's label, and hides the real button under it (aria-hidden,
- * tabindex -2). The label is not unique on the page ("Sign In" also names the
- * header's utility button and the "Already have an account?" link), so the
- * click goes, first hit winning, to: a matching filter beside the form's own submit
- * (`button`, its automation id); else a filter with the label inside the
- * sign-in content, then inside a dialog (never page-wide); else the visible
- * button itself.
+ * Workday covers its submit buttons with a click filter and hides the real
+ * button under it (aria-hidden, tabindex -2). The click goes, first hit
+ * winning, to: the one visible click filter inside the noCaptchaWrapper that
+ * holds the form's own submit button (its automation id), whatever the
+ * filter's label, since Workday labels it by its internal view ("Sign In",
+ * "Create Account", or "Submit", as on rockwellautomation.wd1's sign-in form);
+ * else a filter with the button's label beside the form's own submit; else a
+ * filter with the label inside the sign-in content, then inside a dialog
+ * (never page-wide, since "Sign In" also names the header's utility button and
+ * the "Already have an account?" link); else the visible button itself.
  */
 async function press(page: Page, button: string, label: "Sign In" | "Create Account"): Promise<void> {
   const failure = `the ${label} button could not be clicked`;
   const matchingFilter = `*[@data-automation-id="click_filter"][translate(@aria-label, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")="${label.toLowerCase()}"]`;
   const adjacentFilter = `xpath=ancestor::*[position() <= 4][.//${matchingFilter}][1]//${matchingFilter}`;
   let target: Locator | null = null;
+  // Workday's own cover for this form's submit: the one visible click filter in the noCaptchaWrapper
+  // holding the form's submit button, whatever its label. Workday labels it by its internal auth view,
+  // so a sign-in filter may read "Submit" (rockwellautomation.wd1, 2026-11-24).
+  const owns = page.locator(OWN_SUBMIT[label]);
+  const ownCount = Math.min(5, await owns.count().catch(() => 0));
+  for (let index = 0; index < ownCount && !target; index += 1) {
+    const covers = owns.nth(index).locator(WRAPPER_FILTER).filter({ visible: true });
+    if ((await covers.count().catch(() => 0)) === 1) target = covers.first();
+  }
   const buttons = page.locator(button);
   const count = Math.min(5, await buttons.count().catch(() => 0));
   for (let index = 0; index < count && !target; index += 1) {
