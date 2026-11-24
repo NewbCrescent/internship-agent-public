@@ -12,6 +12,7 @@ import { scoreFit, type FitInputs } from "./fit";
 export * from "./degree-reading";
 export * from "./eligibility";
 export * from "./fit";
+export * from "./review-pursuit";
 export * from "./school-restriction";
 export * from "./skill-keys";
 

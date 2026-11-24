@@ -293,6 +293,24 @@ describe("pass notice items", () => {
     expect(text).not.toContain("applications/");
   });
 
+  it("lists the unverified requirements of a posting pursued on AI fit, redacted, only on that posting", () => {
+    const report = emptyReport();
+    report.submitted = [{ jobId: JOB_SENT, confirmation: "Thanks" }];
+    report.held = [{ jobId: JOB_HELD, reasons: ["Filled and waiting for your submit approval."] }];
+    const unverified = (jobId: string) => jobId === JOB_SENT ? ["Experience with Elixir", "jane@example.com contact"] : [];
+    const items = passNoticeItems(report, { ...lookupFor({}), unverified });
+    const line = "  Pursued on AI fit despite unverified requirements: Experience with Elixir; [email] contact";
+    const sent = items.find((entry) => entry.key === `submitted:${JOB_SENT}`);
+    const held = items.find((entry) => entry.section === "held");
+    expect(sent?.lines).toContain(line);
+    expect(held).toBeDefined();
+    expect(held!.lines.some((text) => text.includes("Pursued on AI fit"))).toBe(false);
+    expect(formatNotice(items)).not.toContain("jane@example.com");
+
+    const plain = passNoticeItems(report, lookupFor({}));
+    expect(plain.flatMap((entry) => entry.lines).some((text) => text.includes("Pursued on AI fit"))).toBe(false);
+  });
+
   it("shows at most eight questions per run", () => {
     const report = emptyReport();
     report.held = [{ jobId: JOB_HELD, reasons: [] }];

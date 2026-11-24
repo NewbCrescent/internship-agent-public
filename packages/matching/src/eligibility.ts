@@ -32,6 +32,15 @@ export type EligibilityInputs = {
   resumeSkills?: string[];
 };
 
+/** Stored reason of an open skill or experience requirement no evidence or resume names (compared byte for byte). */
+export const SKILL_REVIEW_REASON = "Neither verified evidence nor your resume names this skill yet, so it needs your review rather than a failure.";
+/** Stored reason of a degree line the deterministic comparison cannot settle (compared byte for byte). */
+export const DEGREE_WORDING_REVIEW_REASON = "Degree wording needs candidate review; deterministic text comparison would over-fail.";
+/** Stored reason of a degree line that asks for doctoral study (compared byte for byte). */
+export const DOCTORAL_STUDY_REVIEW_REASON = "The posting requires doctoral study, which the recorded degree does not establish; candidate review is needed.";
+/** Stored reason of a degree line that asks for master's study (compared byte for byte). */
+export const MASTER_STUDY_REVIEW_REASON = "The posting requires master's study, which the recorded degree does not establish; candidate review is needed.";
+
 export function evaluateEligibility(
   posting: JobPosting,
   inputs: EligibilityInputs
@@ -345,7 +354,7 @@ function checkSkill(
     subject,
     requirementId,
     outcome: "UNKNOWN",
-    reason: "Neither verified evidence nor your resume names this skill yet, so it needs your review rather than a failure.",
+    reason: SKILL_REVIEW_REASON,
     statedExcerpt: null
   };
 }
@@ -400,7 +409,7 @@ function defaultedEnrollmentStatement(requirement: JobRequirement): boolean {
     ENROLLMENT_STATEMENT.test(requirement.text) && !PREFERENCE_WORDING.test(requirement.text);
 }
 
-function namesGraduateStudy(requirement: JobRequirement): boolean {
+function namesGraduateStudy(requirement: Pick<JobRequirement, "text" | "subject">): boolean {
   if (!DOCTORATE_LEVEL.test(requirement.text) && !MASTER_LEVEL.test(requirement.text)) return false;
   return requirement.subject === "DEGREE" || DEGREE_CONTEXT.test(requirement.text);
 }
@@ -418,6 +427,19 @@ function hasExplicitAlternative(text: string, requiredLevel: RegExp, alternative
   return !/[.;\n]/.test(connector) && /\bor\b|\//i.test(connector);
 }
 
+/** Whether a posting title targets Master's or PhD candidates. */
+export function titleNamesGraduateStudy(title: string): boolean {
+  return DOCTORATE_LEVEL.test(title) || MASTER_LEVEL.test(title);
+}
+
+/** Whether a requirement names graduate study without accepting a bachelor's or stating a bachelor's alternative. */
+export function graduateOnlyRequirement(requirement: Pick<JobRequirement, "text" | "subject">): boolean {
+  return namesGraduateStudy(requirement) &&
+    !acceptsBachelorLevel(requirement.text) &&
+    !hasExplicitAlternative(requirement.text, DOCTORATE_LEVEL, BACHELOR_LEVEL) &&
+    !hasExplicitAlternative(requirement.text, MASTER_LEVEL, BACHELOR_LEVEL);
+}
+
 function checkGraduateInternshipPreference(
   posting: JobPosting,
   preferences: CandidatePreference | null
@@ -425,7 +447,7 @@ function checkGraduateInternshipPreference(
   if (!preferences?.excludeGraduateOnlyInternships ||
       (posting.employmentType !== "INTERNSHIP" && posting.employmentType !== "CO_OP")) return null;
 
-  if (DOCTORATE_LEVEL.test(posting.title) || MASTER_LEVEL.test(posting.title)) {
+  if (titleNamesGraduateStudy(posting.title)) {
     return {
       subject: "DEGREE",
       requirementId: null,
@@ -437,10 +459,7 @@ function checkGraduateInternshipPreference(
 
   const graduateOnly = posting.requirements.find((requirement) =>
     (requirement.category === "HARD" || defaultedEnrollmentStatement(requirement)) && requirement.assertion === "STATED" &&
-    namesGraduateStudy(requirement) &&
-    !acceptsBachelorLevel(requirement.text) &&
-    !hasExplicitAlternative(requirement.text, DOCTORATE_LEVEL, BACHELOR_LEVEL) &&
-    !hasExplicitAlternative(requirement.text, MASTER_LEVEL, BACHELOR_LEVEL)
+    graduateOnlyRequirement(requirement)
   );
   return graduateOnly ? {
     subject: "DEGREE",
@@ -512,7 +531,7 @@ function checkDegree(
       subject: "DEGREE",
       requirementId,
       outcome: "UNKNOWN",
-      reason: "The posting requires doctoral study, which the recorded degree does not establish; candidate review is needed.",
+      reason: DOCTORAL_STUDY_REVIEW_REASON,
       statedExcerpt: null
     };
   }
@@ -523,7 +542,7 @@ function checkDegree(
       subject: "DEGREE",
       requirementId,
       outcome: "UNKNOWN",
-      reason: "The posting requires master's study, which the recorded degree does not establish; candidate review is needed.",
+      reason: MASTER_STUDY_REVIEW_REASON,
       statedExcerpt: null
     };
   }
@@ -545,7 +564,7 @@ function checkDegree(
     subject: "DEGREE",
     requirementId,
     outcome: "UNKNOWN",
-    reason: "Degree wording needs candidate review; deterministic text comparison would over-fail.",
+    reason: DEGREE_WORDING_REVIEW_REASON,
     statedExcerpt: null
   };
 }

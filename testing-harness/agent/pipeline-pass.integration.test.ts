@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -187,6 +187,21 @@ describe("pipeline watcher pass", () => {
     await expect(runPipelinePass({ profile: "real", sourceIds: [], log: () => undefined, advance, notify: { fetch } }))
       .rejects.toThrow("database is not open");
     expect(calls).toHaveLength(0);
+  });
+
+  it("logs postings pursued on AI fit and writes them to pipeline-status.json", async () => {
+    const dataDir = resolveProfileDataDirectory("real");
+    const jobId = randomUUID();
+    const pursuedOnFit = { score: 86, unverified: ["Experience with Elixir"] };
+    const advance = async (): Promise<PipelineReport> => ({
+      analyzed: [], prepared: [{ jobId, status: "READY_FOR_REVIEW", pursuedOnFit }], started: [], stopped: [], waiting: [],
+      held: [], skipped: [], submitted: [], errors: []
+    });
+    const lines: string[] = [];
+    await runPipelinePass({ profile: "real", sourceIds: [], log: (line) => lines.push(line), advance });
+    expect(lines).toContainEqual(expect.stringMatching(/^  pursued on AI fit 86 .*: unverified Experience with Elixir$/));
+    const status = JSON.parse(readFileSync(join(dataDir, "pipeline-status.json"), "utf8")) as { pursuedOnFit: unknown };
+    expect(status.pursuedOnFit).toEqual([{ job: jobId, jobId, fit: 86, unverified: ["Experience with Elixir"] }]);
   });
 });
 

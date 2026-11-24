@@ -54,6 +54,7 @@
     "test:agent:pass": "pnpm --filter @internship-agent/agent test:pass",
     "test:agent:labels": "pnpm --filter @internship-agent/agent test:labels",
     "test:agent:company": "pnpm --filter @internship-agent/agent test:company",
+    "test:agent:pursuit": "pnpm --filter @internship-agent/agent test:pursuit",
     "test:agent:retry": "pnpm --filter @internship-agent/agent test:retry",
     "test:agent:evidence": "pnpm --filter @internship-agent/agent test:evidence",
     "test:agent:security-code": "pnpm --filter @internship-agent/agent test:security-code",

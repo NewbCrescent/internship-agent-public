@@ -74,6 +74,18 @@ export const suiteManifest = [
     description: "Per-company limits in the automatic pipeline against a disposable workspace: at most INTERNSHIP_AGENT_COMPANY_CAP (default 2) automatic applications per company per target term (pipeline-started runs in flight or submitted; the candidate's runs, checklist submissions, and cancelled runs do not count; unclassifiable runs count), the cap skip logged once, the higher AI fit taking the slot, the cap re-checked before automatic submission, companies matched by normalized name or Workday tenant host, one graduation profile per company (the 2029 profile reused without a transcript field, a transcript form held after a 2028 application on generic and Workday forms), and candidate-started runs warned, never blocked. Pure identity, pin, and run-origin rules run under domain-contracts (testing-harness/domain/company-policy.test.ts)."
   },
   {
+    id: "needs-review-pursuit",
+    features: ["browser", "database", "matching"],
+    tier: "local",
+    script: "test:agent:pursuit",
+    requires: ["node", "pnpm", "node-sqlite"],
+    network: "none",
+    mutation: "local-temporary",
+    timeoutMs: 60_000,
+    reportPrefixes: [],
+    description: "Needs-review postings pursued on AI fit (candidate approval 2026-11-24) against a disposable workspace: an eligible needs-review posting with only unverified skill, experience, or degree-wording requirements is prepared with a current AI fit at the auto-submit bar and a target 'apply' (event 'Pursued on AI fit N despite unverified requirements: …'), runs and auto-submits under the unchanged blockers; fit 49, no or stale fit, target skip or review, no target, graduate-level requirements, NOT_QUALIFIED, minFit, discovery skips, label holds, terminal or already-run postings, and the company cap are not pursued or not started. Pure pursuit rules run under match-contracts (testing-harness/matching/review-pursuit.test.ts)."
+  },
+  {
     id: "automatic-retry",
     features: ["browser", "database"],
     tier: "local",
@@ -107,7 +119,7 @@ export const suiteManifest = [
     mutation: "local-temporary",
     timeoutMs: 45_000,
     reportPrefixes: [],
-    description: "Watcher tick and pipeline pass against a disposable workspace (injected GitHub and source fetches): the pass runs after the tick's own sources read, tick after tick in one process, and the pipeline lock is released on every path, including an early failure, and the pass's Discord notice is sent once per item after the lock is released, while a failed notice or pass never leaves the lock held. Internal failures and already-approved runs stay out of candidate DMs, while a later manual field correction keeps its original Q number."
+    description: "Watcher tick and pipeline pass against a disposable workspace (injected GitHub and source fetches): the pass runs after the tick's own sources read, tick after tick in one process, and the pipeline lock is released on every path, including an early failure, and the pass's Discord notice is sent once per item after the lock is released, while a failed notice or pass never leaves the lock held. Internal failures and already-approved runs stay out of candidate DMs, while a later manual field correction keeps its original Q number. Pursued-on-fit postings are logged and written to pipeline-status.json."
   },
   {
     id: "discord-notify",
@@ -119,7 +131,7 @@ export const suiteManifest = [
     mutation: "none",
     timeoutMs: 30_000,
     reportPrefixes: [],
-    description: "Discord DM notices with an injected fetch and a temporary data directory: DM channel then message post with the bot header, 2,000-character splitting, one 429 retry after retry_after, timeouts and failures logged by status without the token, nothing sent when nothing is new, notified items never repeated (a held run notifies again only when its open questions change), open pause labels as numbered questions (CAPTCHA, document, demographic marked; unlabeled fields summed up in one line, the CAPTCHA token field never listed), and privacy (no answers, drafts, or confirmations; emails, URL queries, and long digit runs redacted)."
+    description: "Discord DM notices with an injected fetch and a temporary data directory: DM channel then message post with the bot header, 2,000-character splitting, one 429 retry after retry_after, timeouts and failures logged by status without the token, nothing sent when nothing is new, notified items never repeated (a held run notifies again only when its open questions change), open pause labels as numbered questions (CAPTCHA, document, demographic marked; unlabeled fields summed up in one line, the CAPTCHA token field never listed), and privacy (no answers, drafts, or confirmations; emails, URL queries, and long digit runs redacted). A posting pursued on AI fit lists its unverified requirements."
   },
   {
     id: "discord-read",
@@ -227,7 +239,7 @@ export const suiteManifest = [
     mutation: "none",
     timeoutMs: 30_000,
     reportPrefixes: [],
-    description: "Hard eligibility ordering (stated vs inferred vs silent), Handshake-only graduation dates, explainable keyword scoring, and grounded AI competitiveness response validation; relocation willingness read for the location's country."
+    description: "Hard eligibility ordering (stated vs inferred vs silent), Handshake-only graduation dates, explainable keyword scoring, and grounded AI competitiveness response validation; relocation willingness read for the location's country. The needs-review pursuit allowlist (review-pursuit.ts): only unverified skill, experience, degree-wording, and B.S./B.A. findings pass; graduate study, missing facts, statements of fact, failures, and other reasons do not."
   },
   {
     id: "job-normalization-contracts",

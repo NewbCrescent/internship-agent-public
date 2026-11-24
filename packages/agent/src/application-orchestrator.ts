@@ -26,10 +26,13 @@ import {
   type ReviewQueueEntry
 } from "@internship-agent/db";
 import { RequirementLabelsPendingError } from "@internship-agent/jobs";
+import { reviewPursuit } from "@internship-agent/matching";
 import { buildApplicationPackage } from "@internship-agent/writer";
 import { verifyApplicationPackage } from "@internship-agent/verifier";
 import { buildResumeDocument, buildResumeVariant, renderResumeDocumentMarkdown } from "@internship-agent/resume";
 import type { BrowserRunStatus, JobPostingStatus, VerificationReport } from "@internship-agent/domain";
+
+import { PURSUED_ON_FIT_PREFIX, pursuedOnFitDetail, type PursuedOnFit } from "./fit-pursuit";
 
 export type { CurrentPackage } from "@internship-agent/db";
 export type { ReviewQueueEntry } from "@internship-agent/db";
@@ -41,15 +44,32 @@ export type PreparationReport = {
   missingFacts: string[];
 };
 
-function requireQualified(database: DatabaseSync, jobId: string): void {
+/**
+ * A qualified posting is preparable; so is a needs-review posting the pursuit
+ * rules allow, either pursued on its AI fit now (first time, still waiting in
+ * analysis) or already pursued before (a re-prepare such as a resume refresh).
+ */
+function requirePreparable(database: DatabaseSync, jobId: string, pursuedOnFit: PursuedOnFit | undefined): "QUALIFIED" | "NEEDS_REVIEW" {
   // A posting waiting for AI requirement labels is never prepared.
   const hold = getRequirementLabelHold(database, jobId);
   if (hold) throw new RequirementLabelsPendingError(hold.reason);
   const match = getJobMatch(database, jobId);
   if (!match) throw new Error("Analyze eligibility before preparing an application.");
-  if (match.verdict !== "QUALIFIED") {
-    throw new Error(`Only qualified postings can be prepared; this one is ${match.verdict.toLocaleLowerCase("en-US").replace("_", " ")}.`);
+  if (match.verdict === "QUALIFIED") return "QUALIFIED";
+  if (match.verdict === "NEEDS_REVIEW") {
+    const posting = getJobPosting(database, jobId);
+    const pursuit = posting ? reviewPursuit(match, posting) : null;
+    if (posting && pursuit?.pursue) {
+      if (pursuedOnFit) {
+        if (posting.status !== "ANALYZING") {
+          throw new Error(`Only a posting waiting in analysis can be pursued on its AI fit; this one is ${posting.status.toLocaleLowerCase("en-US").replace("_", " ")}.`);
+        }
+        return "NEEDS_REVIEW";
+      }
+      if (listApplicationEvents(database, jobId).some((event) => event.detail?.startsWith(PURSUED_ON_FIT_PREFIX))) return "NEEDS_REVIEW";
+    }
   }
+  throw new Error(`Only qualified postings can be prepared; this one is ${match.verdict.toLocaleLowerCase("en-US").replace("_", " ")}.`);
 }
 
 /**
@@ -60,17 +80,23 @@ function requireQualified(database: DatabaseSync, jobId: string): void {
  */
 export function prepareApplication(
   jobId: string,
-  options: { database?: DatabaseSync; candidateId?: string } = {}
+  options: { database?: DatabaseSync; candidateId?: string; pursuedOnFit?: PursuedOnFit } = {}
 ): PreparationReport {
   const database = options.database ?? getDatabase();
   const candidateId = options.candidateId ?? LOCAL_CANDIDATE_ID;
-  requireQualified(database, jobId);
+  const verdict = requirePreparable(database, jobId, options.pursuedOnFit);
   const posting = getJobPosting(database, jobId);
   if (!posting) throw new Error("The posting is unknown; ingest it before preparing.");
   const profile = getCandidate(database, candidateId);
   if (!profile) throw new Error("The candidate profile is missing; complete it before preparing.");
 
-  setJobStatus(database, jobId, null, "PREPARING", "Application preparation started.");
+  setJobStatus(
+    database,
+    jobId,
+    null,
+    "PREPARING",
+    verdict === "NEEDS_REVIEW" && options.pursuedOnFit ? pursuedOnFitDetail(options.pursuedOnFit) : "Application preparation started."
+  );
 
   const facts = getCurrentFacts(database, candidateId);
   const preferences = getCandidatePreferences(database, candidateId);

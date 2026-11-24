@@ -20,7 +20,9 @@ import type { PipelineReport } from "./pipeline-orchestrator";
  * redacted, and remembered so nothing is sent twice. It shows company,
  * title, form question labels, and reasons only; answers, voice drafts, and
  * confirmations are never read. A sent item may add that its local record
- * was saved; the record itself is never read or attached.
+ * was saved; the record itself is never read or attached. A held or sent
+ * posting pursued on AI fit adds a line listing its unverified requirements
+ * (requirement text only).
  */
 export type NoticeSection = "held" | "sent" | "stopped" | "errors";
 export type NoticeItem = { key: string; section: NoticeSection; lines: string[]; hold?: ApplicationHold };
@@ -33,6 +35,8 @@ export type NoticeLookup = {
   recordSaved?(jobId: string): boolean;
   /** When supplied, persistent classification replaces report heuristics. */
   holds?: ReadonlyArray<ApplicationHold>;
+  /** The unverified requirements of a posting pursued on its AI fit (requirement text only); empty or absent otherwise. */
+  unverified?(jobId: string): ReadonlyArray<string>;
 };
 
 const MAX_QUESTIONS = 8;
@@ -67,11 +71,16 @@ export function passNoticeItems(report: PipelineReport, lookup: NoticeLookup): N
     const posting = lookup.posting(jobId);
     return posting ? `${clip(posting.companyName, 120)} — ${clip(posting.title, 120)}` : "Unknown posting";
   };
+  const pursuedLines = (jobId: string) => {
+    const open = lookup.unverified?.(jobId) ?? [];
+    return open.length ? [`  Pursued on AI fit despite unverified requirements: ${clip(redactNoticeText(open.join("; ")), 300)}`] : [];
+  };
   const held = (jobId: string, why: string, run: ReturnType<NoticeLookup["latestRun"]>) => {
     const openLabels = run ? run.pauses.filter((pause) => pause.status === "open").map((pause) => pause.label) : [];
     const key = run ? `held:${run.id}:${digest(openLabels.join("\n"))}` : `held:job:${jobId}`;
     const lines = [`• ${name(jobId)} (${run ? `run ${ref(run.id)}` : `job ${ref(jobId)}`})`];
     if (why) lines.push(`  Why: ${clip(redactNoticeText(why), 300)}`);
+    lines.push(...pursuedLines(jobId));
     if (run) lines.push(...questionLines(run.pauses));
     add({ key, section: "held", lines });
   };
@@ -83,7 +92,10 @@ export function passNoticeItems(report: PipelineReport, lookup: NoticeLookup): N
     const lines = [`• ${name(hold.jobId)} (run ${ref(run.id)})`];
     if (hold.reason === "approval") lines.push("  Filled and waiting for your submit approval.");
     else lines.push(...questionLines(run.pauses, true));
-    if (lines.length > 1) add({ key: `${hold.key}:${hold.revision}`, section: "held", lines, hold });
+    if (lines.length > 1) {
+      lines.push(...pursuedLines(hold.jobId));
+      add({ key: `${hold.key}:${hold.revision}`, section: "held", lines, hold });
+    }
   }
   if (!lookup.holds) {
     for (const entry of report.held) held(entry.jobId, entry.reasons.join(" "), lookup.latestRun(entry.jobId));
@@ -99,6 +111,7 @@ export function passNoticeItems(report: PipelineReport, lookup: NoticeLookup): N
   for (const entry of report.submitted) {
     const lines = [`• ${name(entry.jobId)} (job ${ref(entry.jobId)})`];
     if (lookup.recordSaved?.(entry.jobId)) lines.push("  Record saved locally.");
+    lines.push(...pursuedLines(entry.jobId));
     add({ key: `submitted:${entry.jobId}`, section: "sent", lines });
   }
   if (lookup.holds) return items;

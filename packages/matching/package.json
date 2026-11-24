@@ -10,7 +10,7 @@
     "build": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest --root ../.. run testing-harness/matching",
-    "test:fast": "vitest --root ../.. run testing-harness/matching/eligibility-fit.test.ts testing-harness/matching/semantic-fit.test.ts",
+    "test:fast": "vitest --root ../.. run testing-harness/matching/eligibility-fit.test.ts testing-harness/matching/semantic-fit.test.ts testing-harness/matching/review-pursuit.test.ts",
     "test:local": "vitest --root ../.. run testing-harness/matching/match-persistence.integration.test.ts testing-harness/matching/semantic-fit.integration.test.ts"
   },
   "dependencies": {

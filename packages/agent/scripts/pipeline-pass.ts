@@ -8,6 +8,7 @@ import type { WorkspaceProfile } from "@internship-agent/domain";
 
 import { fetchCompanySource, type FetchBatch } from "../src/discovery-orchestrator";
 import { advancePipeline, pipelineSettings, type PipelineReport } from "../src/pipeline-orchestrator";
+import { unverifiedRequirements } from "../src/fit-pursuit";
 import { readDoorbellState, ringListDoorbell, writeDoorbellState } from "../src/list-doorbell";
 import { acquirePipelineLock, readPipelineLock } from "../src/pipeline-lock";
 import { discordFailureStatus, discordSettings, type DiscordTransport } from "../src/discord-notify";
@@ -75,6 +76,9 @@ export async function runPipelinePass(options: {
     log(`Analyzed ${report.analyzed.length} left over; prepared ${report.prepared.length}; browser runs started ${report.started.length}; ` +
       `submitted ${report.submitted.length}; held for you ${report.held.length}; ruled out ${report.skipped.length}; stopped ${report.stopped.length}.`);
     for (const entry of report.submitted) log(`  SUBMITTED ${name(entry.jobId)}: ${entry.confirmation.replace(/\s+/g, " ").slice(0, 160)}`);
+    for (const entry of report.prepared) {
+      if (entry.pursuedOnFit) log(`  pursued on AI fit ${entry.pursuedOnFit.score} ${name(entry.jobId)}: unverified ${entry.pursuedOnFit.unverified.join("; ").slice(0, 300)}`);
+    }
     for (const entry of report.held) log(`  waiting for you ${name(entry.jobId)}: ${entry.reasons.join(" ")}`);
     for (const entry of report.skipped) log(`  ruled out ${name(entry.jobId)}: ${entry.reasons.join(" ")}`);
     for (const entry of report.started) log(`  run ${name(entry.jobId)}: ${entry.runStatus}`);
@@ -95,6 +99,9 @@ export async function runPipelinePass(options: {
       ruledOut: report.skipped.map((entry) => ({ job: name(entry.jobId), jobId: entry.jobId, reasons: entry.reasons })),
       stopped: report.stopped.map((entry) => ({ job: name(entry.jobId), jobId: entry.jobId, reason: entry.reason.slice(0, 500) })),
       waitingForSignIn: report.waiting.map((entry) => ({ job: name(entry.jobId), jobId: entry.jobId, site: entry.siteKey })),
+      pursuedOnFit: report.prepared.flatMap((entry) => entry.pursuedOnFit
+        ? [{ job: name(entry.jobId), jobId: entry.jobId, fit: entry.pursuedOnFit.score, unverified: entry.pursuedOnFit.unverified }]
+        : []),
       errors: report.errors.map((error) => error.slice(0, 500))
     });
     result = report;
@@ -112,7 +119,8 @@ export async function runPipelinePass(options: {
               pauses: run.pauses.map(({ label, status, safeguard, sensitive, upload, fieldId }) => ({ label, status, safeguard, sensitive, upload, fieldId }))
             } : null;
           },
-          recordSaved: (jobId) => existsSync(applicationRecordPdfPath(dataDir, jobId))
+          recordSaved: (jobId) => existsSync(applicationRecordPdfPath(dataDir, jobId)),
+          unverified: (jobId) => unverifiedRequirements(database, jobId)
         });
       }
     } catch (error) {

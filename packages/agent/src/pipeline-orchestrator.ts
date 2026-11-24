@@ -23,6 +23,7 @@ import {
 } from "@internship-agent/db";
 
 import { prepareApplication } from "./application-orchestrator";
+import { unverifiedRequirements, type PursuedOnFit } from "./fit-pursuit";
 import { relabelHeldPostings } from "./requirement-relabel";
 import { getMatchReport, evaluateAndPersistMatch } from "./match-orchestrator";
 import { applicationUrlFor, approveRunSubmissionAutomatically, AutomaticRunStopped, IcimsAccountHeld, startBrowserRun, submitBrowserRun,
@@ -37,6 +38,7 @@ import { AUTO_SUBMIT_EVENT, autoSubmitBlockers, autoSubmitSettings, combineTarge
   workdaySiteKey, type AutoSubmitSettings, type BrowserRun, type TargetDecision, type TargetTerm } from "@internship-agent/domain";
 import { COMPANY_CAP_PREFIX, companyCapReason, companyCapSetting, DEFAULT_COMPANY_CAP, standingConsentSettings } from "@internship-agent/domain";
 import { icimsHostOf, SubmissionHeld } from "@internship-agent/browser";
+import { reviewPursuit } from "@internship-agent/matching";
 
 export type PipelineSettings = {
   /** Qualified postings at or above this fit score are prepared. */
@@ -132,7 +134,12 @@ export function pipelineSettings(env: Record<string, string | undefined> = proce
 export type PipelineReport = {
   /** Postings ingested earlier but never analyzed (for example, an interrupted run). */
   analyzed: string[];
-  prepared: Array<{ jobId: string; status: string }>;
+  prepared: Array<{
+    jobId: string;
+    status: string;
+    /** Set when a needs-review posting was pursued on its AI fit. */
+    pursuedOnFit?: PursuedOnFit;
+  }>;
   started: Array<{ jobId: string; runStatus: string }>;
   stopped: Array<{ jobId: string; reason: string }>;
   /**
@@ -152,7 +159,9 @@ export type PipelineReport = {
 
 /**
  * Advances every eligible posting as far as it may go without the
- * candidate: prepare qualified postings, then (with auto-apply on) fill
+ * candidate: prepare qualified postings (and, with a target, needs-review
+ * postings whose current AI fit meets the auto-submit bar and whose target
+ * decision is apply), then (with auto-apply on) fill
  * verified applications in a browser and stop at the submit approval.
  * Submission itself is never reached from here.
  * Per company: at most the company cap of applications per target term, and one graduation profile.
@@ -239,17 +248,34 @@ export async function advancePipeline(options: {
   }
 
   for (const job of listJobSummaries(database)) {
-    if (job.status !== "QUALIFIED" || getDiscoverySkip(database, job.id) || getRequirementLabelHold(database, job.id)) continue;
+    const onFit = job.status === "ANALYZING";
+    if ((job.status !== "QUALIFIED" && !onFit) || getDiscoverySkip(database, job.id) || getRequirementLabelHold(database, job.id)) continue;
     const match = getMatchReport(job.id, database);
-    if (match?.verdict !== "QUALIFIED" || match.displayFitScore < settings.minFit) continue;
-    const decision = pursued(job.id);
-    if (decision) {
-      const withFit = combineTargetDecisions(decision, fitTargetDecision(database, job.id, fitFloor));
-      if (withFit.outcome === "skip") { ruledOut(job.id, withFit); continue; }
+    if (!match || match.displayFitScore < settings.minFit) continue;
+    let pursuit: PursuedOnFit | null = null;
+    if (onFit) {
+      // A needs-review posting goes ahead only on a current AI fit at the auto-submit bar with the target saying apply
+      // (candidate approval, 2026-11-24); a posting that was prepared or run before is never moved back.
+      if (match.verdict !== "NEEDS_REVIEW" || !target) continue;
+      if (getCurrentPackage(database, job.id) || listBrowserRuns(database, job.id).length > 0) continue;
+      const posting = getJobPosting(database, job.id);
+      const open = posting ? reviewPursuit(match, posting) : null;
+      if (!open?.pursue) continue;
+      const withFit = combineTargetDecisions(pursued(job.id)!, fitTargetDecision(database, job.id, fitFloor));
+      const fit = getSemanticFit(database, job.id);
+      if (withFit.outcome !== "apply" || !fit || fit.stale) continue;
+      pursuit = { score: fit.assessment.score, unverified: open.unverified };
+    } else {
+      if (match.verdict !== "QUALIFIED") continue;
+      const decision = pursued(job.id);
+      if (decision) {
+        const withFit = combineTargetDecisions(decision, fitTargetDecision(database, job.id, fitFloor));
+        if (withFit.outcome === "skip") { ruledOut(job.id, withFit); continue; }
+      }
     }
     try {
-      prepareApplication(job.id, { database, candidateId });
-      report.prepared.push({ jobId: job.id, status: getJobPosting(database, job.id)?.status ?? "UNKNOWN" });
+      prepareApplication(job.id, { database, candidateId, ...(pursuit ? { pursuedOnFit: pursuit } : {}) });
+      report.prepared.push({ jobId: job.id, status: getJobPosting(database, job.id)?.status ?? "UNKNOWN", ...(pursuit ? { pursuedOnFit: pursuit } : {}) });
     } catch (error) {
       report.errors.push(`Preparation failed for ${job.id}: ${messageOf(error)}`);
     }
@@ -277,6 +303,8 @@ export async function advancePipeline(options: {
     const decision = pursued(job.id);
     const withFit = decision ? combineTargetDecisions(decision, fitTargetDecision(database, job.id, fitFloor)) : null;
     if (withFit?.outcome === "skip") { ruledOut(job.id, withFit); continue; }
+    // A needs-review posting runs only while its AI fit and the target still say apply (candidate approval, 2026-11-24).
+    if (getJobMatch(database, job.id)?.verdict === "NEEDS_REVIEW" && withFit?.outcome !== "apply") continue;
     // Runs cancelled (for example by a resume refresh) do not block a new
     // automatic run; any other run, including a failed submit, does.
     if (listBrowserRuns(database, job.id).some((run) => run.status !== "cancelled")) continue;
@@ -365,9 +393,11 @@ export async function advancePipeline(options: {
     const standingClause = run.decisions.some((entry) => entry.basis?.kind === "standing_consent")
       ? ["consent and attestation statements were accepted under your standing settings (each is on the timeline);"]
       : [];
+    const unverified = unverifiedRequirements(database, run.jobId);
     approveRunSubmissionAutomatically(run.id, [
       `${target!.season} ${target!.year} term, software or adjacent role, US location${ai};`,
       ...standingClause,
+      ...(unverified.length ? [`pursued on the AI fit with requirements your evidence and resume do not verify (your approval of 2026-11-24): ${unverified.join("; ").slice(0, 300)};`] : []),
       "every answer came from your saved facts and materials."
     ], { database });
     try {

@@ -30,6 +30,7 @@ export * from "./workday-session-service";
 export * from "./resume-refresh";
 export * from "./model/semantic-fit";
 export * from "./fit-backfill";
+export * from "./fit-pursuit";
 export * from "./review-focus";
 export * from "./workday-account-store";
 export * from "./workday-verification-mail";

@@ -118,6 +118,11 @@ export function bachelorKindMismatch(text: string, candidateDegree: string): str
   return `The posting names a ${named.join(" or ")}, and your degree is a ${held}; they are different degrees, so this needs your review.`;
 }
 
+/** Whether a stored finding reason is bachelorKindMismatch's own sentence (a B.S. line against a B.A., or the reverse). */
+export function isBachelorKindMismatchReason(reason: string): boolean {
+  return /^The posting names a .+, and your degree is a [^;]+; they are different degrees, so this needs your review\.$/.test(reason);
+}
+
 /** Runs of degree levels joined only by list words; each run is one set of alternatives. */
 function levelLists(words: string[]): Level[][] {
   const lists: Level[][] = [];
