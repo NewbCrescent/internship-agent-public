@@ -2038,6 +2038,43 @@ describe("retrying a browser run", () => {
       database.close();
     });
 
+    it("never saves a Workday step from which it read no field, and stops it as blocked", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDataDir();
+      const jobId = workdayJob(database);
+      approveApplication(jobId, { database });
+      const steps: Step[] = [{ name: "My Information", controls: [] }, { name: "Review", controls: [] }];
+      const base = fakeWorkday({ steps });
+      let moved = 0;
+      const page = { ...base, nextStep: async () => { moved += 1; return base.nextStep(); } };
+      const started = await startBrowserRun(jobId, siteUrl, { database, dataDir, voiceDrafter: null, openPage: async () => page });
+      expect(started.run.status).toBe("paused-needs-input");
+      expect(moved).toBe(0);
+      const open = started.run.pauses.filter((pause) => pause.status === "open");
+      expect(open).toEqual([expect.objectContaining({ fieldId: "My Information::workday-errors" })]);
+      expect(open[0]!.question).toContain("could not read any field");
+      database.close();
+    });
+
+    it("reads a Workday step again when its first read found no field, and walks on once its fields appear", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDataDir();
+      const jobId = workdayJob(database);
+      approveApplication(jobId, { database });
+      database.prepare("UPDATE candidates SET legal_first_name = 'Jordan'").run();
+      const firstName: RawControl = { tag: "input", type: "text", id: "formField-legalName--firstName", label: "First Name", required: true };
+      const steps: Step[] = [{ name: "My Information", controls: [firstName] }, { name: "Review", controls: [] }];
+      const base = fakeWorkday({ steps });
+      // The step is drawn before its fields can be read: the first read finds none.
+      let reads = 0;
+      const page = { ...base, collectControls: async () => (reads++ === 0 ? [] : base.collectControls()) };
+      const started = await startBrowserRun(jobId, siteUrl, { database, dataDir, voiceDrafter: null, openPage: async () => page });
+      expect(started.run.status).toBe("awaiting-approval");
+      expect(reads).toBeGreaterThanOrEqual(2);
+      expect(base.filled.get("formField-legalName--firstName")).toBe("Jordan");
+      database.close();
+    });
+
     it("uploads the uploaded default resume on Workday, and the 2029 resume on a step that asks for a transcript", async () => {
       const resumeField: RawControl = { tag: "input", type: "file", id: "resume", label: "Resume", required: true };
       const transcriptField: RawControl = { tag: "input", type: "file", id: "transcript", label: "Unofficial transcript", required: true };

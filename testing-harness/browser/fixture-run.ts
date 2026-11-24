@@ -304,6 +304,20 @@ async function main(): Promise<void> {
   if (backfilled.transcript !== "transcript.pdf") failures.push("workday transcript: the transcript was not uploaded");
   if (new Set(transcriptWalk.decisions.map((decision) => decision.fieldId)).size !== transcriptWalk.decisions.length) failures.push("workday transcript: the backfill left duplicate decision records");
 
+  // Synthetic (the cause was not seen on a live page): My Information is drawn with its
+  // fields hidden for 2.5 s. The readiness wait counts only visible fields, so the walk
+  // reads and fills First Name instead of saving an empty step.
+  const hiddenTab = await launched.newPage();
+  await hiddenTab.goto(`${workdayUrl}?hidden=2500`);
+  const hiddenWorkday = createWorkdayPage(hiddenTab);
+  await hiddenWorkday.enterApplication();
+  const hiddenWalk = await walkWorkdayApplication(hiddenWorkday, planWorkday, { mode: "fill" });
+  if (!hiddenWalk.fieldLabels["My Information::formField-legalName--firstName"] || hiddenWalk.errors.some((error) => error.includes("First Name is required"))) {
+    failures.push(`workday hidden: My Information was not read once its fields showed (${hiddenWalk.outcome}: ${hiddenWalk.errors.join(" ")})`);
+  }
+  const hiddenFirstName = hiddenWalk.decisions.find((decision) => decision.fieldId === "My Information::formField-legalName--firstName");
+  if (hiddenFirstName?.action !== "fill" || hiddenFirstName.value !== "Jordan") failures.push("workday hidden: first name not filled once the fields showed");
+
   const blockedTab = await launched.newPage();
   await blockedTab.goto(workdayUrl);
   const blockedWorkday = createWorkdayPage(blockedTab);

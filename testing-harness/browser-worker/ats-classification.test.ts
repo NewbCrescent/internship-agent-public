@@ -281,6 +281,7 @@ describe("canonical field roles", () => {
   it("marks demographic questions sensitive", () => {
     expect(classifyFieldRole({ id: "g", label: "Gender", kind: "select", required: false })).toBe("eeo");
     expect(classifyFieldRole({ id: "v", label: "Veteran status", kind: "radio", required: true })).toBe("eeo");
+    expect(classifyFieldRole({ id: "r", label: "How would you describe your racial/ethnic background? (mark all that apply)", kind: "select", required: false })).toBe("eeo");
     expect(isSensitiveRole("eeo")).toBe(true);
     expect(isSensitiveRole("email")).toBe(false);
   });

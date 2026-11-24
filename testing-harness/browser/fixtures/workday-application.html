@@ -38,6 +38,8 @@
     // Save and Continue validation draws Workday-style errors: an errorMessage alert inside each
     // missing field's formField-* container, an errorBanner listing them, and a plain
     // errorMessage for missing items that have no container (history rows, Resume/CV).
+    // ?hidden=<ms> (synthetic, the cause was not seen on a live page): the first time My Information
+    // is drawn, its field containers stay display:none for that many milliseconds, then show.
     const ACCOUNTS_KEY = "fixture-workday-accounts";
     const SESSION_KEY = "fixture-workday-session";
     const readAccounts = () => JSON.parse(localStorage.getItem(ACCOUNTS_KEY) || "{}");
@@ -183,6 +185,8 @@
       return missing;
     }
 
+    const hiddenMs = Number(params.get("hidden") || 0);
+    let hiddenDrawn = false;
     function render() {
       if (state.submitted) {
         document.getElementById("app").innerHTML = `<h2>Application Submitted</h2><p>Thank you for applying to Fixture Aerospace.</p>`;
@@ -198,6 +202,11 @@
           <div id="fields">${pages[state.step]()}</div>
           <div data-automation-id="pageFooter">${state.step > 0 ? `<button type="button" data-automation-id="pageFooterBackButton">Back</button>` : ""}<button type="button" data-automation-id="pageFooterNextButton">${state.step === steps.length - 1 ? "Submit" : "Save and Continue"}</button></div>
         </div>`;
+      if (hiddenMs > 0 && !hiddenDrawn && state.step === 0) {
+        hiddenDrawn = true;
+        document.getElementById("fields").style.display = "none";
+        setTimeout(() => { const fields = document.getElementById("fields"); if (fields) fields.style.display = ""; }, hiddenMs);
+      }
     }
 
     function renderSignInMethods() {

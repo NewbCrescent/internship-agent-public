@@ -44,7 +44,7 @@ import { approvedJobId, cleanupTemporaryDirectories, disposableWorkspace, fakePa
  */
 
 const HANDSHAKE_URL = "https://app.joinhandshake.com/apply/900001";
-// Not "experience": the prepared package answers experience questions before question memory is asked.
+// Kept without "experience" from before package answers were limited to text boxes; the label itself does not matter.
 const PYTHON_LABEL = "Do you use Python? *";
 // The label as the form reader records it: the trailing required marker is stripped.
 const PYTHON_QUESTION = "Do you use Python?";

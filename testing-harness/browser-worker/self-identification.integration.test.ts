@@ -208,6 +208,43 @@ describe("saved voluntary self-identification answers in browser runs", () => {
     database.close();
   });
 
+  it("fills Greenhouse's \"How would you describe your …? (mark all that apply)\" lists from the saved answers, recording none of them", async () => {
+    const database = disposableDatabase();
+    const jobId = approvedJobId(database, (db) => {
+      saveFact(db, "eeo_gender", { kind: "global" }, "female");
+      saveFact(db, "eeo_race_ethnicity", { kind: "global" }, "white");
+    });
+    const decline = ["I prefer to self-describe", "I don't wish to answer"];
+    const controls: RawControl[] = [
+      { tag: "select", id: "gender-identity", label: "How would you describe your gender identity? (mark all that apply)", required: false, options: ["Man", "Non-binary", "Woman", ...decline] },
+      {
+        tag: "select", id: "racial-background", label: "How would you describe your racial/ethnic background? (mark all that apply)", required: false,
+        options: ["Black or of African descent", "East Asian", "Hispanic, Latinx or of Spanish Origin", "South Asian", "White or European", ...decline]
+      },
+      START,
+      SUBMIT
+    ];
+    const { run, page } = await runWith(database, jobId, controls);
+
+    expect(run.status).toBe("awaiting-approval");
+    expect(run.pauses).toEqual([]);
+    expect(page.filled.get("gender-identity")).toBe("Woman");
+    expect(page.filled.get("racial-background")).toBe("White or European");
+    expect(decision(run, "gender-identity")).toMatchObject({ action: "choose", basis: { kind: "fact", key: "eeo_gender" } });
+    expect(decision(run, "racial-background")).toMatchObject({ action: "choose", basis: { kind: "fact", key: "eeo_race_ethnicity" } });
+    for (const entry of run.decisions) {
+      for (const option of ["Woman", "White or European"]) expect(entry.reason).not.toContain(option);
+    }
+    const events = (database.prepare("SELECT detail FROM application_events WHERE job_id = ?").all(jobId) as Array<{ detail: string | null }>)
+      .map((row) => row.detail ?? "");
+    for (const text of events) {
+      expect(text).not.toContain("eeo_");
+      expect(text.toLowerCase()).not.toContain("female");
+      expect(text).not.toContain("White or European");
+    }
+    database.close();
+  });
+
   it("pauses an EEO question whose saved answer was revoked", async () => {
     const database = disposableDatabase();
     const jobId = approvedJobId(database, saveFixtureSelfIdentification);

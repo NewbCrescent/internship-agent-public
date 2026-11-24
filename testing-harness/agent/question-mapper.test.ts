@@ -48,6 +48,23 @@ describe("deterministic semantic question mapping", () => {
     });
   });
 
+  it("reads \"legally eligible to work\" as work authorization, never a government, export-control, or clearance question", async () => {
+    expect(await mapper.map("Are you legally eligible to work in the country you are applying for?", { postingCountryCode: "US" })).toMatchObject({
+      status: "MAPPED", key: "authorized_to_work", scope: { kind: "country", code: "US" }
+    });
+    expect(await mapper.map("Are you legally eligible to work in Canada?")).toMatchObject({
+      status: "MAPPED", key: "authorized_to_work", scope: { kind: "country", code: "CA" }
+    });
+    expect(await mapper.map("Are you legally eligible to work in the country you are applying for?")).toMatchObject({ status: "AMBIGUOUS" });
+    for (const question of [
+      "Are you eligible to work on export-controlled projects?",
+      "Are you legally eligible to work on U.S. government contracts?"
+    ]) {
+      const mapped = await mapper.map(question, { postingCountryCode: "US" });
+      expect(mapped.status === "MAPPED" ? mapped.key : null, question).not.toBe("authorized_to_work");
+    }
+  });
+
   it("blocks protected and attestation questions from memory", async () => {
     expect(await mapper.map("What is your veteran status?")).toMatchObject({ status: "BLOCKED", policy: "protected" });
     expect(await mapper.map("Do you certify that all information is true?")).toMatchObject({ status: "BLOCKED", policy: "attestation" });

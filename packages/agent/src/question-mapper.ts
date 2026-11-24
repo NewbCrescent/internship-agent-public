@@ -15,6 +15,9 @@ const PREVIOUS_EMPLOYMENT = /\b(?:(?:have|had)\s+you\s+(?:ever\s+)?(?:previously
 const COURSEWORK = /\b(?:relevant|related|completed|applicable)\s+(?:course\s*work|courses|classes)\b|\bcourse\s*work\b|\b(?:courses|classes)\s+(?:that\s+)?(?:you(?:'ve|\s+have)?\s+)?(?:taken|completed)\b|\b(?:which|what|list(?:\s+any)?)\s+(?:relevant\s+)?(?:courses|classes)\b/i;
 // Grades, GPA, transcripts, credit counts, and non-academic courses are never answered with the course list.
 const NOT_COURSEWORK = /\b(?:gpa|grade|grades|graded|grading|grade\s+point|marks?|scores?|transcripts?|credits?|units|honou?rs|online|certifications?|certificates?|bootcamps?|training)\b/i;
+const ELIGIBLE_TO_WORK = /\b(?:legally )?eligible to work\b|\blegally (?:able|permitted) to work\b/i;
+// "Eligible to work" also opens government, export-control, and clearance questions, which only their own saved answers decide.
+const NOT_WORK_AUTHORIZATION = /\b(?:government|federal|public sector|dod|department of defense|defen[cs]e|export\w*|itar|ear|citizen\w*|u\.?\s?s\.? (?:person|national)|clearances?|security|contracts?|contractors?|projects?)\b/i;
 const EMPLOYER_REFERENCE = /\b(?:here|for us|with us|(?:this|our|the)\s+(?:company|organization|organisation|firm|employer))\b/i;
 
 export class DeterministicQuestionMapper implements SemanticQuestionMapper {
@@ -87,7 +90,7 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
       };
     }
 
-    if (/\b(?:legally )?authori[sz]ed to work\b|\bwork authori[sz]ation\b/i.test(normalized)) {
+    if (/\b(?:legally )?authori[sz]ed to work\b|\bwork authori[sz]ation\b/i.test(normalized) || (ELIGIBLE_TO_WORK.test(normalized) && !NOT_WORK_AUTHORIZATION.test(normalized))) {
       const country = inferCountryCode(normalized, context);
       if (!country) {
         return { status: "AMBIGUOUS", reason: "Work authorization requires an explicit country scope, and neither the question nor the posting names one country." };

@@ -1003,6 +1003,114 @@ describe("real-form question coverage (education block, country, city, preferred
   });
 });
 
+describe("known answers on common application questions (synthetic Greenhouse-style labels)", () => {
+  type Inputs = Parameters<typeof planAutofill>[1];
+  const plan = (controls: RawControl[], extra: Partial<Inputs> = {}) =>
+    planAutofill(recognizeForm("https://job-boards.greenhouse.io/fixture/jobs/2", "Apply", controls), {
+      profile: {}, resolutions: new Map(), packageAnswers: [], variantId: null, ...extra
+    });
+  const actions = (result: ReturnType<typeof planAutofill>) =>
+    Object.fromEntries(result.decisions.map((decision) => [decision.fieldId, [decision.action, decision.value]]));
+  const graduation = { date: "2028-05-15", basis: { kind: "fact" as const, key: "graduation_date", scope: "global" } };
+  const school = "University of Example, Springfield";
+  const colleges = ["University of Example--Springfield (IL)", "Example College (NY)", "Other"];
+  const followUp = (required: boolean) =>
+    control({ tag: "input", type: "text", id: "question_other", label: `If you selected other, please specify which one${required ? "*" : ""}`, required });
+
+  it("chooses the school from a list whose options carry a US state code, and fills the \"if other\" follow-up with N/A", () => {
+    const list = control({ tag: "select", id: "question_college", label: "Which college did you attend?*", required: true, options: colleges });
+    const required = plan([list, followUp(true)], { education: { school } });
+    expect(actions(required)).toEqual({ question_college: ["choose", "University of Example--Springfield (IL)"], question_other: ["fill", "N/A"] });
+    expect(required.decisions[1]!.basis).toBeNull();
+    expect(required.pauses).toEqual([]);
+    expect(actions(plan([list, followUp(false)], { education: { school } }))["question_other"]).toEqual(["skip", null]);
+    // A list that paused leaves its follow-up to the candidate.
+    const paused = plan([list, followUp(true)], { education: { school: "Fixture Institute of Technology" } });
+    expect(actions(paused)).toEqual({ question_college: ["pause", null], question_other: ["pause", null] });
+    // A type-ahead's pick is settled only when it runs: its follow-up is never N/A.
+    const searched = control({ tag: "select", id: "question_college", label: "Which college did you attend?*", required: true, widget: "autocomplete", options: colleges });
+    const typed = plan([searched, followUp(true)], { education: { school } });
+    expect(actions(typed)["question_other"]).toEqual(["pause", null]);
+  });
+
+  it("answers the degree being pursued like a Degree list", () => {
+    const degree = control({
+      tag: "select", id: "question_degree", label: "What degree level are you currently pursuing, or have you most recently completed?*", required: true,
+      options: ["No Degree", "Associate's", "Bachelor's", "Master's"]
+    });
+    expect(actions(plan([degree], { education: { degree: "Bachelor of Science" } }))).toEqual({ question_degree: ["choose", "Bachelor's"] });
+  });
+
+  it("answers a graduation year from the year of the graduation date", () => {
+    const resolution = { status: "RESOLVED", key: "graduation_date", scope: "global", display: "2028-05-15", value: "2028-05-15" } as const;
+    const years = control({
+      tag: "select", id: "question_year", label: "What is your expected graduation year (or year of most recent graduation)?*", required: true,
+      options: ["2026", "2027", "2028", "2029"]
+    });
+    const typed = control({ tag: "input", type: "text", id: "question_typed_year", label: "Expected graduation year*", required: true });
+    const result = plan([years, typed], { resolutions: new Map([["question_year", resolution], ["question_typed_year", resolution]]) });
+    expect(actions(result)).toEqual({ question_year: ["choose", "2028"], question_typed_year: ["fill", "2028"] });
+    expect(result.decisions[0]!.basis).toEqual({ kind: "fact", key: "graduation_date", scope: "global" });
+  });
+
+  it("fills the profile LinkedIn URL into a sentence-style LinkedIn label", () => {
+    const linkedin = control({ tag: "input", type: "text", id: "question_linkedin", label: "Please provide a link to your LinkedIn profile.*", required: true });
+    const url = "https://www.linkedin.com/in/fixture-candidate";
+    expect(actions(plan([linkedin], { profile: { linkedinUrl: url } }))).toEqual({ question_linkedin: ["fill", url] });
+  });
+
+  it("answers Yes to a current computer science student question only from the profile's field of study and a graduation still ahead", () => {
+    const major = control({
+      tag: "select", id: "question_cs", label: "Are you a current college student majoring in computer science or related field?*", required: true, options: ["Yes", "No"]
+    });
+    const standing = (today: string) => ({ acceptDataConsent: false, signAttestations: false, today });
+    const current = plan([major], { profile: { fieldOfStudy: "Computer Science" }, education: { graduation }, standing: standing("2026-11-24") });
+    expect(actions(current)).toEqual({ question_cs: ["choose", "Yes"] });
+    expect(current.decisions[0]!.basis).toEqual({ kind: "profile", field: "fieldOfStudy" });
+    expect(actions(plan([major], { profile: { fieldOfStudy: "Computer Science" }, education: { graduation }, standing: standing("2028-06-01") })))
+      .toEqual({ question_cs: ["pause", null] });
+    expect(actions(plan([major], { profile: { fieldOfStudy: "Economics" }, education: { graduation }, standing: standing("2026-11-24") })))
+      .toEqual({ question_cs: ["pause", null] });
+  });
+
+  it("offers package answers only to text boxes, never to a choice or a background-check question", () => {
+    const packageAnswers = [{ prompt: "Describe your most relevant experience.", text: "Relevant experience: fixture robotics project." }];
+    const years = (required: boolean) => control({
+      tag: "select", id: "question_years", label: `How many years of relevant experience do you have?${required ? "*" : ""}`, required, options: ["0-1", "2-3", "4+"]
+    });
+    const required = plan([years(true)], { packageAnswers });
+    expect(actions(required)).toEqual({ question_years: ["pause", null] });
+    expect(required.pauses[0]!.question).not.toContain("known answer");
+    expect(actions(plan([years(false)], { packageAnswers }))).toEqual({ question_years: ["skip", null] });
+    const python = control({ tag: "input", type: "radio", id: "python", label: "Do you have experience with Python?", required: true, options: ["Yes", "No"] });
+    const choice = plan([python], { packageAnswers });
+    expect(actions(choice)).toEqual({ python: ["pause", null] });
+    expect(choice.pauses[0]!.question).toBe('How should "Do you have experience with Python?" be answered?');
+    expect(choice.decisions[0]!.basis?.kind).not.toBe("package-answer");
+    const background = control({ tag: "input", type: "text", id: "question_background", label: "Do you consent to a background check? Please explain.*", required: true });
+    const decision = plan([background], { packageAnswers }).decisions[0]!;
+    expect(decision.basis?.kind).not.toBe("package-answer");
+  });
+
+  it("declines a marketing opt-in list under either standing setting, even with a clipped label, and never an application-status question", () => {
+    const marketing = control({
+      tag: "select", id: "question_marketing", required: true, options: ["Yes", "No"],
+      label: "You can choose to receive recruitment marketing communications from Fixture Robotics, including updates on job opportunities, career advice, and events. T…"
+    });
+    const on = { acceptDataConsent: true, signAttestations: true, today: "2026-11-24" };
+    const declined = plan([marketing], { standing: on });
+    expect(actions(declined)).toEqual({ question_marketing: ["choose", "No"] });
+    expect(declined.decisions[0]!.basis).toBeNull();
+    const mixed = control({
+      tag: "select", id: "question_texts", required: true, options: ["Yes", "No"],
+      label: "Do you want to receive marketing emails and text messages about your application status?*"
+    });
+    expect(actions(plan([mixed], { standing: on }))).toEqual({ question_texts: ["pause", null] });
+    expect(actions(plan([marketing], { standing: { acceptDataConsent: false, signAttestations: false, today: "2026-11-24" } })))
+      .toEqual({ question_marketing: ["pause", null] });
+  });
+});
+
 describe("post-submit outcomes", () => {
   const GREENHOUSE = "https://job-boards.greenhouse.io/fixturerobotics/jobs/1000001";
 

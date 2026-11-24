@@ -83,7 +83,7 @@ export function planAutofill(form: RecognizedForm, inputs: PlannerInputs): Autof
   const pauses: PauseRecord[] = [];
   let safeguardHalt = false;
 
-  for (const field of form.fields) {
+  for (const [index, field] of form.fields.entries()) {
     if (isSafeguardField(field)) {
       safeguardHalt = true;
       decisions.push(pauseDecision(field, {
@@ -137,6 +137,11 @@ export function planAutofill(form: RecognizedForm, inputs: PlannerInputs): Autof
       // Consent to keep or process the candidate's data is theirs to give, per application: never ticked automatically.
       decisions.push(pauseDecision(field, { question: CONSENT_QUESTION, key: null, scope: null, safeguard: false }));
       pauses.push(pauseRecord(field, decisions[decisions.length - 1]!, false));
+      continue;
+    }
+    const followUp = otherFollowUpDecision(field, index > 0 ? form.fields[index - 1] : undefined, decisions);
+    if (followUp) {
+      decisions.push(followUp);
       continue;
     }
     const decision = decideField(field, inputs);
@@ -199,6 +204,8 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
   if (education) return education;
   const gpa = gpaDecision(field, inputs.profile.gpa);
   if (gpa) return gpa;
+  const csMajor = csMajorDecision(field, inputs);
+  if (csMajor) return csMajor;
 
   if (field.kind === "email") {
     if (inputs.profile.email) {
@@ -225,6 +232,8 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
   if (field.widget === "autocomplete" && field.kind !== "select") {
     // A type-ahead takes only a known value typed in and a matching suggestion picked.
     if (resolution?.status === "RESOLVED" && typeof resolution.value === "string") {
+      const year = graduationYearDecision(field, resolution);
+      if (year) return year;
       return suggest(field, resolution.display, { kind: "fact", key: resolution.key, scope: resolution.scope });
     }
     if (resolution?.status === "REMEMBERED_ANSWER") return rememberedSuggestion(field, resolution);
@@ -372,6 +381,8 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
   }
 
   if (resolution?.status === "RESOLVED") {
+    const year = graduationYearDecision(field, resolution);
+    if (year) return year;
     if (field.widget === "autocomplete" && field.kind === "select") {
       return suggest(field, resolution.display, { kind: "fact", key: resolution.key, scope: resolution.scope });
     }
@@ -491,13 +502,53 @@ function rememberedSuggestion(
   };
 }
 
+/** A graduation date asked for as a year only ("Expected graduation year"): the year option, or the year typed. */
+function graduationYearDecision(field: BrowserField, resolution: Extract<FieldResolution, { status: "RESOLVED" }>): FillDecision | null {
+  if (resolution.key !== "graduation_date" || typeof resolution.value !== "string") return null;
+  const date = /^(\d{4})-\d{2}-\d{2}$/.exec(resolution.value);
+  const label = normalizedLabel(field.label);
+  if (!date || !/\byear\b/.test(label) || /\b(?:month|date|day)\b/.test(label)) return null;
+  const year = date[1]!;
+  const basis = { kind: "fact" as const, key: resolution.key, scope: resolution.scope };
+  if (field.widget === "autocomplete") return suggest(field, year, basis);
+  if ((field.kind === "select" || field.kind === "radio") && field.options?.length) {
+    const matches = field.options.filter((option) => option.trim() === year);
+    if (matches.length === 1) return { fieldId: field.id, action: "choose", value: matches[0]!, basis, reason: "The year of your graduation date.", pause: null };
+    return null; // usual rules: the existing "not among the options" pause
+  }
+  if (field.kind === "text" || field.kind === "number") return fill(field, year, basis, "The year of your graduation date.");
+  return null;
+}
+
+const OTHER_FOLLOW_UP = /^if (?:you )?(?:selected|chose|picked|answered) ["“']?other["”']?,? (?:please )?(?:specify|list|enter|name|tell us)\b/;
+
+/** "If you selected other, please specify" right after a list the plan answered with a listed (non-"Other") option: N/A when required, else left empty. */
+function otherFollowUpDecision(field: BrowserField, previous: BrowserField | undefined, decisions: FillDecision[]): FillDecision | null {
+  if (!previous || previous.widget === "autocomplete" || !(field.kind === "text" || field.kind === "textarea") || !OTHER_FOLLOW_UP.test(normalizedLabel(field.label))) return null;
+  if (!(previous.options ?? []).some((option) => /^other\b/i.test(option.trim()))) return null;
+  const chosen = [...decisions].reverse().find((decision) => decision.fieldId === previous.id);
+  if (chosen?.action !== "choose" || !chosen.value || /^other\b/i.test(chosen.value.trim())) return null;
+  if (!field.required) return skip(field, "The list before this question was answered with a listed option, so this follow-up stays empty.");
+  return {
+    fieldId: field.id,
+    action: "fill",
+    value: "N/A",
+    basis: null,
+    reason: "The list before this question was answered with a listed option, so this follow-up does not apply.",
+    pause: null
+  };
+}
+
 function matchPackageAnswer(
   field: BrowserField,
   answers: PlannerInputs["packageAnswers"]
 ): PlannerInputs["packageAnswers"][number] | null {
+  // A package answer is prose: only a text box or text area takes it, never a choice.
+  if (field.kind !== "text" && field.kind !== "textarea") return null;
   const label = field.label.toLocaleLowerCase("en-US");
   const wantsInterest = /why|interest|motivat|company/.test(label);
-  const wantsExperience = /experience|background|relevant|project|qualification/.test(label);
+  // A background check is not an experience question.
+  const wantsExperience = /experience|background|relevant|project|qualification/.test(label) && !/\bbackground (?:check|screening|investigation)s?\b/.test(label);
   const wantsAuth = /authoriz|sponsor|start|availab|eligible|work in/.test(label);
   for (const answer of answers) {
     const prompt = answer.prompt.toLocaleLowerCase("en-US");
@@ -612,8 +663,10 @@ export function matchCountryOption(value: string, options: string[]): string | n
   return matches.length === 1 ? matches[0]! : null;
 }
 
-const SCHOOL_LABEL = /^(?:school|school name|university|college|school or university|college or university|(?:school|college|university) ?\/ ?(?:school|college|university)|(?:which|what) (?:university|college|school) (?:are you (?:currently )?attending|do you (?:currently )?attend)\??)$/;
+const SCHOOL_LABEL = /^(?:school|school name|university|college|school or university|college or university|(?:school|college|university) ?\/ ?(?:school|college|university)|(?:which|what) (?:university|college|school) (?:are you (?:currently )?attending|do you (?:currently )?attend|did you attend)\??)$/;
 const DEGREE_LABEL = /^(?:degree|degree type)$/;
+/** "What degree level are you currently pursuing, or have you most recently completed?": answered like a Degree list. */
+const DEGREE_PURSUING_LABEL = /^(?:what|which) (?:degree|degree level|level of degree|type of degree|degree type) are you (?:currently )?pursuing(?:,? or (?:have you )?(?:most )?recently completed)?\??$/;
 const EDUCATION_DATE_LABEL = /^(start|end) date (month|year)$/;
 /** Greenhouse's education date ids ("start-month--0"); its employment block uses "start-date-month--0" with the same English labels. */
 const EDUCATION_DATE_ID = /^(?:start|end)-(?:month|year)--\d+$/;
@@ -632,6 +685,17 @@ function monthOption(month: number, options: string[]): string | null {
   const name = MONTH_NAMES[month - 1]!;
   const accepted = new Set([name, name.slice(0, 3), String(month), String(month).padStart(2, "0")]);
   const matches = options.filter((option) => accepted.has(option.toLocaleLowerCase("en-US").trim().replace(/\.$/, "")));
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+/** The one option naming the school with a trailing US state code ("University of Example--Springfield (IL)"); null for none or several. */
+function stateSuffixedOption(school: string, options: string[]): string | null {
+  const wanted = sameNameKey(school);
+  if (!wanted) return null;
+  const matches = options.filter((option) => {
+    const suffixed = /^(.*\S)\s*\(([A-Za-z]{2})\)\s*$/.exec(option.trim());
+    return Boolean(suffixed && usStateAlternate(suffixed[2]!) && sameNameKey(suffixed[1]!) === wanted);
+  });
   return matches.length === 1 ? matches[0]! : null;
 }
 
@@ -659,7 +723,8 @@ function educationDecision(field: BrowserField, education: EducationInputs | und
     if (field.widget === "autocomplete") return suggest(field, promptSearchTerms(school)[0] ?? school, basis);
     if (options.length) {
       // The same words, else the one option naming only the campus ("Springfield" for "University of Example, Springfield").
-      const option = sameNamedOption(school, options) ?? campusOption(school, options);
+      // Also the one option naming it with a trailing US state code ("University of Example--Springfield (IL)").
+      const option = sameNamedOption(school, options) ?? campusOption(school, options) ?? stateSuffixedOption(school, options);
       if (option) return { fieldId: field.id, action: "choose", value: option, basis, reason: "The school on your profile.", pause: null };
       return pauseDecision(field, {
         question: `Your profile says "${school}" for "${field.label}", which is not one of its options. Which option should be chosen?`.slice(0, 500),
@@ -670,7 +735,7 @@ function educationDecision(field: BrowserField, education: EducationInputs | und
     }
     return TEXT_KINDS.has(field.kind) ? fill(field, school, basis, "The school on your profile.") : null;
   }
-  if (DEGREE_LABEL.test(label)) {
+  if (DEGREE_LABEL.test(label) || DEGREE_PURSUING_LABEL.test(label)) {
     const degree = education.degree?.trim();
     if (!degree) return null;
     const basis = { kind: "profile" as const, field: "degree" };
@@ -788,6 +853,36 @@ function gpaDecision(field: BrowserField, gpa: string | undefined): FillDecision
   return null;
 }
 
+/** "Are you a current college student majoring in computer science (or a related field)?" */
+const CS_MAJOR_LABEL = /^are you (?:a |an )?(?:current(?:ly)? )?(?:enrolled )?(?:college |university |undergraduate )?(?:student )?(?:majoring|studying|enrolled) in computer science(,? (?:or|and\/or) (?:a |an )?(?:related|similar|relevant)(?: technical)? (?:field|discipline|major|area)(?: of study)?)?\??$/;
+
+/**
+ * "Yes" to a current-computer-science-student question when the profile's
+ * field of study is computer science and the graduation date is still ahead
+ * of the run's local date. Only "Yes" is ever derived; otherwise null, so the
+ * usual rules apply (a required field pauses).
+ */
+function csMajorDecision(field: BrowserField, inputs: PlannerInputs): FillDecision | null {
+  if (field.kind !== "select" && field.kind !== "radio") return null;
+  const match = CS_MAJOR_LABEL.exec(normalizedLabel(field.label));
+  if (!match) return null;
+  const study = inputs.profile.fieldOfStudy?.trim().toLocaleLowerCase("en-US") ?? "";
+  const named = study === "computer science" || (Boolean(match[1]) && /\bcomputer sciences?\b/.test(study));
+  const graduation = inputs.education?.graduation?.date;
+  const today = inputs.standing?.today;
+  if (!named || !graduation || !today || graduation <= today) return null;
+  const yes = (field.options ?? []).filter((option) => /^yes\b/i.test(option.trim()));
+  if (yes.length !== 1) return null;
+  return {
+    fieldId: field.id,
+    action: "choose",
+    value: yes[0]!,
+    basis: { kind: "profile", field: "fieldOfStudy" },
+    reason: "Your profile's field of study is computer science and your graduation date is still ahead.",
+    pause: null
+  };
+}
+
 /** "he/him" matches "He/Him/His": the saved pronouns are a prefix of exactly one option's. */
 function matchPronounOption(saved: string, options: string[]): string | undefined {
   const tokens = (text: string) => text.split("/").map((token) => token.trim().toLocaleLowerCase("en-US")).filter(Boolean);
@@ -892,7 +987,7 @@ const CONTACT_LABELS: Array<{ key: ContactKey; pattern: RegExp }> = [
   { key: "fullName", pattern: /^(?:full |legal |your )?name$|^full legal name$|^your full name$/ },
   { key: "email", pattern: /^e-?mail(?: address)?$/ },
   { key: "phone", pattern: /^(?:phone|mobile|cell|telephone)(?: phone)?(?: number)?$/ },
-  { key: "linkedinUrl", pattern: /^linked ?in(?: profile)?(?: url)?$/ },
+  { key: "linkedinUrl", pattern: /^linked ?in(?: profile)?(?: url| link)?$|^(?:please )?(?:(?:provide|share|enter|include|add|paste) )?(?:a |the |your )?(?:link|url) (?:to|for|of) (?:your )?linked ?in(?: profile| page)?\.?$/ },
   { key: "githubUrl", pattern: /^git ?hub(?: profile)?(?: url)?$/ },
   { key: "currentLocation", pattern: /^(?:current )?location$|^location \(city\)$|^where are you (?:currently )?(?:located|based)\??$/ },
   { key: "preferredName", pattern: /^preferred(?: first)? name(?: \((?:if )?(?:different|applicable)[^)]*\))?\??$|^what is your preferred (?:first )?name\??$|^(?:what )?name (?:do you|would you like to) (?:prefer to )?(?:go by|be called)\??$/ },

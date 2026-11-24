@@ -57,21 +57,6 @@ discovery-contracts) down with it; the other four files in that script pass.
 Fix direction: declare `zod` where the test resolves it, or import the schema
 helpers through a workspace package.
 
-### Package answers fill select and radio fields and pre-empt question memory
-
-`matchPackageAnswer` in `packages/browser/src/autofill-planner.ts` fills any
-field whose label matches its word stems (why, interest, motivat, company;
-experience, background, relevant, project, qualification; authoriz, sponsor,
-start, availab, eligible, work in) with the package's prose, whatever the
-field kind, so a select or radio such as "Do you have experience with
-Python?" gets a fill decision carrying the relevant-experience paragraph
-instead of an option, and a generic question like it never pauses, so the
-candidate's answer is never asked for or saved to question memory. Found
-2026-11-19 while building question memory (run H); the question-answers
-integration fixtures avoid the word "experience" for that reason (the
-`PYTHON_LABEL` comment). Fix direction: offer package answers only to text
-and textarea fields, so such questions reach question memory or pause.
-
 ### Workday ignores an account submit made within 500 ms of the form appearing
 
 From 2026-11-20 to 2026-11-24 the account submit got no answer at employer-f.wd1,
@@ -117,7 +102,90 @@ iCIMS's multi-page application yet …"), saves no run, and saves
 `pnpm run:evidence --job <ref>`). Next step: an iCIMS adapter built from that
 evidence, after which iCIMS could leave the approval-needed kinds.
 
+### Ashby's text-message consent is read without its question
+
+An Ashby form's text-message consent radio set was read with its label taken
+from its `communicationConsent` name attribute, so the question itself was
+never read; its options say only "receiving text messages", with no
+application-status wording, so under the candidate's 2026-11-20 text-message
+rule it is unclear and pauses. Fix direction: a read-only DOM capture of the
+form, then read the question title for that radio set. Until then it pauses.
+
+### Application-status text consent is not implemented
+
+The candidate's 2026-11-20 rule (text messages about this application: Yes;
+marketing texts: No; mixed or unclear: pause) has no code path: the standing
+classifier treats every text-message statement as a never-accepted marketing
+opt-in, and the domain test suite asserts that "I agree to receive text
+messages about my application" is one. Fix direction: a separate, approved
+change; it is not one of the two standing settings in AGENTS.md.
+
 ## Resolved
+
+### A Workday step was saved after reading no fields
+
+Two Workday runs (2026-11-20 and 2026-11-24) planned nothing on My
+Information and clicked Save and Continue, so Workday reported the name,
+phone, and how-heard fields empty, though the profile and the how-heard rule
+answer all of them. The readiness wait counted field containers the step
+reader then skipped as not visible, and the walker saved a step from which it
+had read no field. The wait now counts only visible field containers, and a
+step read with no fields is read once more and never saved past (the walk
+stops as blocked, "could not read any field"). The cause (a step drawn
+hidden while loading) is inferred from the recorded runs and has not been
+confirmed on a live page. Regressions: the two no-field Workday tests in
+`testing-harness/browser-worker/run-lifecycle.integration.test.ts`
+(`pnpm test:browser-worker:local`) and the synthetic `?hidden=` Workday
+fixture in `testing-harness/browser/fixture-run.ts`
+(`pnpm test:browser:fixture`).
+
+### Known answers went unused on common application questions
+
+Recorded runs paused on questions the agent could already answer: "legally
+eligible to work in the country you are applying for" was not read as work
+authorization; Greenhouse's "How would you describe your gender identity /
+racial/ethnic background? (mark all that apply)" lists were vetoed as open
+prompts and the race list was not even marked sensitive; "Which college did
+you attend?" and options carrying a US state code ("…(CA)") did not match the
+profile school, and the "If you selected other, please specify" box after it
+paused; "What degree level are you currently pursuing…" was not read as the
+degree; a graduation year list was compared with the full graduation date;
+"Please provide a link to your LinkedIn profile." did not match the LinkedIn
+label; a required marketing Yes/No list paused although marketing is always
+declined; "Are you a current college student majoring in computer science or
+related field?" had no rule; and package answers were offered to choice
+fields (a pause echoing the package text, or an optional choice paused instead
+of skipped) and to background-check questions. Each now has a deterministic
+rule (this also resolves the "Package answers fill select and radio fields"
+entry below). Regressions:
+`testing-harness/agent/question-mapper.test.ts` (`pnpm test:agent`),
+`testing-harness/browser-worker/self-identification.test.ts`,
+`ats-classification.test.ts`, and `recognition-planner.test.ts`
+(`pnpm test:browser-worker:fast`), and
+`self-identification.integration.test.ts` (`pnpm test:browser-worker:local`).
+
+### Package answers fill select and radio fields and pre-empt question memory
+
+`matchPackageAnswer` in `packages/browser/src/autofill-planner.ts` fills any
+field whose label matches its word stems (why, interest, motivat, company;
+experience, background, relevant, project, qualification; authoriz, sponsor,
+start, availab, eligible, work in) with the package's prose, whatever the
+field kind, so a select or radio such as "Do you have experience with
+Python?" gets a fill decision carrying the relevant-experience paragraph
+instead of an option, and a generic question like it never pauses, so the
+candidate's answer is never asked for or saved to question memory. Found
+2026-11-19 while building question memory (run H); the question-answers
+integration fixtures avoid the word "experience" for that reason (the
+`PYTHON_LABEL` comment). Fix direction: offer package answers only to text
+and textarea fields, so such questions reach question memory or pause.
+
+Fixed 2026-11-24: package answers are offered only to text boxes and text
+areas, so a select or radio set such as "Do you have experience with Python?"
+follows the usual rules (a remembered answer, a shown value, an optional skip,
+or a plain pause whose answer can be remembered). Regressions: the
+package-answer cases in
+`testing-harness/browser-worker/recognition-planner.test.ts`
+(`pnpm test:browser-worker:fast`).
 
 ### iCIMS account steps inside the career site's frame were never read
 

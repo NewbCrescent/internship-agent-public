@@ -351,7 +351,9 @@ export function createWorkdayPage(page: Page): WorkdayPage {
       return controls;
     },
     waitForFormReady: async () => {
-      await waitForStableControls(() => page.locator(`${FIELD}, ${RESUME_UPLOAD}`).count());
+      // Only visible field containers count: Workday can draw a step's fields hidden while it loads.
+      await waitForStableControls(async () =>
+        (await page.locator(FIELD).filter({ visible: true }).count()) + (await page.locator(RESUME_UPLOAD).count()));
     },
     fillField: async (field, value) => {
       await container(field).locator('input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="file"]), textarea').first().fill(value);
@@ -548,7 +550,8 @@ export type WorkdayWalkResult = {
 /**
  * Walks the application step by step: read the step, let the caller plan it,
  * fill, and Save and Continue. Stops at the first step with open questions,
- * on Workday's own validation errors, or on Review. Only in `submit` mode, and
+ * on Workday's own validation errors, on a step from which it could read no
+ * field (blocked; that step is never saved), or on Review. Only in `submit` mode, and
  * only on Review, does it click Submit; the caller must hold the candidate's
  * approval before choosing that mode.
  */
@@ -629,6 +632,19 @@ export async function walkWorkdayApplication(
         result.decisions.push(...filled.decisions.map((decision) => ({ ...decision, fieldId: prefix(step, decision.fieldId) })));
         historyPauses.push(...filled.pauses);
         form = recognizeForm(page.url(), await page.title(), await page.collectControls());
+      }
+    }
+    // A step read with no fields (Workday may draw it before its fields can be read) is read once more and never saved past.
+    if (form.fields.length === 0 && historyStep !== step.name) {
+      await page.waitForFormReady?.();
+      const again = await page.collectControls();
+      if (again.some((control) => control.type === "password" || /\bpassword\b/i.test(control.label ?? ""))) {
+        throw new WorkdayAccountWall(`Workday showed a password field on ${step.name}.`);
+      }
+      form = recognizeForm(page.url(), await page.title(), again);
+      if (form.fields.length === 0) {
+        result.errors.push(`${step.name}: the run could not read any field on this step, so it did not save it.`);
+        return result; // outcome stays "blocked"
       }
     }
     const plan = await planStep(step, form, { transcript: result.transcript });

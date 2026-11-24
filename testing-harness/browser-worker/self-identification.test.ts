@@ -116,6 +116,28 @@ describe("voluntary self-identification option matching", () => {
     expect(pick(greenhouseGender, { eeo_race_ethnicity: "asian" })).toBeNull();
     expect(pick(greenhouseGender, { eeo_gender: "unknown_value" })).toBeNull();
   });
+
+  it("answers Greenhouse's \"How would you describe your …? (mark all that apply)\" lists with the one matching option", () => {
+    const decline = ["I prefer to self-describe", "I don't wish to answer"];
+    const gender = field("How would you describe your gender identity? (mark all that apply)", ["Man", "Non-binary", "Woman", ...decline]);
+    const race = field("How would you describe your racial/ethnic background? (mark all that apply)", [
+      "Black or of African descent", "East Asian", "Hispanic, Latinx or of Spanish Origin", "Indigenous, American Indian or Alaska Native",
+      "Middle Eastern or North African", "Native Hawaiian or Pacific Islander", "South Asian", "Southeast Asian", "White or European", ...decline
+    ]);
+    expect(selfIdentificationCategory(gender)).toBe("gender");
+    expect(selfIdentificationCategory(race)).toBe("race");
+    expect(pick(gender, { eeo_gender: "male" })).toBe("Man");
+    expect(pick(race, { eeo_race_ethnicity: "white" })).toBe("White or European");
+    expect(pick(race, { eeo_race_ethnicity: "hispanic_or_latino" })).toBe("Hispanic, Latinx or of Spanish Origin");
+    // "East Asian", "South Asian", and "Southeast Asian" are several or none: no single match.
+    expect(pick(race, { eeo_race_ethnicity: "asian" })).toBeNull();
+    const orientation = field("How would you describe your sexual orientation? (mark all that apply)", ["Heterosexual", "Gay", ...decline]);
+    const transgender = field("Do you identify as transgender?", ["Yes", "No", ...decline]);
+    expect(pick(orientation, { eeo_gender: "male" })).toBeNull();
+    expect(pick(transgender, { eeo_gender: "male" })).toBeNull();
+    // An open "Describe your …" prompt is still not the self-identification itself.
+    expect(pick(field("Describe your gender identity", ["Man", "Woman", "I don't wish to answer"]), { eeo_gender: "male" })).toBeNull();
+  });
 });
 
 function plan(fields: BrowserField[], resolutions: Array<[string, FieldResolution]>) {

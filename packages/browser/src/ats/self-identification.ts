@@ -12,7 +12,8 @@ import type { BrowserField, SelfIdentificationAnswers, SelfIdentificationKey } f
  * 2. The label names exactly one category (gender; Hispanic/Latino yes/no;
  *    race or ethnicity; veteran; disability) and is not a pronoun,
  *    orientation, transgender, sex-assigned-at-birth, accommodation or open
- *    prompt.
+ *    prompt. The "How would you describe your …" lead-in of standard EEO
+ *    lists ("mark all that apply") is not an open prompt.
  * 3. Exactly one offered option matches the saved answer; two matches are
  *    ambiguous and none is no answer.
  *
@@ -56,7 +57,8 @@ export function selfIdentificationCategory(field: BrowserField): SelfIdentificat
   if (field.kind !== "select" && field.kind !== "radio") return null;
   const options = (field.options ?? []).map(normalize).filter(Boolean);
   if (options.length < 2 || !options.some((option) => DECLINE.test(option))) return null;
-  const label = normalize(field.label);
+  // "How would you describe your gender identity?" is the standard EEO lead-in, not an open prompt.
+  const label = normalize(field.label).replace(/^how (?:would|do) you (?:best )?describe (?:your(?:self)?|you)\b\s*/, "");
   if (NOT_SELF_ID.test(label)) return null;
   const answerable = options.filter((option) => !DECLINE.test(option));
   const categories: SelfIdentificationCategory[] = [];
