@@ -199,6 +199,8 @@ describe("post-submit hold evidence routing", () => {
   function withdrawApproval(database: DatabaseSync, run: BrowserRun) {
     updateBrowserRun(database, run.id, {
       status: "paused-needs-input", submissionApprovedAt: null,
+      // The pause decision a field-errors hold leaves for the field (invalidFieldPauses).
+      decisions: [{ fieldId: "school", action: "pause", value: null, basis: null, reason: "The site marked School invalid.", pause: null }],
       pauses: [{ fieldId: "school", label: "School", question: "School: invalid value", suggestedKey: null, suggestedScope: null,
         safeguard: false, sensitive: false, upload: false, status: "open", answer: null, draft: null }]
     });
@@ -206,6 +208,8 @@ describe("post-submit hold evidence routing", () => {
 
   const before = new Date("2026-11-20T09:00:00.000Z");
   const after = new Date("2026-11-20T10:00:00.000Z");
+  /** The reopened application form, still showing the School field the answer fills (a page without it keeps the run paused). */
+  const formPage = (): BrowserPage => ({ ...stubPage(), collectControls: async () => [{ tag: "input", type: "text", id: "school", label: "School", required: true }] });
 
   it("changes prior uncertainty when withdrawn approval and structured field errors explain it", async () => {
     const database = disposableDatabase();
@@ -257,7 +261,7 @@ describe("post-submit hold evidence routing", () => {
       const continued = await continueBrowserRun(run.id, {
         database,
         dataDir,
-        openPage: async () => stubPage()
+        openPage: async () => formPage()
       });
       expect(continued.run.status).toBe("awaiting-approval");
       expect(continued.run.submissionApprovedAt).toBeNull();
@@ -290,7 +294,7 @@ describe("post-submit hold evidence routing", () => {
       const continued = await continueBrowserRun(run.id, {
         database,
         dataDir,
-        openPage: async () => stubPage()
+        openPage: async () => formPage()
       });
       expect(continued.run.status).toBe("awaiting-approval");
       const holds = refreshApplicationHolds(database, dataDir, new Date("2026-11-20T10:30:00Z"));

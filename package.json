@@ -100,6 +100,7 @@
     "test:browser:workday-account": "tsx testing-harness/browser/workday-account-run.ts",
     "test:browser:account-consent": "tsx testing-harness/browser/account-consent-run.ts",
     "test:browser:greenhouse": "tsx testing-harness/browser/greenhouse-fixture-run.ts",
+    "test:browser:site-navigation": "tsx testing-harness/browser/site-navigation-run.ts",
     "test:harness": "node --test testing-harness/harness/*.test.mjs",
     "test:browser": "node testing-harness/browser/run.mjs",
     "verify:fit:model": "tsx --env-file-if-exists=.env testing-harness/matching/semantic-fit-model.acceptance.ts"

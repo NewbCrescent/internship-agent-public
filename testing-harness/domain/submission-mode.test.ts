@@ -68,4 +68,16 @@ describe("auto-submit policy", () => {
     expect(autoSubmitBlockers({ ...clean, suggestedAtsKind: null })).toEqual(["The application site type was not recognized automatically."]);
     expect(autoSubmitBlockers({ ...clean, suggestedAtsKind: "lever" })).toEqual(["The application site type was not recognized automatically."]);
   });
+
+  it("keeps supported kinds clean and holds unsupported or unknown ones", () => {
+    const filled = { status: "awaiting-approval", pauses: [], decisions: [{ action: "fill", basis: { kind: "fact" } }] };
+    // A supported adapter (Greenhouse, Lever, Ashby, Dover) confirms its kind itself: nothing holds the run.
+    expect(autoSubmitBlockers({ ...filled, atsConfirmed: true, suggestedAtsKind: null })).toEqual([]);
+    // Paylocity is recognized but its five-step form has no adapter yet.
+    expect(autoSubmitBlockers({ ...filled, atsConfirmed: false, suggestedAtsKind: "paylocity" })).toEqual([
+      "Paylocity application sites are recognized, but the agent has no adapter that walks their application, so you approve each one."
+    ]);
+    // A site reached only by the generic navigation is not recognized, so it is not supported.
+    expect(autoSubmitBlockers({ ...filled, atsConfirmed: false, suggestedAtsKind: null })).toEqual(["The application site type was not recognized automatically."]);
+  });
 });

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Robotics Software Intern - Fixture Robotics</title>
+<style>
+  #onetrust-banner-sdk { position: fixed; bottom: 0; left: 0; right: 0; background: #eee; padding: 12px; z-index: 10; }
+  .ot-hide { display: none; }
+</style>
+</head>
+<body>
+  <!--
+    A fictional Paylocity Recruiting job details page ("Fixture Robotics", job 1000001), reduced from
+    the structure captured read-only on 2026-11-24 at recruiting.paylocity.com/Recruiting/Jobs/Details/<id>.
+    It carries no real company, tenant key, job id, or personal data. The OneTrust banner offers
+    "Cookies Settings", "Accept All Cookies", and a close button (aria-label "Close") and no reject
+    control; its hidden Privacy Preference Center holds the toggles, vendor search, filter checkbox,
+    and "switch" boxes the capture read as controls, plus "Reject All" and "Confirm My Choices". The
+    posting's own Apply links go to /Recruiting/Jobs/Apply/<id>; share buttons carry no text. The
+    footer reads "Powered by" beside "Paylocity Privacy Policy". The banner choice is kept in
+    sessionStorage ("consent").
+  -->
+  <div id="onetrust-consent-sdk">
+    <div class="onetrust-pc-dark-filter ot-hide"></div>
+    <div id="onetrust-banner-sdk" class="otFlat otRelFont bottom ot-wo-title">
+      <div role="alertdialog" aria-describedby="onetrust-policy-text" aria-label="Privacy">
+        <p id="onetrust-policy-text">By clicking “Accept All Cookies”, you agree to the storing of cookies on your device.</p>
+        <div id="onetrust-button-group">
+          <button id="onetrust-pc-btn-handler" class="cookie-setting-link">Cookies Settings</button>
+          <button id="onetrust-accept-btn-handler">Accept All Cookies</button>
+        </div>
+        <div id="onetrust-close-btn-container">
+          <button class="onetrust-close-btn-handler onetrust-close-btn-ui banner-close-button ot-close-icon" aria-label="Close">×</button>
+        </div>
+      </div>
+    </div>
+    <div id="onetrust-pc-sdk" class="otPcCenter ot-hide" role="alertdialog" aria-label="Privacy Preference Center">
+      <button id="close-pc-btn-handler" class="ot-close-icon" aria-label="Close"></button>
+      <button id="accept-recommended-btn-handler">Allow All</button>
+      <h4 class="ot-cat-header" id="ot-header-id-C0004">Targeting Cookies</h4>
+      <input type="checkbox" name="ot-group-id-C0004" id="ot-group-id-C0004" role="switch" class="category-switch-handler" aria-labelledby="ot-header-id-C0004">
+      <h4 class="ot-cat-header" id="ot-header-id-C0001">Strictly Necessary Cookies</h4>
+      <h4 class="ot-cat-header" id="ot-header-id-C0002">Performance Cookies</h4>
+      <input type="checkbox" name="ot-group-id-C0002" id="ot-group-id-C0002" role="switch" class="category-switch-handler" aria-labelledby="ot-header-id-C0002">
+      <input id="vendor-search-handler" type="text" name="vendor-search-handler">
+      <input id="chkbox-id" type="checkbox" class="category-filter-handler">
+      <button id="filter-apply-handler">Apply</button>
+      <input type="checkbox" name="switch" id="select-all-hosts-groups-handler" role="switch">
+      <input type="checkbox" name="switch" id="select-all-vendor-groups-handler" role="switch">
+      <input type="checkbox" name="switch" id="select-all-vendor-leg-handler" role="switch">
+      <button class="ot-pc-refuse-all-handler">Reject All</button>
+      <button class="save-preference-btn-handler onetrust-close-btn-handler">Confirm My Choices</button>
+    </div>
+  </div>
+  <div class="container body-content" id="applicant-tracking">
+    <a class="breadcrumb-link" href="/Recruiting/Jobs/All/00000000-0000-4000-8000-0000000000f1/Fixture-Robotics">All Jobs</a>
+    <h1 class="job-preview-title">Robotics Software Intern</h1>
+    <a class="apply-link-marker button apply-button branding-button-color" href="/Recruiting/Jobs/Apply/1000001">Apply</a>
+    <div class="job-location"><a class="branding-link-color" href="http://maps.google.com/maps?q=Fixture+City">Fixture City, CA</a></div>
+    <button class="react-share__ShareButton" aria-label="share on a social network"></button>
+    <button class="react-share__ShareButton" aria-label="share by email"></button>
+    <div class="job-description"><p>Build robot software with the platform team.</p></div>
+    <a class="apply-link-marker button apply-button branding-button-color" href="/Recruiting/Jobs/Apply/1000001">Apply</a>
+    <a href="/Recruiting/Jobs/All/00000000-0000-4000-8000-0000000000f1">View All Jobs</a>
+    <footer>Powered by <a href="https://www.paylocity.example/privacy/">Paylocity Privacy Policy</a></footer>
+  </div>
+  <script>
+    window.fixture = { consent: null };
+    const banner = document.getElementById("onetrust-banner-sdk");
+    document.getElementById("onetrust-accept-btn-handler").addEventListener("click", () => { window.fixture.consent = "accepted"; sessionStorage.setItem("consent", "accepted"); banner.style.display = "none"; });
+    document.querySelector(".banner-close-button").addEventListener("click", () => { window.fixture.consent = "closed"; sessionStorage.setItem("consent", "closed"); banner.style.display = "none"; });
+  </script>
+</body>
+</html>

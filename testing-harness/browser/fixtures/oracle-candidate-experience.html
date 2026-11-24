@@ -6,12 +6,18 @@
     A fictional Oracle Cloud HCM Candidate Experience job page ("Fixture Robotics"), reduced from
     the structure captured read-only on 2026-11-19 at *.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience:
     the title carries the employer's careers name only; the page footer credits Oracle; Apply Now
-    leads to an email step (/apply/email) before any application form.
+    leads to an email step (/apply/email) before any application form. The share widget's read-only
+    copy-link box (id copy-link-<uuid>, aria-label "Copy Link") is reconstructed from the read-only
+    capture of 2026-11-24, where it was the page's only text box.
   -->
   <main class="app-main">
     <div class="job-details">
       <h1 class="job-details__title">Robotics Software Intern</h1>
       <ul class="job-meta"><li>Job Identification 10001</li><li>Location: Fixture City, OR, United States</li></ul>
+      <div class="share-widget">
+        <input type="text" tabindex="-1" readonly class="share-widget__link" id="copy-link-00000000-0000-4000-8000-000000000004" aria-label="Copy Link" value="https://fixture.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/10001">
+        <button class="share-widget__action">Copy Link</button>
+      </div>
       <a class="apply-flow-link" href="/hcmUI/CandidateExperience/en/sites/CX_1/job/10001/apply/email">Apply Now</a>
     </div>
   </main>

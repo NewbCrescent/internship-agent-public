@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Robotics Software Intern - Fixture Robotics</title>
+<style>#onetrust-banner-sdk { position: fixed; bottom: 0; left: 0; right: 0; background: #eee; padding: 12px; z-index: 10; }</style>
+</head>
+<body>
+  <!--
+    A synthetic posting page ("Fixture Robotics") on a site the agent has no adapter for. DERIVED,
+    not captured: it carries no real company, tenant host, job id, or personal data. A OneTrust-shaped
+    banner (Reject All and Accept All Cookies) sits over the page; the posting offers its own Apply
+    link, an "Apply with LinkedIn" link to another site, and a share button. Apply leads to a choice
+    page (guest-choice.html). The banner choice is kept in sessionStorage ("consent").
+  -->
+  <div id="onetrust-consent-sdk">
+    <div id="onetrust-banner-sdk">
+      <p>We use cookies to improve your experience.</p>
+      <button id="onetrust-accept-btn-handler">Accept All Cookies</button>
+      <button id="onetrust-reject-all-handler">Reject All</button>
+    </div>
+  </div>
+  <main>
+    <h1>Robotics Software Intern</h1>
+    <p>Fixture City, CA. Build robot software with the platform team.</p>
+    <button class="share">Share</button>
+    <a href="https://www.linkedin.com/jobs/apply/fixture">Apply with LinkedIn</a>
+    <a class="apply" href="/jobs/2001/apply">Apply</a>
+  </main>
+  <script>
+    window.fixture = { consent: null };
+    const banner = document.getElementById("onetrust-banner-sdk");
+    document.getElementById("onetrust-accept-btn-handler").addEventListener("click", () => { window.fixture.consent = "accepted"; sessionStorage.setItem("consent", "accepted"); banner.remove(); });
+    document.getElementById("onetrust-reject-all-handler").addEventListener("click", () => { window.fixture.consent = "rejected"; sessionStorage.setItem("consent", "rejected"); banner.remove(); });
+  </script>
+</body>
+</html>

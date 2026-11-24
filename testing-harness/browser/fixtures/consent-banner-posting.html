@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Robotics Software Intern - Fixture Robotics</title>
+<style>
+  #onetrust-banner-sdk { position: fixed; bottom: 0; left: 0; right: 0; background: #eee; padding: 12px; z-index: 10; }
+  .ot-hide { display: none; }
+  .visually-hidden { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+</style>
+</head>
+<body>
+  <!--
+    A synthetic posting page ("Fixture Robotics") behind a OneTrust-shaped cookie banner, shaped
+    after the read-only captures of 2026-11-24 (a Paylocity posting's OneTrust banner and hidden
+    Privacy Preference Center, and an Oracle posting's read-only copy-link box). It carries no real
+    company, tenant host, job id, or personal data. The banner offers "Accept All Cookies" and
+    "Reject All" (?acceptOnly=1 removes "Reject All"); each records its choice in
+    window.fixture.consent. The hidden preference center holds the toggles, vendor search, filter
+    checkbox, and "switch" boxes the capture read as controls; the posting holds a copy-link box
+    and a honeypot. None of them is an application question. The choice is also kept in
+    sessionStorage ("consent"), so it can be read after the Apply link was followed.
+  -->
+  <div id="onetrust-consent-sdk">
+    <div class="onetrust-pc-dark-filter ot-hide"></div>
+    <div id="onetrust-banner-sdk" class="otFlat">
+      <div role="alertdialog" aria-label="Privacy">
+        <p id="onetrust-policy-text">By clicking "Accept All Cookies", you agree to the storing of cookies on your device.</p>
+        <div id="onetrust-button-group">
+          <button id="onetrust-pc-btn-handler" class="cookie-setting-link">Cookies Settings</button>
+          <button id="onetrust-reject-all-handler">Reject All</button>
+          <button id="onetrust-accept-btn-handler">Accept All Cookies</button>
+        </div>
+      </div>
+    </div>
+    <div id="onetrust-pc-sdk" class="otPcCenter ot-hide" role="alertdialog" aria-label="Privacy Preference Center">
+      <button id="accept-recommended-btn-handler">Allow All</button>
+      <h4 id="ot-header-id-C0004">Targeting Cookies</h4>
+      <input type="checkbox" name="ot-group-id-C0004" id="ot-group-id-C0004" role="switch" aria-labelledby="ot-header-id-C0004">
+      <h4 id="ot-header-id-C0002">Performance Cookies</h4>
+      <input type="checkbox" name="ot-group-id-C0002" id="ot-group-id-C0002" role="switch" aria-labelledby="ot-header-id-C0002">
+      <input id="vendor-search-handler" type="text" name="vendor-search-handler">
+      <input id="chkbox-id" type="checkbox" class="category-filter-handler">
+      <input type="checkbox" name="switch" id="select-all-hosts-groups-handler" role="switch">
+      <input type="checkbox" name="switch" id="select-all-vendor-groups-handler" role="switch">
+      <button class="ot-pc-refuse-all-handler">Reject All</button>
+      <button class="save-preference-btn-handler onetrust-close-btn-handler">Confirm My Choices</button>
+    </div>
+  </div>
+  <main>
+    <h1>Robotics Software Intern</h1>
+    <p>Fixture City, CA</p>
+    <div class="share-widget">
+      <input type="text" tabindex="-1" readonly class="share-widget__link" id="copy-link-00000000-0000-4000-8000-000000000002" aria-label="Copy Link" value="https://careers.fixturerobotics.example/jobs/3001">
+      <button class="share-widget__action">Copy Link</button>
+    </div>
+    <div class="visually-hidden">
+      <label for="website-confirm">Leave this field blank</label>
+      <input type="text" id="website-confirm" name="website-confirm" tabindex="-1" autocomplete="off">
+    </div>
+    <a class="apply-button" href="/jobs/3001/apply">Apply</a>
+  </main>
+  <script>
+    window.fixture = { consent: null };
+    if (new URLSearchParams(location.search).get("acceptOnly") === "1") document.getElementById("onetrust-reject-all-handler").remove();
+    const banner = document.getElementById("onetrust-banner-sdk");
+    const choose = (value) => () => { window.fixture.consent = value; sessionStorage.setItem("consent", value); banner.style.display = "none"; };
+    document.getElementById("onetrust-accept-btn-handler").addEventListener("click", choose("accepted"));
+    document.getElementById("accept-recommended-btn-handler").addEventListener("click", choose("accepted"));
+    const reject = document.getElementById("onetrust-reject-all-handler");
+    if (reject) reject.addEventListener("click", choose("rejected"));
+  </script>
+</body>
+</html>

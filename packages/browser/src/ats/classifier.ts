@@ -89,6 +89,14 @@ const ADAPTERS: AdapterSignals[] = [
     url: [/ats\.rippling\.com/i, /rippling\.com/i],
     title: [],
     body: [/powered by rippling/i, /ats\.rippling\.com/i]
+  },
+  {
+    // Paylocity Recruiting at recruiting.paylocity.com/Recruiting/Jobs/Details/<id> (read-only capture of 2026-11-24).
+    // No title pattern: a company can be named Paylocity. Its footer reads "Powered by" beside "Paylocity Privacy Policy".
+    kind: "paylocity",
+    url: [/recruiting\.paylocity\.com/i, /\.paylocity\.com\/Recruiting\//i],
+    title: [],
+    body: [/powered by\s+paylocity/i, /recruiting\.paylocity\.com/i]
   }
 ];
 

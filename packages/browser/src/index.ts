@@ -10,3 +10,5 @@ export * from "./handshake-session";
 export * from "./pdf";
 export * from "./standing-fields";
 export * from "./application-page";
+export * from "./cookie-consent";
+export * from "./site-navigation";

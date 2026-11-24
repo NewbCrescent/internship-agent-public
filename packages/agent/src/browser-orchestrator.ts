@@ -39,14 +39,18 @@ import {
   classifyFieldRole,
   createApplicationPage,
   createWorkdayPage,
+  hasApplicationFields,
   hasIcimsSteps,
   hasJobviteConsent,
+  hasSiteNavigation,
+  hasStepButtons,
   icimsHostOf,
   hasTranscriptField,
   invalidFieldPauses,
   isHandshakeHost,
   isSensitiveRole,
   matchSelfIdentificationOption,
+  multiStepStopReason,
   planAutofill,
   securityCodePause,
   postSubmitEvidenceOf,
@@ -55,6 +59,7 @@ import {
   renderHtmlToPdf,
   resumePdfPath,
   shouldRunHeadless,
+  siteWallReason,
   submitAndConfirm,
   SubmissionChallenged,
   SubmissionCodeNotFound,
@@ -564,6 +569,25 @@ async function assertKeptAttachment(page: BrowserPage, decisions: FillDecision[]
   }
 }
 
+/** Decisions that act on the page or ask the candidate: a run with none of them never reached an application form. */
+const ACTED = new Set(["fill", "choose", "check", "upload", "keep", "pause"]);
+
+function reachedApplicationForm(decisions: FillDecision[]): boolean {
+  return decisions.some((decision) => ACTED.has(decision.action));
+}
+
+function noFormReachedReason(url: string): string {
+  return `No application form was reached at ${url}: the page shows no question the agent can fill or ask you about. It may sit behind an Apply button or a step the agent cannot take; start the run yourself from the form's address.`;
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return url;
+  }
+}
+
 async function resolveFields(
   form: RecognizedForm,
   database: DatabaseSync,
@@ -681,6 +705,16 @@ export async function startBrowserRun(
         formUrl = reached;
       }
     }
+    // A site with no adapter: walk on toward its form (reject cookies, then
+    // guest, Apply, manual, or continue entries; at most four, never sign-in,
+    // account creation, or a submit), and save the address the walk reached.
+    if (!inDialog && !onHandshakeHost(page.url()) && hasSiteNavigation(page) && !hasApplicationFields(form.fields)) {
+      const outcome = await page.advanceToApplicationForm();
+      if (outcome.moved) {
+        form = await recognizeCurrentForm(page);
+        formUrl = outcome.url;
+      }
+    }
     // iCIMS's account step and Jobvite's data-consent step: taken only when
     // their settings are on (Jobvite's on any run, iCIMS's on automatic runs);
     // otherwise never typed into.
@@ -704,6 +738,9 @@ export async function startBrowserRun(
         throw new Error(wall);
       }
     }
+    // A step no adapter takes yet (Oracle Cloud HCM's email and one-time-code step): named before anything is typed.
+    const siteWall = siteWallReason(page.url(), form.fields);
+    if (siteWall) throw automatic ? new AutomaticRunStopped(siteWall) : new Error(siteWall);
     if (automatic) {
       // Never type into a sign-in or account form, and never record an empty
       // "ready" run for a page that is not the application itself.
@@ -711,6 +748,11 @@ export async function startBrowserRun(
         throw new AutomaticRunStopped("The application site asks you to sign in or create an account first. Do that in the agent's browser, then start the run yourself.");
       }
       if (!form.fields.some((field) => field.kind !== "unknown")) {
+        // A CAPTCHA or bot-check page in place of the form is named as such.
+        const blocking = page.visibleChallenge ? await page.visibleChallenge() : null;
+        if (blocking) {
+          throw new AutomaticRunStopped(`The application page at ${hostOf(page.url())} showed ${blocking.detail}; the agent never solves CAPTCHAs, so start this application yourself.`);
+        }
         throw new AutomaticRunStopped("No application form was found at " + applicationUrl + ". It may sit behind an Apply button; start the run yourself from the form's address.");
       }
     }
@@ -718,6 +760,12 @@ export async function startBrowserRun(
     const challenge = page.visibleChallenge ? await page.visibleChallenge() : null;
     const classification = classifyAts(form.url, form.title, await page.bodyText());
     const flow = atsFlowFor(classification);
+    // A form of several pages on a site with no adapter (unknown or approval-only kinds; iCIMS is its own flow):
+    // filling only its first page would leave the run stuck at submit, so it stops with the reason.
+    if (!challenge && !inDialog && flow !== "auto" && !onHandshakeHost(page.url()) && !icimsHostOf(page.url()) && hasStepButtons(page)) {
+      const multi = multiStepStopReason(page.url(), await page.stepButtons());
+      if (multi) throw automatic ? new AutomaticRunStopped(multi) : new Error(multi);
+    }
     const transcriptRequired = hasTranscriptField(form.fields);
     if (lock === "default" && runChannel(posting.source.applicationType, transcriptRequired)) {
       throw new AutomaticRunStopped(yearHoldMessage(database, candidateId, posting.companyName));
@@ -788,6 +836,11 @@ export async function startBrowserRun(
       const held = challengePause(challenge);
       decisions.push(held.decision);
       plan.pauses = [...plan.pauses, held.pause];
+    }
+    // Only skips (a copy-link box, a cookie panel's toggles): no application form was reached, so nothing is saved.
+    if (!reachedApplicationForm(decisions)) {
+      const reason = noFormReachedReason(page.url());
+      throw automatic ? new AutomaticRunStopped(reason) : new Error(reason);
     }
     const uploadPathFor = await prepareUploads(
       database,
@@ -1092,7 +1145,12 @@ export async function continueBrowserRun(
     // A resume the candidate confirmed must not have changed while the run waited.
     await assertKeptAttachment(page, run.decisions);
     await passJobviteConsentAgain(database, page, run.jobId, standing);
-    const form = await recognizeCurrentForm(page);
+    let form = await recognizeCurrentForm(page);
+    // A form reached through a button on a site with no adapter (its address did not change): walk to it again.
+    if (!onHandshakeHost(page.url()) && hasSiteNavigation(page) && !hasApplicationFields(form.fields)) {
+      const outcome = await page.advanceToApplicationForm();
+      if (outcome.moved) form = await recognizeCurrentForm(page);
+    }
     const resolutions = await resolveFields(form, database, { ...questionContextFor(channel), ...postingQuestionContext(getJobPosting(database, run.jobId)) });
     const decisions: FillDecision[] = [];
     // An answer that fits no option of its list reopens its pause instead of being typed into the list.
@@ -1141,6 +1199,10 @@ export async function continueBrowserRun(
     const { applied, unfilled } = await applyDecisions(page, form, decisions, uploadPathFor);
     const filled = pauseUnfilled(form, decisions, pauses, unfilled);
     const stillOpen = filled.pauses.filter((entry) => entry.status === "open").length;
+    // Nothing filled and nothing left to ask: the reopened page is not the run's form, so the run stays paused.
+    if (stillOpen === 0 && applied === 0 && !filled.decisions.some((decision) => decision.action === "keep")) {
+      throw new Error(noFormReachedReason(page.url()));
+    }
     const settled = updateBrowserRun(database, runId, {
       decisions: filled.decisions,
       pauses: filled.pauses,
@@ -1300,6 +1362,18 @@ export async function submitBrowserRun(
         pauses: [...run.pauses.filter((pause) => pause.fieldId !== held.pause.fieldId), held.pause]
       });
       throw new SubmissionChallenged(`Before the submit click the site showed ${challenge.detail}. The agent never solves CAPTCHAs, so this application is held for you: finish it in your own browser. The run is not marked submitted.`);
+    }
+    // The approved form must still be there: a page showing none of its fields is never submitted.
+    let shown = await recognizeCurrentForm(page);
+    if (!onHandshakeHost(page.url()) && hasSiteNavigation(page) && !hasApplicationFields(shown.fields)) {
+      const outcome = await page.advanceToApplicationForm();
+      if (outcome.moved) shown = await recognizeCurrentForm(page);
+    }
+    const present = new Set(shown.fields.map((field) => field.id));
+    const onForm = run.decisions.some((decision) => SHOWN_ACTIONS.has(decision.action)
+      && (present.has(decision.fieldId) || (decision.action === "keep" && decision.fieldId === ATTACHED_RESUME_FIELD)));
+    if (!onForm) {
+      throw new Error(`The application form was not found at ${page.url()} when the agent came back to submit; nothing was clicked, and the run still waits for approval.`);
     }
   } catch (error) {
     await page.close();
@@ -1649,6 +1723,9 @@ async function readWorkdayConfirmation(page: WorkdayPage): Promise<string> {
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 }
+
+/** Decisions whose field must still be on the page at submit. */
+const SHOWN_ACTIONS = new Set(["fill", "choose", "check", "upload", "keep"]);
 
 function countApplied(decisions: FillDecision[]): number {
   return decisions.filter((decision) => ["fill", "choose", "check", "upload"].includes(decision.action)).length;

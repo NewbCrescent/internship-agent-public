@@ -102,6 +102,53 @@ iCIMS's multi-page application yet …"), saves no run, and saves
 `pnpm run:evidence --job <ref>`). Next step: an iCIMS adapter built from that
 evidence, after which iCIMS could leave the approval-needed kinds.
 
+### Oracle Candidate Experience applications stop at the email step
+
+An Oracle Cloud HCM Candidate Experience posting's Apply Now leads to
+`<posting>/apply/email` (a read-only, headful capture of 2026-11-24 showed an
+Email Address box, an "I agree with the terms and conditions" checkbox, and
+NEXT), after which Oracle emails a one-time code before its multi-step form.
+The agent now follows Apply Now and names that step ("Oracle Cloud HCM asks
+for your email at <host>, then emails you a one-time code, before its
+application form; the agent does not take that step yet. Apply in your own
+browser.") before anything is typed, on automatic and candidate-started runs,
+and saves no run. Walking past it needs typing the candidate's email and
+reading the emailed code; no structure past the email step has been captured
+(the capture stopped there without typing), so no adapter walks Oracle's
+application and `oracle` stays in `ATS_KINDS_NEEDING_APPROVAL`. Next step: a
+capture of the post-code form from a session the candidate opens, then an
+Oracle adapter with a disposable-Chromium regression and its confirmation.
+
+### SmartRecruiters application pages show DataDome to the agent's browser
+
+A SmartRecruiters posting's "I'm interested" leads to
+`/oneclick-ui/company/<company>/publication/<id>`, which showed a DataDome
+CAPTCHA page to a fresh, headful capture browser on 2026-11-24, as it did to
+the headless one on 2026-11-19. The agent never solves it: an automatic run
+stops with "The application page at jobs.smartrecruiters.com showed a
+DataDome CAPTCHA page; the agent never solves CAPTCHAs, so start this
+application yourself.", and a candidate-started run is held on the
+challenge. The form behind it could not be read, so no adapter fills it, and
+`smartrecruiters` stays in `ATS_KINDS_NEEDING_APPROVAL` (its own success text
+"Application submitted!" was found in the page's translation bundle, but
+the form walk and its regression are missing). Next step: a read-only capture
+of the application form from a session the candidate opens.
+
+### Paylocity applications span five steps
+
+A Paylocity Recruiting application (`recruiting.paylocity.com/Recruiting/Jobs/Apply/<id>`,
+captured read-only on 2026-11-24) is a form of five steps: the first page
+shows "Step 1 of 5", the identity, address, and LinkedIn questions, and a
+"Next Step" button, and no submit control. The agent now recognizes the kind
+(`paylocity`), reaches that page from the posting (closing the accept-only
+cookie banner), and stops the run there with the several-page reason before
+anything is typed, since filling only the first page would leave the run
+stuck at submit. No success text was found in the site's own scripts. Next
+step: a capture of the later steps (questions, EEO, review, submit, and the
+confirmation) from a session the candidate opens, then a Paylocity walker
+with a disposable-Chromium regression; until then `paylocity` stays in
+`ATS_KINDS_NEEDING_APPROVAL`.
+
 ### Ashby's text-message consent is read without its question
 
 An Ashby form's text-message consent radio set was read with its label taken
@@ -121,6 +168,34 @@ messages about my application" is one. Fix direction: a separate, approved
 change; it is not one of the two standing settings in AGENTS.md.
 
 ## Resolved
+
+### Runs that never reached an application form waited at the submit step
+
+On 2026-11-24 three automatic runs, on an Oracle Cloud HCM posting, a
+SmartRecruiters posting, and a Paylocity posting, reached `awaiting-approval`
+with only skip decisions: the controls read there were an Oracle share
+widget's copy-link box, a SmartRecruiters share dialog's box with neither id
+nor name, and a OneTrust cookie preference panel's toggles and vendor search.
+Cause: `startBrowserRun` treated any control of a known kind as a form, so the
+posting's Apply entry was never followed and the automatic no-form stop never
+fired; the planner skipped every control, and a run with nothing filled and
+no pause was saved as waiting at the submit step. `continueBrowserRun` saved
+the same shape, and `submitBrowserRun` reopened the address and clicked
+submit even when none of the approved fields was on the page. Fix: a run
+whose decisions fill, choose, check, upload, keep, or pause nothing stops
+with "No application form was reached at <url>: …" (automatic runs as a
+recorded stop), saving nothing and leaving the job status unchanged; a
+continue that fills nothing and has nothing left to ask keeps the run paused;
+a submit whose page shows none of the approved fields clicks nothing and
+keeps the approval. Cookie-consent managers' controls, share and copy-link
+boxes, and honeypot text boxes are no longer read as fields
+(`collectControlsIn`), so the Apply entry and the new site navigation are
+tried on such pages. Regressions: "runs that never reached an application
+form" in `testing-harness/browser-worker/run-lifecycle.integration.test.ts`
+(`pnpm test:browser-worker:local`) and the consent scenarios in
+`testing-harness/browser/site-navigation-run.ts`
+(`pnpm test:browser:site-navigation`). Runs already saved in that state are
+not changed.
 
 ### A Workday step was saved after reading no fields
 

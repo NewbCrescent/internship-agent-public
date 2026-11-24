@@ -20,7 +20,8 @@ export type AdapterProfile = {
  * data-consent step and an email-first account step stand in front of their
  * forms. Dover is one page filled by the generic filler; Rippling is
  * recognized for display only (a progress bar on its application page and no
- * success text the agent can recognize).
+ * success text the agent can recognize), and so is Paylocity (a form of
+ * several steps behind the posting's Apply, and no known success text).
  */
 export const ADAPTER_PROFILES: Record<AdapterProfile["kind"], AdapterProfile> = {
   greenhouse: {
@@ -87,6 +88,12 @@ export const ADAPTER_PROFILES: Record<AdapterProfile["kind"], AdapterProfile> = 
     kind: "rippling",
     readiness: ["Rippling application page present (<posting>/apply, behind the posting's Apply now button)"],
     notes: ["The application page shows a progress bar and its success text is not known; recognized for display only, the candidate approves each run"],
+    multipage: true
+  },
+  paylocity: {
+    kind: "paylocity",
+    readiness: ["Paylocity application page present (/Recruiting/Jobs/Apply/<id>, behind the posting's Apply)"],
+    notes: ["The application is a form of five steps (\"Step 1 of 5\", a \"Next Step\" button, no submit on the first) behind a OneTrust cookie banner; its success text is not known; recognized for display only, the candidate approves each run"],
     multipage: true
   }
 };

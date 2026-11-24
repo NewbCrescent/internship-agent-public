@@ -1116,10 +1116,19 @@ export function attachedNamesFromText(text: string): string[] {
  * with neither id nor name is tagged `data-ia-control="ia-control-<n>"` and
  * carries that tag as its ref; the tag stays the same across repeated
  * collections, so a field id from an earlier recognition still names the
- * same element.
+ * same element. Controls inside a cookie-consent manager (OneTrust's banner
+ * and preference-center toggles, its vendor search), a share or copy-link
+ * box (an id or name saying copy-link or share-link, or a read-only text box
+ * holding a URL), and a honeypot text box ("Leave this field blank", "for
+ * robots", Workday's beecatcher) are never fields.
  */
-function collectControlsIn(root: Element): RawControl[] {
+export function collectControlsIn(root: Element): RawControl[] {
   const controls: RawControl[] = [];
+  // Same list as cookie-consent.ts COOKIE_CONSENT_ROOTS; copied because this runs in the page.
+  const CONSENT_ROOTS = '#onetrust-consent-sdk, #onetrust-banner-sdk, #onetrust-pc-sdk, #ot-sdk-cookie-policy, .ot-sdk-container, #CybotCookiebotDialog, #truste-consent-track, #truste-consent-content, #consent_blackbar, #usercentrics-root, #didomi-host, .cc-window, #cookiescript_injected, #cmplz-cookiebanner-container, #cookie-law-info-bar, #cookie-banner, #cookie-consent, #cookieConsent, [role="dialog"][aria-label*="cookie" i], [role="alertdialog"][aria-label*="cookie" i], [role="region"][aria-label*="cookie" i]';
+  const COPY_LINK = /(?:^|[-_])copy[-_]?link(?:$|[-_])|share[-_]?link/i;
+  const HONEYPOT = /\b(?:honey ?pot|robots? only|for robots|if you(?:'|’| a)re (?:a )?human|leave (?:this )?(?:field )?(?:blank|empty)|do not (?:fill|enter|type))\b|beecatcher/i;
+  const TEXT_LIKE = ["text", "email", "url", "tel", "search", "number"];
   const TOKEN = /^(?:g-recaptcha-response|h-captcha-response|cf-turnstile-response)(?:-\d+)?$/i;
   const GENERIC_FILE = /^(?:attach|upload|choose (?:a )?file|browse|select|select (?:a )?file|add (?:a )?file|drop (?:files? )?here.*)$/i;
   const MARKER = /\s*(?:[*∗✱＊]+|\(required\))\s*$/i;
@@ -1333,6 +1342,8 @@ function collectControlsIn(root: Element): RawControl[] {
   const groupsDone = new Set<Element>();
   const namesDone = new Set<string>();
   for (const element of Array.from(root.querySelectorAll(CONTROL))) {
+    // A cookie-consent manager's buttons and toggles are never the application's.
+    if (element.closest(CONSENT_ROOTS)) continue;
     if (element instanceof HTMLButtonElement) {
       controls.push({
         tag: "button",
@@ -1344,6 +1355,9 @@ function collectControlsIn(root: Element): RawControl[] {
     const type = input instanceof HTMLInputElement ? input.type : undefined;
     // A button drawn as an input ("Back", "Cancel"), or a control playing a button, link, or tab, is not a field.
     if (type === "button" || type === "reset" || ACTION_ROLE.test(input.getAttribute("role") ?? "")) continue;
+    // A share or copy-link box (Oracle's copy-link-<uuid>) holds the posting's address, not a question.
+    if (COPY_LINK.test(input.id || "") || COPY_LINK.test(input.getAttribute("name") ?? "")) continue;
+    if (input instanceof HTMLInputElement && type === "text" && input.readOnly && /^https?:\/\//i.test(input.value)) continue;
     // React-select's shadow input that only carries `required` for the form.
     if (input.getAttribute("aria-hidden") === "true" && input.getAttribute("tabindex") === "-1" && type !== "file") continue;
     // The hidden CAPTCHA token field is page machinery.
@@ -1443,6 +1457,9 @@ function collectControlsIn(root: Element): RawControl[] {
       }
     }
     const ownLabel = labelFor(input);
+    // A honeypot text box is a trap for bots: never a field, never filled.
+    if ((input instanceof HTMLTextAreaElement || TEXT_LIKE.includes(type ?? ""))
+      && HONEYPOT.test(`${ownLabel ?? ""} ${input.getAttribute("aria-label") ?? ""} ${input.getAttribute("placeholder") ?? ""} ${input.getAttribute("name") ?? ""} ${input.id ?? ""}`)) continue;
     const rawLabel = type === "file" ? fileLabel(input, ownLabel) : ownLabel;
     const label = withDescription(input, rawLabel === undefined ? undefined : unstar(rawLabel) || undefined);
     const required = requiredOf(input, rawLabel);

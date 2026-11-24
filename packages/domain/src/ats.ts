@@ -6,10 +6,11 @@ import { z } from "zod";
  * the candidate to confirm, or falls back to the generic flow. Candidate
  * corrections are logged as events and never silently applied. Dover
  * (app.dover.io) and Rippling (ats.rippling.com) were added from read-only
- * captures of 2026-11-20.
+ * captures of 2026-11-20, Paylocity (recruiting.paylocity.com) from one of
+ * 2026-11-24.
  */
 
-export const atsKindSchema = z.enum(["greenhouse", "lever", "workday", "handshake", "oracle", "smartrecruiters", "ashby", "jobvite", "icims", "dover", "rippling", "unknown"]);
+export const atsKindSchema = z.enum(["greenhouse", "lever", "workday", "handshake", "oracle", "smartrecruiters", "ashby", "jobvite", "icims", "dover", "rippling", "paylocity", "unknown"]);
 
 export const atsSignalSchema = z.object({
   source: z.enum(["url", "title", "body"]),
@@ -61,7 +62,8 @@ export const ATS_KIND_LABELS: Record<Exclude<AtsKind, "unknown">, string> = {
   jobvite: "Jobvite",
   icims: "iCIMS",
   dover: "Dover",
-  rippling: "Rippling"
+  rippling: "Rippling",
+  paylocity: "Paylocity"
 };
 
 /**
@@ -79,10 +81,14 @@ export const ATS_KIND_LABELS: Record<Exclude<AtsKind, "unknown">, string> = {
  * (<posting>/apply, behind an "Apply now" button) shows a progress bar, and
  * its success text was not found in the page's own bundles (only a
  * translation key), so a submitted run could not be told from a stalled one.
- * Dover proceeds like Greenhouse: one page with the form, one Apply submit,
- * and a "Thanks for applying!" the confirmation pattern already reads.
+ * Paylocity's application page (/Recruiting/Jobs/Apply/<id>, behind the
+ * posting's Apply) is a form of five steps ("Step 1 of 5", a "Next Step"
+ * button and no submit on the first), and no success text was found in its
+ * own scripts, so it stays approval-needed until an adapter walks it. Dover
+ * proceeds like Greenhouse: one page with the form, one Apply submit, and a
+ * "Thanks for applying!" the confirmation pattern already reads.
  */
-export const ATS_KINDS_NEEDING_APPROVAL: ReadonlySet<string> = new Set(["oracle", "smartrecruiters", "jobvite", "icims", "rippling"]);
+export const ATS_KINDS_NEEDING_APPROVAL: ReadonlySet<string> = new Set(["oracle", "smartrecruiters", "jobvite", "icims", "rippling", "paylocity"]);
 
 export function atsKindNeedsApproval(kind: string | null | undefined): boolean {
   return typeof kind === "string" && ATS_KINDS_NEEDING_APPROVAL.has(kind);

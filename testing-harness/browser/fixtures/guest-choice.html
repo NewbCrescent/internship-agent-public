@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply - Robotics Software Intern - Fixture Robotics</title>
+<style>.visually-hidden { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }</style>
+</head>
+<body>
+  <!--
+    A synthetic choice page in front of an application form ("Fixture Robotics"). DERIVED, not
+    captured: it carries no real company, tenant host, job id, or personal data. It offers "Sign in",
+    "Create account", "Apply with LinkedIn" (another site), and "Apply as guest"; each button counts
+    its clicks in window.fixture. "Apply as guest" draws the one-page form in place (the address does
+    not change): First Name, Last Name, Email, Phone, Resume, a honeypot box labelled "Leave this
+    field blank", and a terminal "Submit application".
+  -->
+  <main>
+    <h1>Robotics Software Intern</h1>
+    <section id="choice">
+      <h2>How would you like to apply?</h2>
+      <button type="button" id="sign-in">Sign in</button>
+      <button type="button" id="create-account">Create account</button>
+      <a href="https://www.linkedin.com/jobs/apply/fixture">Apply with LinkedIn</a>
+      <button type="button" id="guest">Apply as guest</button>
+    </section>
+    <div id="application"></div>
+  </main>
+  <script>
+    window.fixture = { clicks: { signIn: 0, createAccount: 0, guest: 0 }, submitted: false };
+    document.getElementById("sign-in").addEventListener("click", () => { window.fixture.clicks.signIn += 1; });
+    document.getElementById("create-account").addEventListener("click", () => { window.fixture.clicks.createAccount += 1; });
+    document.getElementById("guest").addEventListener("click", () => {
+      window.fixture.clicks.guest += 1;
+      document.getElementById("choice").remove();
+      document.getElementById("application").innerHTML = `
+        <form id="apply-form" onsubmit="event.preventDefault(); window.fixture.submitted = true;">
+          <div><label for="first_name">First Name *</label><input id="first_name" name="first_name" type="text" required></div>
+          <div><label for="last_name">Last Name *</label><input id="last_name" name="last_name" type="text" required></div>
+          <div><label for="email">Email *</label><input id="email" name="email" type="email" required></div>
+          <div><label for="phone">Phone</label><input id="phone" name="phone" type="tel"></div>
+          <div><label for="resume">Resume *</label><input id="resume" name="resume" type="file" required></div>
+          <div class="visually-hidden"><label for="hp_field">Leave this field blank</label><input id="hp_field" name="hp_field" type="text" tabindex="-1" autocomplete="off"></div>
+          <button type="submit">Submit application</button>
+        </form>`;
+    });
+  </script>
+</body>
+</html>

@@ -5,16 +5,23 @@ import {
   applicationWallReason,
   atsFlowFor,
   chooseApplyEntry,
+  chooseConsentControl,
+  chooseNavigationEntry,
   classifyAts,
   classifyFieldRole,
-  dismissCookieBannerIn,
+  hasApplicationFields,
   isCookieBannerCandidate,
   isSensitiveRole,
+  multiStepStopReason,
   planAutofill,
   recognizeForm,
+  siteWallReason,
   type ApplyEntryCandidate,
+  type ConsentCandidate,
+  type NavigationEntryCandidate,
   type RawControl
 } from "@internship-agent/browser";
+import { ATS_KINDS_NEEDING_APPROVAL, type BrowserField } from "@internship-agent/domain";
 
 describe("ATS classification", () => {
   it("recognizes Greenhouse, Lever, Workday, and Handshake patterns", () => {
@@ -257,23 +264,130 @@ describe("Jobvite and iCIMS, and posting pages behind an Apply link", () => {
     // When appearing before the real apply entry, the apply entry is reached rather than halted
     expect(chooseApplyEntry(page, [onetrustAccept, privacyPref, cookieAllow, applyEntry])).toEqual(applyEntry);
 
-    // dismissCookieBannerIn clicks the OneTrust accept button and hides the overlay
-    let otClicked = false;
-    const fakeOtButton = { click: () => { otClicked = true; } };
-    const fakeDarkFilter = { style: { display: "block" } };
-    const fakeDoc = {
-      querySelector: (selector: string) => {
-        if (selector.includes("onetrust-accept-btn-handler")) return fakeOtButton;
-        return null;
-      },
-      querySelectorAll: (selector: string) => {
-        if (selector.includes("onetrust-consent-sdk")) return [fakeDarkFilter];
-        return [];
-      }
-    };
-    expect(dismissCookieBannerIn(fakeDoc as unknown as Document)).toBe(true);
-    expect(otClicked).toBe(true);
-    expect(fakeDarkFilter.style.display).toBe("none");
+  });
+});
+
+describe("Paylocity", () => {
+  it("recognizes recruiting.paylocity.com for display, and always asks the candidate to approve", () => {
+    const paylocity = classifyAts("https://recruiting.paylocity.com/Recruiting/Jobs/Details/1000001", "Robotics Software Intern", "Apply\nPowered by\nPaylocity Privacy Policy");
+    expect(paylocity.kind).toBe("paylocity");
+    expect(atsFlowFor(paylocity)).toBe("confirm");
+    expect(adapterProfileFor("paylocity")?.multipage).toBe(true);
+    // A posting that names Paylocity the company on another site is not a Paylocity site.
+    expect(classifyAts("https://careers.fixturerobotics.example/jobs/1001", "Software Intern at Paylocity", "Paylocity is hiring an intern.").kind).toBe("unknown");
+  });
+
+  it("keeps every kind left in the approval set on the confirm flow", () => {
+    for (const kind of ATS_KINDS_NEEDING_APPROVAL) {
+      expect(atsFlowFor({ kind: kind as Parameters<typeof atsFlowFor>[0]["kind"], confidence: 1, signals: [] })).toBe("confirm");
+    }
+    expect([...ATS_KINDS_NEEDING_APPROVAL].sort()).toEqual(["icims", "jobvite", "oracle", "paylocity", "rippling", "smartrecruiters"]);
+  });
+});
+
+describe("cookie consent is rejected, never accepted", () => {
+  const consent = (overrides: Partial<ConsentCandidate> & Pick<ConsentCandidate, "index">): ConsentCandidate => ({
+    id: "", className: "", texts: [], optionalGroupsOff: false, ...overrides
+  });
+  const accept = consent({ index: 0, id: "onetrust-accept-btn-handler", className: "onetrust-close-btn-handler", texts: ["Accept All Cookies"] });
+
+  it("clicks OneTrust's Reject All over its Accept All Cookies", () => {
+    const reject = consent({ index: 1, id: "onetrust-reject-all-handler", texts: ["Reject All"] });
+    expect(chooseConsentControl([accept, reject])).toEqual({ index: 1, kind: "reject", text: "Reject All" });
+  });
+
+  it("clicks nothing on a banner that offers only accept, even with OneTrust's close-handler class on it", () => {
+    expect(chooseConsentControl([accept])).toBeNull();
+    expect(chooseConsentControl([consent({ index: 0, texts: ["Allow all"] }), consent({ index: 1, texts: ["Got it"] })])).toBeNull();
+    expect(chooseConsentControl([consent({ index: 0, id: "onetrust-pc-btn-handler", className: "cookie-setting-link", texts: ["Cookies Settings"] })])).toBeNull();
+  });
+
+  it("takes necessary-only, and Confirm My Choices only with every optional group off", () => {
+    expect(chooseConsentControl([accept, consent({ index: 1, texts: ["Necessary only"] })])?.kind).toBe("necessary");
+    const confirm = { index: 1, className: "save-preference-btn-handler onetrust-close-btn-handler", texts: ["Confirm My Choices"] };
+    expect(chooseConsentControl([accept, consent({ ...confirm, optionalGroupsOff: false })])).toBeNull();
+    expect(chooseConsentControl([accept, consent({ ...confirm, optionalGroupsOff: true })])).toEqual({ index: 1, kind: "necessary", text: "Confirm My Choices" });
+  });
+
+  it("closes the banner only when no reject or necessary-only control exists", () => {
+    const close = consent({ index: 1, className: "onetrust-close-btn-handler onetrust-close-btn-ui banner-close-button ot-close-icon", texts: ["Close"] });
+    expect(chooseConsentControl([accept, close])?.kind).toBe("close");
+    expect(chooseConsentControl([accept, consent({ index: 1, texts: ["×"] })])?.kind).toBe("close");
+    expect(chooseConsentControl([consent({ index: 0, texts: ["×"] }), consent({ index: 1, texts: ["Decline"] })])?.kind).toBe("reject");
+  });
+
+  it("clicks Cookiebot's decline button", () => {
+    const allow = consent({ index: 0, id: "CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll", texts: ["Allow all"] });
+    const decline = consent({ index: 1, id: "CybotCookiebotDialogBodyButtonDecline", texts: ["Deny"] });
+    expect(chooseConsentControl([allow, decline])?.index).toBe(1);
+    expect(chooseConsentControl([allow, consent({ index: 1, id: "CybotCookiebotDialogBodyButtonDecline", texts: [] })])?.kind).toBe("reject");
+  });
+});
+
+describe("site navigation", () => {
+  const field = (overrides: Partial<BrowserField> & Pick<BrowserField, "id" | "label">): BrowserField => ({ kind: "text", required: false, ...overrides });
+  const nav = (overrides: Partial<NavigationEntryCandidate> & Pick<NavigationEntryCandidate, "index">): NavigationEntryCandidate => ({
+    tag: "button", href: null, texts: [], className: "", frame: 0, submitsForm: false, ...overrides
+  });
+  const PAGE = "https://careers.fixturerobotics.example/jobs/1001";
+
+  it("counts identity, resume, and work-authorization fields as an application form, and nothing else", () => {
+    expect(hasApplicationFields([field({ id: "first", label: "First Name" })])).toBe(true);
+    expect(hasApplicationFields([field({ id: "email", label: "Email", kind: "email" })])).toBe(true);
+    expect(hasApplicationFields([field({ id: "resume", label: "Resume", kind: "file" })])).toBe(true);
+    expect(hasApplicationFields([
+      field({ id: "copy-link-1", label: "Copy link" }),
+      field({ id: "q", label: "Search jobs" }),
+      field({ id: "alert", label: "Email me job alerts", kind: "email" }),
+      field({ id: "ot-group-id-C0002", label: "Performance Cookies", kind: "checkbox" }),
+      field({ id: "start", label: "What is your available start date?" })
+    ])).toBe(false);
+  });
+
+  it("prefers a guest choice and never follows sign-in, account creation, third-party apply, sharing, cookies, or a form's submit", () => {
+    const signIn = nav({ index: 0, texts: ["Sign in"] });
+    const create = nav({ index: 1, texts: ["Create account"] });
+    const linkedin = nav({ index: 2, texts: ["Apply with LinkedIn"] });
+    const guest = nav({ index: 3, texts: ["Apply as guest"] });
+    expect(chooseNavigationEntry(PAGE, [signIn, create, linkedin, guest], new Set(), false)).toEqual({ candidate: guest, kind: "guest" });
+    expect(chooseNavigationEntry(PAGE, [signIn, create, linkedin], new Set(), false)).toBeNull();
+    expect(chooseNavigationEntry(PAGE, [nav({ index: 0, texts: ["Share"] }), nav({ index: 1, id: "onetrust-accept-btn-handler", texts: ["Accept All Cookies"] })], new Set(), false)).toBeNull();
+    const submit = nav({ index: 0, texts: ["Continue"], submitsForm: true });
+    expect(chooseNavigationEntry(PAGE, [submit], new Set(), false)).toBeNull();
+    expect(chooseNavigationEntry(PAGE, [nav({ index: 0, texts: ["Apply"], submitsForm: true })], new Set(), false)).toBeNull();
+  });
+
+  it("follows the posting's Apply, then manual, and continue only on a page with no question", () => {
+    const apply = nav({ index: 1, tag: "a", href: `${PAGE}/apply`, texts: ["Apply"] });
+    const manual = nav({ index: 2, texts: ["Apply manually"] });
+    const proceed = nav({ index: 3, texts: ["Continue"] });
+    expect(chooseNavigationEntry(PAGE, [proceed, manual, apply], new Set(), false)?.kind).toBe("apply");
+    expect(chooseNavigationEntry(PAGE, [proceed, manual], new Set(), false)?.kind).toBe("manual");
+    expect(chooseNavigationEntry(PAGE, [proceed], new Set(), false)).toEqual({ candidate: proceed, kind: "advance" });
+    expect(chooseNavigationEntry(PAGE, [proceed], new Set(), true)).toBeNull();
+  });
+
+  it("skips an entry already followed and a link to another site", () => {
+    const apply = nav({ index: 0, tag: "a", href: `${PAGE}/apply`, texts: ["Apply"] });
+    expect(chooseNavigationEntry(PAGE, [apply], new Set([`${PAGE}/apply`]), false)).toBeNull();
+    const guest = nav({ index: 0, texts: ["Continue as guest"] });
+    expect(chooseNavigationEntry(PAGE, [guest], new Set([`${PAGE}#Continue as guest`]), false)).toBeNull();
+    expect(chooseNavigationEntry(PAGE, [nav({ index: 0, tag: "a", href: "https://jobs.aggregator.example/apply/1", texts: ["Apply"] })], new Set(), false)).toBeNull();
+  });
+
+  it("names Oracle Cloud HCM's email step as a wall, and no other page", () => {
+    const oracle = "https://fixture.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/10001";
+    expect(siteWallReason(`${oracle}/apply/email`, [field({ id: "primary-email", label: "Email Address", kind: "email" })]))
+      .toBe("Oracle Cloud HCM asks for your email at fixture.fa.ocs.oraclecloud.com, then emails you a one-time code, before its application form; the agent does not take that step yet. Apply in your own browser.");
+    expect(siteWallReason(oracle, [])).toBeNull();
+    expect(siteWallReason("https://careers.fixturerobotics.example/apply/email", [field({ id: "email", label: "Email", kind: "email" })])).toBeNull();
+  });
+
+  it("stops at a page with Next and no submit, never at one that shows a submit", () => {
+    expect(multiStepStopReason("https://careers.fixturerobotics.example/apply", { submit: false, next: "Next" }))
+      .toBe("The application at careers.fixturerobotics.example continues over several pages (its button says \"Next\"), and the agent fills several-page forms only on sites it has an adapter for. Finish this application in your own browser.");
+    expect(multiStepStopReason("https://careers.fixturerobotics.example/apply", { submit: true, next: "Next" })).toBeNull();
+    expect(multiStepStopReason("https://careers.fixturerobotics.example/apply", { submit: false, next: null })).toBeNull();
   });
 });
 

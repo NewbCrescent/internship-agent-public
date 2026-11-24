@@ -2667,6 +2667,201 @@ describe("posting pages behind an Apply link", () => {
   });
 });
 
+describe("runs that never reached an application form", () => {
+  const ORACLE_JOB = "https://fixture.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/10001";
+  const POSTING_URL = "https://careers.fixturerobotics.example/jobs/1001";
+  /**
+   * An Oracle Candidate Experience posting: a read-only copy-link box and the Apply Now button, no question.
+   * The page's control reader never reports a text box's value, so the box carries none here either.
+   */
+  const ORACLE_POSTING: RawControl[] = [
+    { tag: "input", type: "text", id: "copy-link-00000000-0000-4000-8000-000000000001", label: "Copy link" },
+    { tag: "button", label: "Apply Now" }
+  ];
+  /** A cookie preference panel's toggles and vendor search, read as optional controls. */
+  const CONSENT_PANEL: RawControl[] = [
+    { tag: "input", type: "checkbox", id: "ot-group-id-C0004", name: "ot-group-id-C0004", label: "Targeting Cookies", required: false },
+    { tag: "input", type: "checkbox", id: "ot-group-id-C0002", name: "ot-group-id-C0002", label: "Performance Cookies", required: false },
+    { tag: "input", type: "checkbox", id: "chkbox-id", label: "checkbox label", required: false },
+    { tag: "input", type: "text", id: "vendor-search-handler", name: "vendor-search-handler", label: "vendor-search-handler", required: false },
+    { tag: "input", type: "radio", id: "switch", name: "switch", label: "Switch Label", required: false, options: ["on"] },
+    { tag: "button", label: "Apply" }
+  ];
+  const FORM: RawControl[] = [
+    { tag: "input", type: "text", id: "q1", label: "What is your available start date?", required: true },
+    { tag: "input", type: "file", id: "resume", label: "Resume", required: true },
+    { tag: "button", label: "Submit application" }
+  ];
+  function qualifiedExternalJob(database: DatabaseSync): string {
+    const jobId = approvedJobId(database, "qualified");
+    setApplicationType(database, jobId, "EXTERNAL_ATS");
+    prepareApplication(jobId, { database });
+    return jobId;
+  }
+  function approvedExternalJob(database: DatabaseSync): string {
+    const jobId = approvedJobId(database);
+    setApplicationType(database, jobId, "EXTERNAL_ATS");
+    return jobId;
+  }
+  const start = (database: DatabaseSync, jobId: string, url: string, page: BrowserPage, automatic: boolean) => startBrowserRun(jobId, url, {
+    database, dataDir: disposableDataDir(), automatic, voiceDrafter: null, renderPdf: async () => ({ pages: 1 }), openPage: async () => page
+  });
+
+  it("stops an automatic run on an Oracle posting whose only control is a copy-link box, saving nothing", async () => {
+    const database = disposableDatabase();
+    const jobId = qualifiedExternalJob(database);
+    const before = jobStatus(database, jobId);
+    const page = fakePage({ url: ORACLE_JOB, title: "Robotics Software Intern - Fixture Careers", controls: ORACLE_POSTING, body: "Robotics Software Intern\nApply Now" });
+    const stopped = start(database, jobId, ORACLE_JOB, page, true);
+    await expect(stopped).rejects.toBeInstanceOf(AutomaticRunStopped);
+    await expect(stopped).rejects.toThrow(/^No application form was reached at /);
+    expect(getBrowserRuns(jobId, database)).toEqual([]);
+    expect(jobStatus(database, jobId)).toBe(before);
+    expect(jobStatus(database, jobId)).not.toBe("APPLYING");
+    expect(page.filled.size).toBe(0);
+    expect(page.uploads.size).toBe(0);
+    database.close();
+  });
+
+  it("stops an automatic run whose page shows only a cookie preference panel's toggles", async () => {
+    const database = disposableDatabase();
+    const jobId = qualifiedExternalJob(database);
+    const page = fakePage({ url: POSTING_URL, title: "Robotics Software Intern", controls: CONSENT_PANEL, body: "Robotics Software Intern\nApply" });
+    const stopped = start(database, jobId, POSTING_URL, page, true);
+    await expect(stopped).rejects.toBeInstanceOf(AutomaticRunStopped);
+    await expect(stopped).rejects.toThrow(/^No application form was reached at /);
+    expect(getBrowserRuns(jobId, database)).toEqual([]);
+    expect(jobStatus(database, jobId)).not.toBe("APPLYING");
+    expect(page.filled.size).toBe(0);
+    database.close();
+  });
+
+  it("stops a run the candidate started on the same page with the same reason, saving nothing", async () => {
+    const database = disposableDatabase();
+    const jobId = approvedExternalJob(database);
+    const page = fakePage({ url: ORACLE_JOB, title: "Robotics Software Intern - Fixture Careers", controls: ORACLE_POSTING, body: "Robotics Software Intern\nApply Now" });
+    const stopped = start(database, jobId, ORACLE_JOB, page, false);
+    await expect(stopped).rejects.toThrow(`No application form was reached at ${ORACLE_JOB}: the page shows no question the agent can fill or ask you about. It may sit behind an Apply button or a step the agent cannot take; start the run yourself from the form's address.`);
+    await expect(stopped).rejects.not.toBeInstanceOf(AutomaticRunStopped);
+    expect(getBrowserRuns(jobId, database)).toEqual([]);
+    expect(page.filled.size).toBe(0);
+    database.close();
+  });
+
+  it("keeps a paused run paused when the page it reopens to continue shows none of its fields", async () => {
+    const database = disposableDatabase();
+    const jobId = approvedExternalJob(database);
+    const controls: RawControl[] = [
+      { tag: "input", type: "text", id: "essay", label: "What name should appear on your badge?", required: true },
+      { tag: "button", label: "Submit application" }
+    ];
+    const started = await start(database, jobId, POSTING_URL, fakePage({ url: POSTING_URL, controls }), false);
+    expect(started.run.status).toBe("paused-needs-input");
+    await answerRunPause(started.run.id, "essay", "Jordan", true, { database });
+    const elsewhere = fakePage({ url: POSTING_URL, controls: [{ tag: "button", label: "Apply" }] });
+    await expect(continueBrowserRun(started.run.id, { database, dataDir: disposableDataDir(), openPage: async () => elsewhere }))
+      .rejects.toThrow(/No application form was reached/);
+    expect(getBrowserRuns(jobId, database)[0]!.status).toBe("paused-needs-input");
+    expect(elsewhere.filled.size).toBe(0);
+    database.close();
+  });
+
+  it("never clicks submit when the approved form is gone from the page it reopens", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = approvedJobId(database);
+    const started = await startBrowserRun(jobId, "https://app.joinhandshake.com/apply/900001", { database, dataDir, openPage: async () => fakePage() });
+    expect(started.run.status).toBe("awaiting-approval");
+    approveRunSubmission(started.run.id, undefined, { database });
+    const clicked = { clicked: false };
+    const gone = fakePage({ submitted: clicked, controls: [{ tag: "button", label: "Submit application" }] });
+    await expect(submitBrowserRun(started.run.id, { database, dataDir, openPage: async () => gone }))
+      .rejects.toThrow(/application form was not found .* nothing was clicked/);
+    expect(clicked.clicked).toBe(false);
+    const run = getBrowserRuns(jobId, database)[0]!;
+    expect(run.status).toBe("awaiting-approval");
+    expect(run.submissionApprovedAt).not.toBe(null);
+    database.close();
+  });
+
+  it("walks an unrecognized site to its form, fills it there, and saves the address the walk reached", async () => {
+    const database = disposableDatabase();
+    const jobId = qualifiedExternalJob(database);
+    const state: { url: string; controls: RawControl[]; body: string; title: string } = {
+      url: POSTING_URL, controls: [{ tag: "button", label: "Apply" }], body: "Robotics Software Intern\nApply", title: "Robotics Software Intern"
+    };
+    const walks: string[] = [];
+    const page = Object.assign(fakePage(state), {
+      followApplyEntry: async () => null,
+      advanceToApplicationForm: async () => {
+        walks.push(state.url);
+        Object.assign(state, { url: `${POSTING_URL}/application`, controls: FORM, body: "Apply for Robotics Software Intern" });
+        return { url: state.url, moved: true, hops: [{ kind: "apply" as const, text: "Apply" }], stop: "form" as const };
+      }
+    });
+    const started = await start(database, jobId, POSTING_URL, page, true);
+    expect(walks).toEqual([POSTING_URL]);
+    expect(page.filled.get("q1")).toBe("2027-06-01");
+    expect(page.uploads.has("resume")).toBe(true);
+    expect(started.run.applicationUrl).toBe(`${POSTING_URL}/application`);
+    expect(started.run.atsKind).toBe("unknown");
+    expect(started.run.suggestedAtsKind).toBeNull();
+    database.close();
+  });
+
+  it("names Oracle's email step before anything is typed, on automatic and candidate-started runs", async () => {
+    const emailStep: RawControl[] = [
+      { tag: "input", type: "email", id: "primary-email", label: "Email Address", required: true },
+      { tag: "input", type: "checkbox", id: "legal-disclaimer", label: "I agree with the terms and conditions", required: true },
+      { tag: "button", label: "Next" }
+    ];
+    const url = `${ORACLE_JOB}/apply/email`;
+    const message = "Oracle Cloud HCM asks for your email at fixture.fa.ocs.oraclecloud.com, then emails you a one-time code, before its application form; the agent does not take that step yet. Apply in your own browser.";
+    for (const automatic of [true, false]) {
+      const database = disposableDatabase();
+      const jobId = automatic ? qualifiedExternalJob(database) : approvedExternalJob(database);
+      const page = fakePage({ url, title: "Robotics Software Intern - Fixture Careers", controls: emailStep, body: "Email Address\nI agree with the terms and conditions\nNext" });
+      const stopped = start(database, jobId, url, page, automatic);
+      await expect(stopped).rejects.toThrow(message);
+      if (automatic) await expect(stopped).rejects.toBeInstanceOf(AutomaticRunStopped);
+      else await expect(stopped).rejects.not.toBeInstanceOf(AutomaticRunStopped);
+      expect(page.filled.size).toBe(0);
+      expect(getBrowserRuns(jobId, database)).toEqual([]);
+      database.close();
+    }
+  });
+
+  it("stops at the first page of a several-page form on an unrecognized site, typing nothing", async () => {
+    const database = disposableDatabase();
+    const jobId = qualifiedExternalJob(database);
+    const url = `${POSTING_URL}/apply`;
+    const page = Object.assign(fakePage({ url, controls: FORM, body: "Step 1 of 5" }), {
+      stepButtons: async () => ({ submit: false, next: "Next" })
+    });
+    const stopped = start(database, jobId, url, page, true);
+    await expect(stopped).rejects.toBeInstanceOf(AutomaticRunStopped);
+    await expect(stopped).rejects.toThrow(`The application at careers.fixturerobotics.example continues over several pages (its button says "Next"), and the agent fills several-page forms only on sites it has an adapter for. Finish this application in your own browser.`);
+    expect(page.filled.size).toBe(0);
+    expect(page.uploads.size).toBe(0);
+    expect(getBrowserRuns(jobId, database)).toEqual([]);
+    database.close();
+  });
+
+  it("never applies the several-page stop to a supported adapter's site", async () => {
+    const database = disposableDatabase();
+    const jobId = qualifiedExternalJob(database);
+    const url = "https://job-boards.greenhouse.io/fixturerobotics/jobs/1000001";
+    const page = Object.assign(fakePage({ url, title: "Job Application for Robotics Software Intern at Fixture Robotics", controls: FORM, body: "Powered by Greenhouse" }), {
+      stepButtons: async () => ({ submit: false, next: "Next" })
+    });
+    const started = await start(database, jobId, url, page, true);
+    expect(started.run.atsKind).toBe("greenhouse");
+    expect(page.filled.get("q1")).toBe("2027-06-01");
+    expect(getBrowserRuns(jobId, database)).toHaveLength(1);
+    database.close();
+  });
+});
+
 describe("post-submit outcomes", () => {
   const wait = { timeoutMs: 50, pollMs: 5 };
   const START_DATE_ERROR: InvalidField = { ref: "q1", label: "What is your available start date?", error: "This field is required." };

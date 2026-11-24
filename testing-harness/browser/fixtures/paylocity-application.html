@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Robotics Software Intern - Fixture Robotics</title>
+<style>
+  #onetrust-banner-sdk { position: fixed; bottom: 0; left: 0; right: 0; background: #eee; padding: 12px; z-index: 10; }
+  .ot-hide { display: none; }
+  .hidden { display: none; }
+</style>
+</head>
+<body class="citrus">
+  <!--
+    A fictional Paylocity Recruiting application page ("Fixture Robotics", job 1000001), reduced from
+    the control markup captured read-only on 2026-11-24 at recruiting.paylocity.com/Recruiting/Jobs/Apply/<id>
+    (nothing was typed, uploaded, or submitted there). It carries no real company, tenant key, job id,
+    or personal data. The page is the first of five steps ("Step 1 of 5"): a resume-upload prompt
+    (an aria-hidden dialog: a hidden file input, btn-forceResume, behind an "Upload Resume" button), the resume section (a
+    hidden file input, btn-resume, behind "Select Resume to Upload", and a checked "Fill out
+    application with my resume" box), the Information block (labels sit beside their inputs, with
+    no for attribute; "(required)" in an em; Email Address is a text box), part of the address block,
+    LinkedIn Profile URL, and a "Next Step" button (id btn-submit) with no submit control and no form
+    element. No form element, CAPTCHA, or honeypot was on the captured page. The banner stays hidden
+    once a choice was made on the posting page (sessionStorage "consent"), as OneTrust remembers it.
+  -->
+  <div id="onetrust-consent-sdk">
+    <div id="onetrust-banner-sdk" class="otFlat">
+      <div role="alertdialog" aria-label="Privacy">
+        <p>By clicking “Accept All Cookies”, you agree to the storing of cookies on your device.</p>
+        <button id="onetrust-pc-btn-handler" class="cookie-setting-link">Cookies Settings</button>
+        <button id="onetrust-accept-btn-handler">Accept All Cookies</button>
+        <button class="onetrust-close-btn-handler onetrust-close-btn-ui banner-close-button ot-close-icon" aria-label="Close">×</button>
+      </div>
+    </div>
+  </div>
+  <div aria-hidden="true" class="modal" id="forceUploadResumeModal" role="dialog">
+    <h2>Apply with resume</h2>
+    <p>Upload your resume and we'll automatically fill out your application</p>
+    <input accept=".doc,.docx,.pdf" id="btn-forceResume" type="file" style="display: none;">
+    <button class="button branding-button-color full-width" data-automation-id="btn-forceResume"><span>Upload Resume</span></button>
+  </div>
+  <div class="container body-content" id="applicant-tracking">
+    <input name="__RequestVerificationToken" type="hidden" value="FIXTURE-TOKEN">
+    <div id="app">
+      <span class="job-apply-title">Robotics Software Intern</span>
+      <p class="progress-header"><span class="type-bold">Step 1 of 5</span></p>
+      <div class="section-wrapper">
+        <input accept=".doc,.docx,.pdf" id="btn-resume" type="file" style="display: none;">
+        <button class="button branding-button-color full-width" data-automation-id="btn-resume"><span>Select Resume to Upload</span></button>
+        <input id="useAttachedResumeToFillOutApplication" type="checkbox" checked><label for="useAttachedResumeToFillOutApplication">Fill out application with my resume</label>
+      </div>
+      <div class="section-wrapper" id="pcty-wr-apply-info">
+        <div class="section-heading">Information</div>
+        <div class="form-group form-required"><label>First Name<span><em> (required)</em></span></label><input data-for="First Name" id="info.firstName" placeholder="" type="text" value=""><div class="type-footnote hidden"></div></div>
+        <div class="form-group form-required"><label>Last Name<span><em> (required)</em></span></label><input data-for="Last Name" id="info.lastName" placeholder="" type="text" value=""><div class="type-footnote hidden"></div></div>
+        <div class="form-group"><label>Middle Name</label><input data-for="Middle Name" id="info.middleName" placeholder="" type="text" value=""><div class="type-footnote hidden"></div></div>
+        <div class="form-group"><label>Preferred First Name</label><input data-for="Preferred First Name" id="info.preferredName" placeholder="" type="text" value=""><div class="type-footnote hidden"></div></div>
+        <div class="form-group form-required"><label>Email Address<span><em> (required)</em></span></label><input data-for="Email Address" id="info.email" placeholder="" type="text" value=""></div>
+        <div class="form-group"><label>Mobile Number</label><input data-for="Mobile Number" id="info.cellPhone" placeholder="" type="text" value=""><div class="type-footnote">For international numbers, start with a + and then the country code</div></div>
+        <div class="form-group"><label>Home Phone Number</label><input data-for="Home Phone Number" id="info.phone" placeholder="" type="text" value=""></div>
+      </div>
+      <div class="section-wrapper">
+        <div class="form-group"><label for="public-site-address-city">City</label><input id="public-site-address-city" maxlength="50" required type="text" value=""></div>
+        <div class="form-group"><label for="public-site-address-county">County</label><input id="public-site-address-county" maxlength="50" required type="text" value=""></div>
+        <div class="form-group"><label for="public-site-address-zip">Zip Code</label><input id="public-site-address-zip" maxlength="20" required type="text" value=""></div>
+      </div>
+      <div class="form-group"><label>LinkedIn Profile URL</label><input data-for="LinkedIn Profile URL" id="info.linkedIn" placeholder="" type="text" value=""></div>
+      <button class="button form-button branding-button-color full-width" data-automation-id="btnNext" id="btn-submit">Next Step<span></span></button>
+      <footer>Powered by <a href="https://www.paylocity.example/privacy/">Paylocity Privacy Policy</a></footer>
+    </div>
+  </div>
+  <script>
+    window.fixture = { uploads: {}, nextClicked: false };
+    for (const id of ["btn-forceResume", "btn-resume"]) {
+      document.getElementById(id).addEventListener("change", (event) => { window.fixture.uploads[id] = event.target.files[0]?.name ?? null; });
+    }
+    document.getElementById("btn-submit").addEventListener("click", () => { window.fixture.nextClicked = true; });
+    // OneTrust remembers a choice made on the posting page, so the banner is not shown again.
+    if (sessionStorage.getItem("consent")) document.getElementById("onetrust-banner-sdk").style.display = "none";
+    document.querySelector(".banner-close-button").addEventListener("click", () => { document.getElementById("onetrust-banner-sdk").style.display = "none"; });
+  </script>
+</body>
+</html>

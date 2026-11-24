@@ -1,5 +1,7 @@
 import type { Page } from "playwright-core";
 
+import { rejectCookieConsent } from "./cookie-consent";
+
 /**
  * The posting page's own Apply entry, chosen deterministically. A posting
  * page with no form (iCIMS, Jobvite, a company careers page) sends the
@@ -24,12 +26,12 @@ export type ApplyEntryCandidate = {
   id?: string | null;
 };
 
-const NEVER_FOLLOWED = /\b(?:linkedin|indeed|glassdoor|ziprecruiter|facebook|twitter|google|seek|monster|dice|handshake|share|refer(?:ral)?|e-?mail|later|save|sign in|log in|login|cookie|cookies|onetrust|privacy preference)\b/;
+export const NEVER_FOLLOWED = /\b(?:linkedin|indeed|glassdoor|ziprecruiter|facebook|twitter|google|seek|monster|dice|handshake|share|refer(?:ral)?|e-?mail|later|save|sign in|log in|login|cookie|cookies|onetrust|privacy preference)\b/;
 const APPLY_TEXT = /^(?:apply|apply now|apply online|apply here|apply for (?:this|the) (?:job|position|role)(?: online)?|start (?:your |my )?application)$/;
 const SMARTRECRUITERS_INTERESTED_TEXT = /^(?:i[']?m|im|i\s+am)\s+interested(?:\s+(?:in\s+(?:this\s+)?(?:job|role|position)|online))?$/;
 const KNOWN_ATS_HOSTS = [
   "greenhouse.io", "lever.co", "ashbyhq.com", "myworkdayjobs.com", "myworkdaysite.com", "icims.com",
-  "jobvite.com", "smartrecruiters.com", "oraclecloud.com", "workable.com", "rippling.com"
+  "jobvite.com", "smartrecruiters.com", "oraclecloud.com", "workable.com", "rippling.com", "paylocity.com"
 ];
 
 function normalizedText(text: string): string {
@@ -84,97 +86,14 @@ export function isCookieBannerCandidate(candidate: ApplyEntryCandidate): boolean
 }
 
 /**
- * Dismisses a cookie consent banner / overlay (OneTrust, Privacy Preference Center,
- * or general [id*="cookie"] allow/accept) if present. Returns true if a banner
- * dismiss/accept button was found and clicked, false otherwise.
- * Runs in the page context.
- */
-export function dismissCookieBannerIn(root: Document | Element = document): boolean {
-  let clicked = false;
-
-  // 1. OneTrust direct accept button (e.g. #onetrust-accept-btn-handler)
-  const otAccept = root.querySelector<HTMLElement>("#onetrust-accept-btn-handler, #accept-recommended-btn-handler");
-  if (otAccept) {
-    try {
-      otAccept.click();
-      clicked = true;
-    } catch {
-      // ignore
-    }
-  }
-
-  // 2. Privacy preference center / close buttons
-  if (!clicked) {
-    const otClose = root.querySelector<HTMLElement>(".onetrust-close-btn-handler, #onetrust-reject-all-handler, .save-preference-btn-handler");
-    if (otClose) {
-      try {
-        otClose.click();
-        clicked = true;
-      } catch {
-        // ignore
-      }
-    }
-  }
-
-  // 3. Generic cookie banner buttons / links with allow or accept
-  if (!clicked) {
-    const candidates = Array.from(root.querySelectorAll<HTMLElement>(
-      '#onetrust-accept-btn-handler, #accept-recommended-btn-handler, [id*="cookie" i] button, [id*="cookie" i] a, [class*="cookie" i] button, [class*="cookie" i] a, [id*="consent" i] button, [id*="consent" i] a, button[id*="cookie" i], button[id*="accept" i], button[id*="allow" i]'
-    ));
-    for (const el of candidates) {
-      const text = (el.innerText || el.getAttribute("aria-label") || el.getAttribute("value") || "").trim().toLowerCase();
-      const id = (el.id || "").toLowerCase();
-      const cls = (typeof el.className === "string" ? el.className : "").toLowerCase();
-      if (
-        id.includes("accept") || id.includes("allow") || id.includes("agree") ||
-        cls.includes("accept") || cls.includes("allow") || cls.includes("agree") ||
-        /\b(?:accept|allow|agree)(?:\s+(?:all|cookies))?\b/i.test(text)
-      ) {
-        try {
-          el.click();
-          clicked = true;
-          break;
-        } catch {
-          // ignore
-        }
-      }
-    }
-  }
-
-  // Hide any lingering overlay/backdrop elements that block pointer events
-  const overlays = root.querySelectorAll<HTMLElement>("#onetrust-consent-sdk, .onetrust-pc-dark-filter, #onetrust-banner-sdk");
-  for (const overlay of overlays) {
-    try {
-      overlay.style.display = "none";
-    } catch {
-      // ignore
-    }
-  }
-
-  return clicked;
-}
-
-/**
- * Attempts to dismiss cookie consent overlays (OneTrust, Privacy Preference Center,
- * [id*="cookie"] allow/accept) so following apply entries is not blocked.
+ * Rejects the page's cookie consent banner before an Apply entry is chosen
+ * or clicked, so the banner never covers it: reject first, then
+ * necessary-only, then close; never accept (cookie-consent.ts, shared with
+ * the site navigation). Returns true when a control was clicked; false when
+ * there is no banner or it offers only accept, which is left as it is.
  */
 export async function dismissCookieBanner(page: Page): Promise<boolean> {
-  try {
-    const clicked = await page.evaluate(() => dismissCookieBannerIn(document)).catch(() => false);
-    if (clicked) {
-      await page.waitForTimeout(200).catch(() => undefined);
-      return true;
-    }
-    const otButton = page.locator("#onetrust-accept-btn-handler, #accept-recommended-btn-handler, [id*='cookie' i] button:has-text('Accept'), [id*='cookie' i] button:has-text('Allow')").first();
-    if (await otButton.isVisible().catch(() => false)) {
-      await otButton.click({ timeout: 2000 }).catch(() => undefined);
-      await page.waitForTimeout(200).catch(() => undefined);
-      return true;
-    }
-    return false;
-  } catch {
-    return false;
-  }
+  return (await rejectCookieConsent(page)) !== null;
 }
 
 function parsedUrl(value: string | null | undefined): URL | null {
@@ -195,7 +114,7 @@ function hostEndsWith(host: string, suffix: string): boolean {
 }
 
 /** 0 same host, 1 same company domain, 2 a known ATS host; null for any other site. */
-function hostRank(pageHost: string, host: string): number | null {
+export function hostRank(pageHost: string, host: string): number | null {
   if (host === pageHost) return 0;
   if (lastTwoLabels(host) === lastTwoLabels(pageHost)) return 1;
   if (KNOWN_ATS_HOSTS.some((suffix) => hostEndsWith(host, suffix))) return 2;
