@@ -25,7 +25,7 @@ const ROLE_PATTERNS: RolePattern[] = [
   { role: "name", pattern: /\b(full name|first name|last name|preferred name|your name)\b/i },
   {
     role: "eeo",
-    pattern: /\b(gender|race|racial|ethnicity|ethnic|veteran|disability|sexual orientation|transgender|age over|are you (hispanic|latino)|equal opportunity|voluntary self-identification|demographic)\b/i
+    pattern: /\b(gender|race|racial|ethnicity|ethnic|veteran|disability|sexual orientation|transgender|age over|are you (hispanic|latino)|equal opportunity|voluntary self-identification|demographic|sex(?!\s*offend))\b/i
   }
 ];
 

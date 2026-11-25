@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Robotics Intern | Fixture Labs Careers</title></head>
+<body>
+  <!--
+    A synthetic Phenom-style posting page ("Fixture Labs", job R100001). DERIVED from the field
+    shapes a 2026-11-25 run recorded on such a page: two "save job" checkboxes, a "get notified of
+    similar jobs" email box with id notifiedEmail, and the posting's own Apply link. Every name,
+    host, and id is fictional. The apply address serves this same file, which then draws the one-page application form.
+  -->
+  <main id="posting">
+    <h1>Robotics Intern</h1>
+    <section class="job-description"><p>Build robot software with the lab.</p></section>
+    <label><input type="checkbox" id="save-FIXTUSR100001EXTERNALENUS"> Save job</label>
+    <a class="apply" href="https://careers.fixturelabs.example/us/en/apply?jobSeqNo=R100001">Apply Now</a>
+    <aside class="job-alert">
+      <h2>Get notified for similar jobs</h2>
+      <input type="text" id="notifiedEmail" placeholder="Please enter your email address">
+      <button type="button" class="notify">Submit</button>
+      <label><input type="checkbox" id="saveJob-FIXTUSR100001EXTERNALENUS"> Save this job</label>
+    </aside>
+  </main>
+  <script>
+    if (location.pathname === "/us/en/apply") {
+      document.title = "Apply | Fixture Labs Careers";
+      document.getElementById("posting").innerHTML = `
+        <h1>Apply: Robotics Intern</h1>
+        <form id="application" onsubmit="return false">
+          <label for="first_name">First Name*</label><input id="first_name" type="text" required>
+          <label for="last_name">Last Name*</label><input id="last_name" type="text" required>
+          <label for="email">Email*</label><input id="email" type="email" required>
+          <label for="resume">Resume*</label><input id="resume" type="file" required>
+          <button type="submit">Submit application</button>
+        </form>`;
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply | Fixture Hire</title></head>
+<body>
+  <!--
+    A synthetic Rippling-style application form ("Fixture Hire", job 1). DERIVED from the
+    2026-11-20 read-only capture note in bugs/resolved/rippling-application-pages-were-not-recognized.md
+    (uploads sit inside `label[aria-labelledby]` whose own text only says "Upload") and from the
+    field shapes recorded on 2026-11-25 runs (field-N ids, custom questions named by a random token,
+    a phone-country popover holding a "Search" box). The custom question's wrapping is ASSUMED to be
+    the same as the uploads'. Every name, host, id, and token is fictional.
+  -->
+  <main>
+    <h1>Robotics Intern</h1>
+    <form id="application" onsubmit="return false">
+      <section class="block">
+        <div class="field">
+          <span id="lbl-resume">Resume*</span>
+          <label aria-labelledby="lbl-resume"><input type="file" id="field-60" name="Xk3pQ9wL_z"><span>Upload</span></label>
+        </div>
+        <div class="field">
+          <p id="lbl-q1">What is your expected graduation date?</p>
+          <label aria-labelledby="lbl-q1"><input type="text" id="field-94" name="cn8cnAwlo2"></label>
+        </div>
+        <div class="field phone">
+          <label for="field-35">Phone</label>
+          <div class="country-popover"><input type="text" id="field-38" aria-label="Search" required></div>
+          <input type="tel" id="field-35">
+        </div>
+      </section>
+      <button type="submit">Submit application</button>
+    </form>
+  </main>
+</body>
+</html>

@@ -44,6 +44,7 @@ import {
   attachedNamesFromText,
   classifyFieldRole,
   classifyUploadRole,
+  hasApplicationFields,
   hasTranscriptField,
   isChatbotControl,
   isSubmitControl,
@@ -2361,5 +2362,77 @@ describe("Read-back before the submit click (Track 25)", () => {
   it("compares a clipped option by its prefix", async () => {
     const clipped = [decision("club", "choose", "A".repeat(199) + "…")];
     expect(await choicesNotTaken(pageShowing(async () => shownWith("A".repeat(250))), form, clipped)).toEqual([]);
+  });
+});
+
+describe("unrecognized-site answers (Track 35)", () => {
+  const fieldsOf = (...controls: RawControl[]) => recognizeFields(controls);
+  const plan = (controls: RawControl[], resolutions: Array<[string, FieldResolution]> = [], profile: Record<string, string> = {}) => planAutofill(
+    recognizeForm("https://careers.fixtureaero.example/careers/apply?pid=1001", "Apply", controls),
+    { profile, resolutions: new Map(resolutions), packageAnswers: [], variantId: null }
+  );
+  const sexList = control({ tag: "select", id: "input-41", label: "Sex", options: ["Male", "Female", "I do not wish to self-identify"] });
+
+  it("reads a \"Sex\" list as a self-identification question, never a sex-offender question", () => {
+    const [sex, offender, orientation] = fieldsOf(
+      sexList,
+      control({ tag: "select", id: "offender", label: "Have you ever been registered as a sex offender?", options: ["Yes", "No"] }),
+      control({ tag: "select", id: "orientation", label: "Sexual orientation", options: ["Prefer not to say"] })
+    );
+    expect(classifyFieldRole(sex!)).toBe("eeo");
+    expect(classifyFieldRole(offender!)).not.toBe("eeo");
+    expect(classifyFieldRole(orientation!)).toBe("eeo");
+  });
+
+  it("answers a \"Sex\" list only from the saved self-identification answer, else a sensitive pause", () => {
+    const saved = plan([sexList], [["input-41", { status: "SELF_IDENTIFIED", key: "eeo_gender", option: "Female" }]]);
+    expect(saved.decisions[0]).toMatchObject({ action: "choose", value: "Female", basis: { kind: "fact", key: "eeo_gender", scope: "global" } });
+    expect(saved.pauses).toEqual([]);
+    const unsaved = plan([sexList]);
+    expect(unsaved.decisions[0]).toMatchObject({ action: "pause", value: null });
+    expect(unsaved.pauses).toHaveLength(1);
+    expect(unsaved.pauses[0]).toMatchObject({ fieldId: "input-41", sensitive: true });
+  });
+
+  it("never counts a job-alert email box as the application form, and leaves it empty", () => {
+    const alert = control({ tag: "input", type: "text", id: "notifiedEmail", placeholder: "Please enter your email address" });
+    const [alertField] = fieldsOf(alert);
+    expect(alertField!.label).toBe("Please enter your email address");
+    expect(hasApplicationFields([alertField!])).toBe(false);
+    expect(hasApplicationFields(fieldsOf(alert, control({ tag: "input", type: "text", id: "first", label: "First name" })))).toBe(true);
+    const planned = plan([{ ...alert, required: true }], [], { email: "applicant@example.test" });
+    expect(planned.decisions[0]).toMatchObject({ fieldId: "notifiedEmail", action: "skip", value: null });
+    expect(planned.pauses).toEqual([]);
+  });
+
+  it("skips a list's own required \"Search\" box but still pauses a real question that says search", () => {
+    const planned = plan([
+      control({ tag: "input", type: "text", id: "field-38", label: "Search", required: true }),
+      control({ tag: "input", type: "text", id: "timeline", label: "What is your job search timeline?", required: true })
+    ]);
+    expect(planned.decisions.map((decision) => [decision.fieldId, decision.action])).toEqual([["field-38", "skip"], ["timeline", "pause"]]);
+    expect(planned.pauses.map((pause) => pause.fieldId)).toEqual(["timeline"]);
+  });
+
+  it("types the option a searched list shows for a saved answer (pronoun prefix, standard Yes/No)", () => {
+    const planned = plan([
+      control({ tag: "select", widget: "autocomplete", id: "input-31", label: "Preferred Pronoun", options: ["He/Him/His", "She/Her/Hers", "They/Them/Theirs", "Prefer not to say"] }),
+      control({ tag: "select", widget: "autocomplete", id: "input-55", label: "Do you currently hold an active security clearance?", options: ["Yes", "No"] })
+    ], [
+      ["input-31", { status: "RESOLVED", key: "pronouns", scope: "global", display: "they/them", value: "they/them" }],
+      ["input-55", { status: "RESOLVED", key: "holds_security_clearance", scope: "global", display: "No", value: false }]
+    ]);
+    expect(planned.decisions.map((decision) => [decision.fieldId, decision.action, decision.value])).toEqual([
+      ["input-31", "choose", "They/Them/Theirs"],
+      ["input-55", "choose", "No"]
+    ]);
+    expect(planned.decisions[1]!.basis).toEqual({ kind: "fact", key: "holds_security_clearance", scope: "global" });
+  });
+
+  it("picks the profile country on a \"Country code picker\" list", () => {
+    const planned = plan([
+      control({ tag: "select", id: "Contact_Information_phone-country-code-picker", label: "Country code picker", value: "+1", options: ["United States (+1)", "Canada (+1)", "Mexico (+52)"] })
+    ], [], { addressCountry: "United States" });
+    expect(planned.decisions[0]).toMatchObject({ action: "choose", value: "United States (+1)", basis: { kind: "profile", field: "addressCountry" } });
   });
 });

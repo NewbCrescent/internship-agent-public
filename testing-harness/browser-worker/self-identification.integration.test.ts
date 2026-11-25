@@ -63,11 +63,11 @@ function disposableDataDir(): string {
 }
 
 /** In-memory stand-in for a page: records fills, never touches a browser. */
-function fakePage(controls: RawControl[]): BrowserPage & { filled: Map<string, string> } {
+function fakePage(controls: RawControl[], url = GREENHOUSE_URL): BrowserPage & { filled: Map<string, string> } {
   const filled = new Map<string, string>();
   return {
     filled,
-    url: () => GREENHOUSE_URL,
+    url: () => url,
     title: async () => "Example",
     collectControls: async () => controls,
     bodyText: async () => "Apply for this job",
@@ -386,6 +386,60 @@ describe("saved voluntary self-identification answers in browser runs", () => {
     ]);
     expect(decision(run, "heard-text")).toMatchObject({ action: "fill", value: "Online job board", basis: { kind: "fact", key: "how_heard" } });
     expect(decision(run, "heard-select")).toMatchObject({ action: "choose", value: "LinkedIn", basis: { kind: "fact", key: "how_heard" } });
+    database.close();
+  });
+
+  it("an unrecognized site's lists take saved and standard answers and still wait for approval", async () => {
+    // Synthetic Eightfold-shaped form (Track 35): its ARIA lists read as plain lists by the collector. Fictional answers.
+    const database = disposableDatabase();
+    const jobId = approvedJobId(database, (db) => {
+      saveFact(db, "eeo_gender", { kind: "global" }, "female");
+      saveFact(db, "pronouns", { kind: "global" }, "they/them");
+      saveFact(db, "previously_worked_here", { kind: "global" }, false);
+      saveFact(db, "how_heard", { kind: "global" }, "Job Board");
+    });
+    database.prepare("UPDATE jobs SET company_name = 'Fixture Aero' WHERE id = ?").run(jobId);
+    database.prepare("UPDATE candidates SET legal_first_name = 'Avery', legal_last_name = 'Fixture' WHERE id = ?").run(LOCAL_CANDIDATE_ID);
+    const url = "https://careers.fixtureaero.example/careers/apply?pid=1001";
+    const yesNo = ["Yes", "No"];
+    const controls: RawControl[] = [
+      { tag: "input", type: "text", id: "first", label: "First name", required: true },
+      { tag: "input", type: "text", id: "last", label: "Last name", required: true },
+      { tag: "input", type: "email", id: "email", label: "Email", required: true },
+      { tag: "input", type: "file", id: "resume", label: "Resume", required: true },
+      { tag: "select", id: "input-7", label: "Are you legally authorized to work in the country of the job for which you are applying?", required: true, options: yesNo },
+      { tag: "select", id: "input-11", label: "Will you require sponsorship for an employment Visa?", required: true, options: yesNo },
+      { tag: "select", id: "input-15", label: "Have you ever worked for Fixture Aero - either as a direct employee or as a contractor?", required: true, options: yesNo },
+      { tag: "select", id: "input-19", label: "Preferred Pronoun", options: ["He/Him/His", "She/Her/Hers", "They/Them/Theirs", "Prefer not to say"] },
+      { tag: "select", id: "input-23", label: "Sex", options: ["Male", "Female", "I do not wish to self-identify"] },
+      { tag: "select", id: "input-27", label: "How did you hear about this position?", options: ["Job Board", "LinkedIn", "Employee Referral", "Company Website"] },
+      { tag: "select", id: "input-31", label: "Are you 16 years or older?", required: true, options: yesNo },
+      { tag: "input", type: "text", id: "notifiedEmail", placeholder: "Please enter your email address" },
+      SUBMIT
+    ];
+    const page = fakePage(controls, url);
+    const started = await startBrowserRun(jobId, url, {
+      database, dataDir: disposableDataDir(), openPage: async () => page, voiceDrafter: null, renderPdf: async () => ({ pages: 1 })
+    });
+    const run = getBrowserRun(database, started.run.id)!;
+    expect(page.filled.get("input-7")).toBe("Yes");
+    expect(page.filled.get("input-11")).toBe("No");
+    expect(page.filled.get("input-15")).toBe("No");
+    expect(page.filled.get("input-19")).toBe("They/Them/Theirs");
+    expect(page.filled.get("input-23")).toBe("Female");
+    expect(page.filled.get("input-27")).toBe("Job Board");
+    expect(page.filled.has("notifiedEmail")).toBe(false);
+    expect(decision(run, "notifiedEmail")).toMatchObject({ action: "skip", value: null });
+    expect(run.pauses.filter((pause) => pause.status === "open")).toEqual([
+      expect.objectContaining({ fieldId: "input-31", fieldKind: "select", options: yesNo })
+    ]);
+    expect(run.atsKind).toBe("unknown");
+    expect(run.atsConfirmed).toBe(false);
+    expect(autoSubmitBlockers(run)).toContain("The application site type was not recognized automatically.");
+    for (const entry of run.decisions) {
+      expect(entry.reason).not.toContain("Female");
+      expect(entry.reason).not.toContain("They/Them/Theirs");
+    }
     database.close();
   });
 });

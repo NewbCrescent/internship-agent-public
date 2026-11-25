@@ -104,6 +104,7 @@
     "test:browser:account-consent": "tsx testing-harness/browser/account-consent-run.ts",
     "test:browser:greenhouse": "tsx testing-harness/browser/greenhouse-fixture-run.ts",
     "test:browser:greenhouse-demographics": "tsx testing-harness/browser/greenhouse-demographics-run.ts",
+    "test:browser:unrecognized-forms": "tsx testing-harness/browser/unrecognized-forms-run.ts",
     "test:browser:site-navigation": "tsx testing-harness/browser/site-navigation-run.ts",
     "test:browser:oracle-apply": "tsx testing-harness/browser/oracle-apply-run.ts",
     "test:harness": "node --test testing-harness/harness/*.test.mjs",

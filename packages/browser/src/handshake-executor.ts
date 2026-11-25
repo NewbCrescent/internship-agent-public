@@ -685,6 +685,25 @@ export function createPlaywrightPage(page: Page): BrowserPage {
         // the first page shown on opening is never the whole list (the options read are kept).
         if (control.options.length === 0 || /^(?:school|discipline)--\d+$/.test(control.id)) control.widget = "autocomplete";
       }
+      // Bare ARIA lists (Eightfold's Octuple Select) draw their options only while open, like react-select's.
+      // Opening one saves nothing; a list that shows no options on opening stays a type-ahead.
+      for (const control of controls) {
+        if (!control.listbox || opened >= 40) continue;
+        const selector = control.id
+          ? idSelector(control.id)
+          : control.name ? `[name="${cssValue(control.name)}"]` : control.ref ? `[data-ia-control="${cssValue(control.ref)}"]` : null;
+        if (!selector) continue;
+        opened += 1;
+        const options = await readAriaListOptions(page, within().locator(selector).first());
+        if (options.length === 0) continue;
+        control.tag = "select";
+        control.type = undefined;
+        control.options = options;
+        // A readonly list is chosen by clicking its option (recognizeFields drops "combobox"; chooseOption
+        // routes the role="combobox" control to chooseComboboxOption). An editable one is searched and
+        // picked, keeping the options read on opening, like Greenhouse's School list.
+        control.widget = control.listbox === "readonly" ? "combobox" : "autocomplete";
+      }
       return controls;
     },
     bodyText: async () => {
@@ -1283,6 +1302,72 @@ async function readComboboxOptions(page: Page, scope: Page | Locator, id: string
   }
 }
 
+/** The ids an ARIA list control names for its listbox: aria-controls and aria-owns on it or its ancestors up to 3 levels (Octuple sets aria-owns on its wrapper while open). Runs in the page. */
+function listboxIdsIn(element: Element): string[] {
+  const ids: string[] = [];
+  let node: Element | null = element;
+  for (let depth = 0; node && depth <= 3; depth += 1, node = node.parentElement) {
+    for (const attribute of ["aria-controls", "aria-owns"]) {
+      for (const id of (node.getAttribute(attribute) ?? "").split(/\s+/).filter(Boolean)) {
+        if (!ids.includes(id)) ids.push(id);
+      }
+    }
+  }
+  return ids;
+}
+
+/**
+ * Opens a bare ARIA list (Eightfold's Octuple Select), reads its options, and
+ * closes it: the visible `role="option"` items of the listbox its
+ * aria-controls/aria-owns names (on it or its ancestors), else of the one
+ * visible `role="listbox"` on the page. Then Escape, the focus leaves the
+ * active element, and up to 1 s for the list to hide. Opening a list saves
+ * nothing. Never throws.
+ */
+async function readAriaListOptions(page: Page, control: Locator): Promise<string[]> {
+  try {
+    await control.click({ timeout: 3_000 });
+    let texts: string[] = [];
+    let listbox: Locator | null = null;
+    const deadline = Date.now() + 1_500;
+    while (Date.now() < deadline) {
+      const ids = await control.evaluate(listboxIdsIn).catch(() => [] as string[]);
+      for (const id of ids) {
+        const owner = page.locator(idSelector(id));
+        const options = owner.locator('[role="option"]').filter({ visible: true });
+        if ((await options.count().catch(() => 0)) > 0) {
+          listbox = owner.first();
+          texts = await options.allInnerTexts();
+          break;
+        }
+      }
+      if (!listbox) {
+        const visible = page.locator('[role="listbox"]').filter({ visible: true });
+        if ((await visible.count().catch(() => 0)) === 1) {
+          const options = visible.locator('[role="option"]').filter({ visible: true });
+          if ((await options.count().catch(() => 0)) > 0) {
+            listbox = visible.first();
+            texts = await options.allInnerTexts();
+          }
+        }
+      }
+      if (listbox) break;
+      await page.waitForTimeout(150);
+    }
+    await page.keyboard.press("Escape").catch(() => undefined);
+    await ensureNameShim(page);
+    await page.evaluate(() => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement) active.blur();
+    }).catch(() => undefined);
+    if (listbox) await listbox.waitFor({ state: "hidden", timeout: 1_000 }).catch(() => undefined);
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter(Boolean).slice(0, 500);
+  } catch {
+    await page.keyboard.press("Escape").catch(() => undefined);
+    return [];
+  }
+}
+
 /**
  * Picks one option of a react-select list and checks that the control shows
  * it. Greenhouse's phone-country list shows only the chosen country's dialing
@@ -1295,7 +1380,9 @@ async function chooseComboboxOption(page: Page, control: Locator, field: Browser
     const box = element.closest('[class*="select__control"]');
     return {
       single: box?.querySelector('[class*="single-value"]')?.textContent?.trim() ?? "",
-      multi: Array.from(box?.querySelectorAll('[class*="multi-value__label"]') ?? []).map((chip) => chip.textContent?.trim() ?? "")
+      multi: Array.from(box?.querySelectorAll('[class*="multi-value__label"]') ?? []).map((chip) => chip.textContent?.trim() ?? ""),
+      // A bare ARIA list (Eightfold's Octuple Select) shows the chosen option's text as the input's value.
+      value: element instanceof HTMLInputElement ? element.value.replace(/\s+/g, " ").trim() : ""
     };
   });
   // Already chosen: react-select hides chosen options from a multi menu.
@@ -1305,18 +1392,42 @@ async function chooseComboboxOption(page: Page, control: Locator, field: Browser
   // A list that loads its options (Greenhouse's Degree catalog) shows them a moment after opening.
   await page.locator('[role="option"], [class*="select__option"]').filter({ visible: true }).first()
     .waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
-  const byRole = page.getByRole("option", { name: option, exact: true });
+  // A bare ARIA list's option is looked up in the listbox it names, so another open list's same-named option is never clicked.
+  const ownListbox = await control.evaluate((element) => {
+    if (element.closest('[class*="select__control"]')) return null;
+    const ids: string[] = [];
+    let node: Element | null = element;
+    for (let depth = 0; node && depth <= 3; depth += 1, node = node.parentElement) {
+      for (const attribute of ["aria-controls", "aria-owns"]) {
+        for (const id of (node.getAttribute(attribute) ?? "").split(/\s+/).filter(Boolean)) if (!ids.includes(id)) ids.push(id);
+      }
+    }
+    return ids.find((id) => {
+      const owner = document.getElementById(id);
+      return Boolean(owner && owner.getClientRects().length > 0 && getComputedStyle(owner).visibility !== "hidden");
+    }) ?? null;
+  }).catch(() => null);
+  const scope = ownListbox ? page.locator(idSelector(ownListbox)) : page;
+  const byRole = scope.getByRole("option", { name: option, exact: true });
   const target = (await byRole.count()) > 0
     ? byRole.first()
     : page.locator('[class*="select__option"]').filter({ hasText: new RegExp(`^\\s*${option.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`) }).first();
   await target.click({ timeout: 5_000 });
+  const wanted = choiceText(option);
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    const { single, multi } = await shown();
+    const { single, multi, value } = await shown();
     if (single === option || (/^\+\d{1,4}$/.test(single) && option.endsWith(` ${single}`))) return;
     if (multi.includes(option)) {
       // A multi menu stays open after a choice.
       await page.keyboard.press("Escape").catch(() => undefined);
       return;
+    }
+    if (value) {
+      const current = choiceText(value);
+      // Recognition clips a long option with "…": the shown value is compared by that prefix (as choicesNotTaken does).
+      if (current === wanted || (wanted.endsWith("…") && current.startsWith(wanted.slice(0, -1).trimEnd()))) return;
+      // A phone-country picker shows only the dialing code ("+1" for "United States (+1)").
+      if (/^\+\d{1,4}$/.test(value) && (option.endsWith(` ${value}`) || option.endsWith(`(${value})`))) return;
     }
     await page.waitForTimeout(200);
   }
@@ -1534,7 +1645,11 @@ export function attachedNamesFromText(text: string): string[] {
  * not fields. An upload whose own label only
  * says "Attach" takes its group's label. React-select lists become one select
  * (options are read by opening them), radios sharing a name and checkbox
- * groups become one question, type-ahead inputs are marked `autocomplete`, and
+ * groups become one question, type-ahead inputs are marked `autocomplete`, a
+ * bare ARIA combobox input (not react-select, a datalist, a location box, or a
+ * "Start typing..." box) is marked `listbox` with the value it shows (its list
+ * is read by opening it), a wrapping label's aria-labelledby labels its
+ * control (Rippling's uploads), and
  * react-select's hidden required inputs, Ashby's "Autofill from resume" parser
  * input, a resume-autofill drop zone's input (a `role="button"` box whose text
  * says "autofill", as Dover's), and the CAPTCHA token field are not controls. Ashby's Yes/No button
@@ -1685,6 +1800,10 @@ export function collectControlsIn(root: Element): RawControl[] {
     }
     const wrapping = element.closest("label");
     if (wrapping) {
+      // A wrapping label's accessible name is its aria-labelledby: Rippling wraps each upload in
+      // `label[aria-labelledby]` whose own text only says "Upload" (bugs/resolved/uploads-labelled-through-their-wrapping-label-read-unlabeled.md).
+      const named = byIds(wrapping.getAttribute("aria-labelledby"));
+      if (named) return named.slice(0, 300);
       // Lever wraps the whole question in a label: its own label element holds the question.
       const own = Array.from(wrapping.querySelectorAll('[class*="label"]')).find((candidate) => !candidate.querySelector(CONTROL) && textOf(candidate));
       const wrapped = textOf(own) || textOf(wrapping);
@@ -1985,6 +2104,17 @@ export function collectControlsIn(root: Element): RawControl[] {
     const options = input instanceof HTMLSelectElement
       ? [...input.options].map((option) => option.label || option.value).filter(Boolean)
       : undefined;
+    // A bare ARIA combobox (Eightfold's Octuple Select: `input[role=combobox]` naming its listbox by
+    // aria-controls, readonly unless it filters): its list is read by opening it (createPlaywrightPage.collectControls).
+    // A datalist, Lever's location box, and a "Start typing..." box are type-aheads, never opened.
+    const listbox = input instanceof HTMLInputElement && (type === "text" || type === "search")
+      && input.getAttribute("role") === "combobox"
+      && !input.hasAttribute("list")
+      && !/(?:^|\s)location-input(?:\s|$)/.test(input.className)
+      && input.getAttribute("data-qa") !== "location-input"
+      && !/^start typing/i.test(input.getAttribute("placeholder") ?? "")
+      ? (input.readOnly ? "readonly" as const : "editable" as const)
+      : undefined;
     controls.push({
       tag: input.tagName.toLowerCase() as RawControl["tag"],
       type,
@@ -1994,8 +2124,11 @@ export function collectControlsIn(root: Element): RawControl[] {
       placeholder: collapse(input.getAttribute("placeholder")) || undefined,
       required,
       options,
+      // Only a bare ARIA list reads the choice it shows ("+1" on a phone-country picker).
+      value: listbox ? collapse(input.value) || undefined : undefined,
       widget: input instanceof HTMLInputElement && typeAhead(input) ? "autocomplete" : undefined,
-      ref: input.id || input.name ? undefined : refOf(input)
+      ref: input.id || input.name ? undefined : refOf(input),
+      listbox
     });
   }
   return controls;

@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply | Fixture Aero Careers</title>
+<style>
+  .menu { position: absolute; background: #fff; border: 1px solid #888; z-index: 10; }
+  .menu [role="option"] { padding: 4px 8px; cursor: pointer; }
+  .field { margin: 12px 0; }
+</style>
+</head>
+<body>
+  <!--
+    A synthetic Eightfold-style application form ("Fixture Aero", posting 1001). DERIVED from the
+    public Octuple design system's Select (github.com/EightfoldAI/octuple, Select.tsx: an
+    `input role="combobox"` with aria-expanded and aria-controls naming its menu, readonly unless it
+    filters, options drawn only while open as role="listbox" / role="option", the chosen option's
+    text shown as the input's value) and from the field shapes a 2026-11-25 run recorded (ids input-N,
+    a "Country code picker" showing a dialing code). Every name, host, id, and option is fictional.
+  -->
+  <main>
+    <h1>Robotics Intern</h1>
+    <form id="application" onsubmit="return false">
+      <div class="field"><label for="first">First name*</label><input id="first" type="text" required></div>
+      <div class="field"><label for="last">Last name*</label><input id="last" type="text" required></div>
+      <div class="field"><label for="email">Email*</label><input id="email" type="email" required></div>
+      <div class="field">
+        <label for="Contact_Information_phone-country-code-picker">Country code picker</label>
+        <input id="Contact_Information_phone-country-code-picker" type="text" role="combobox" aria-expanded="false" aria-controls="menu-phone" readonly value="+1"
+          data-options="United States (+1)|Canada (+1)|Mexico (+52)" data-shows="code">
+      </div>
+      <div class="field">
+        <label for="input-7">Are you legally authorized to work in the country of the job for which you are applying?*</label>
+        <input id="input-7" type="text" role="combobox" aria-expanded="false" aria-controls="menu-7" readonly data-options="Yes|No">
+      </div>
+      <div class="field">
+        <label for="input-11">Will you require sponsorship for an employment Visa?*</label>
+        <input id="input-11" type="text" role="combobox" aria-expanded="false" aria-controls="menu-11" readonly data-options="Yes|No">
+      </div>
+      <div class="field">
+        <label for="input-19">Preferred Pronoun</label>
+        <input id="input-19" type="text" role="combobox" aria-expanded="false" aria-controls="menu-19" readonly data-options="He/Him/His|She/Her/Hers|They/Them/Theirs|Prefer not to say">
+      </div>
+      <div class="field">
+        <label for="input-23">Sex</label>
+        <input id="input-23" type="text" role="combobox" aria-expanded="false" aria-controls="menu-23" readonly data-options="Male|Female|I do not wish to self-identify">
+      </div>
+      <div class="field">
+        <label for="input-27">How did you hear about this position?</label>
+        <input id="input-27" type="text" role="combobox" aria-expanded="false" aria-controls="menu-27" data-options="Job Board|LinkedIn|Employee Referral|Company Website">
+      </div>
+      <div class="field">
+        <label for="input-31">Are you 16 years or older?*</label>
+        <input id="input-31" type="text" role="combobox" aria-expanded="false" aria-controls="menu-31" readonly data-options="Yes|No">
+      </div>
+      <button type="submit">Submit</button>
+    </form>
+  </main>
+  <script>
+    window.fixture = { chosen: {}, opened: 0 };
+    let open = null;
+    function close() {
+      if (!open) return;
+      open.input.setAttribute("aria-expanded", "false");
+      open.menu.remove();
+      open = null;
+    }
+    function render(input, filter) {
+      const menu = open.menu;
+      menu.textContent = "";
+      const wanted = (filter || "").trim().toLowerCase();
+      for (const text of input.dataset.options.split("|")) {
+        if (wanted && !text.toLowerCase().includes(wanted)) continue;
+        const option = document.createElement("div");
+        option.setAttribute("role", "option");
+        option.textContent = text;
+        option.addEventListener("mousedown", (event) => event.preventDefault());
+        option.addEventListener("click", () => {
+          const code = /\((\+\d{1,4})\)$/.exec(text);
+          input.value = input.dataset.shows === "code" && code ? code[1] : text;
+          window.fixture.chosen[input.id] = text;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+          close();
+        });
+        menu.appendChild(option);
+      }
+    }
+    function openFor(input) {
+      if (open && open.input === input) return;
+      close();
+      const menu = document.createElement("div");
+      menu.id = input.getAttribute("aria-controls");
+      menu.className = "menu";
+      menu.setAttribute("role", "listbox");
+      const box = input.getBoundingClientRect();
+      menu.style.left = `${box.left + window.scrollX}px`;
+      menu.style.top = `${box.bottom + window.scrollY}px`;
+      document.body.appendChild(menu);
+      open = { input, menu };
+      input.setAttribute("aria-expanded", "true");
+      window.fixture.opened += 1;
+      render(input, "");
+    }
+    for (const input of document.querySelectorAll('input[role="combobox"]')) {
+      input.addEventListener("click", () => openFor(input));
+      input.addEventListener("input", (event) => {
+        // Typing filters an editable list; the option click's own input event does not.
+        if (input.readOnly || !event.isTrusted) return;
+        if (!open || open.input !== input) openFor(input);
+        render(input, input.value);
+      });
+    }
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); });
+    document.addEventListener("mousedown", (event) => {
+      if (open && event.target !== open.input && !open.menu.contains(event.target)) close();
+    });
+  </script>
+</body>
+</html>

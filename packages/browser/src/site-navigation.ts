@@ -9,7 +9,7 @@ import {
 import { classifyFieldRole } from "./ats/field-roles";
 import { findVisibleChallengeIn } from "./challenge";
 import { rejectCookieConsent } from "./cookie-consent";
-import { recognizeFields, waitForStableControls } from "./form-recognition";
+import { isSignupField, recognizeFields, waitForStableControls } from "./form-recognition";
 import { collectControlsIn, ensureNameShim } from "./handshake-executor";
 
 /**
@@ -39,7 +39,7 @@ const NOT_APPLICATION = /\b(?:search|keywords?|job alerts?|subscribe|newsletter|
 
 /** Whether the fields include one an application form asks for (name, email, phone, resume, …). Pure. */
 export function hasApplicationFields(fields: BrowserField[]): boolean {
-  return fields.some((field) => !NOT_APPLICATION.test(field.label) && APPLICATION_FIELD_ROLES.has(classifyFieldRole(field)));
+  return fields.some((field) => !NOT_APPLICATION.test(field.label) && !isSignupField(field) && APPLICATION_FIELD_ROLES.has(classifyFieldRole(field)));
 }
 
 export type NavigationEntryCandidate = ApplyEntryCandidate & {

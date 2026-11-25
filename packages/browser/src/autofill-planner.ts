@@ -10,7 +10,7 @@ import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, isStand
 import { classifyFieldRole, classifyUploadRole, isSensitiveRole } from "./ats/field-roles";
 import { isHearAboutQuestion, pickHearAboutOption } from "./ats/hear-about";
 import { usStateAlternate } from "./ats/us-states";
-import { isSafeguardField, stripRequiredMarker } from "./form-recognition";
+import { isListSearchBox, isSafeguardField, isSignupField, stripRequiredMarker } from "./form-recognition";
 import { standingFieldDecision, textMessageConsentDecision, type StandingInputs } from "./standing-fields";
 
 export type FieldResolution =
@@ -100,6 +100,14 @@ export function planAutofill(form: RecognizedForm, inputs: PlannerInputs): Autof
         safeguard: true
       }));
       pauses.push(pauseRecord(field, decisions[decisions.length - 1], false));
+      continue;
+    }
+    if (isSignupField(field)) {
+      decisions.push(skip(field, "A job-alert or newsletter signup box is not part of the application; it stays empty."));
+      continue;
+    }
+    if (isListSearchBox(field)) {
+      decisions.push(skip(field, "A list's search box is not a question; it stays empty."));
       continue;
     }
     const role = classifyFieldRole(field);
@@ -406,7 +414,13 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
     const picked = factOptionDecision(field, resolution, inputs);
     if (picked) return picked;
     if (field.widget === "autocomplete" && field.kind === "select") {
-      return suggest(field, resolution.display, { kind: "fact", key: resolution.key, scope: resolution.scope });
+      // A searched list whose options were read on opening types the option as the site shows it.
+      const offered = field.options?.length
+        ? field.options.find((option) => option.toLocaleLowerCase("en-US") === resolution.display.toLocaleLowerCase("en-US"))
+          ?? (resolution.key === "pronouns" ? matchPronounOption(resolution.display, field.options) : undefined)
+          ?? (standardAnswerOption(resolution.key, resolution.value, field.options) ?? undefined)
+        : undefined;
+      return suggest(field, offered ?? resolution.display, { kind: "fact", key: resolution.key, scope: resolution.scope });
     }
     if ((field.kind === "select" || field.kind === "radio") && field.options) {
       const match = field.options.find((option) =>
@@ -1165,7 +1179,7 @@ const CONTACT_LABELS: Array<{ key: ContactKey; pattern: RegExp }> = [
   { key: "addressCity", pattern: /^city$|^town\/city$|^city\/town$/ },
   { key: "addressRegion", pattern: /^(state|province|region)$|^state\/province$|^state or province$|^(?:what|which) state do you (?:currently )?(?:reside|live) in\??$|^(?:current )?state of residence$/ },
   { key: "addressPostalCode", pattern: /^(postal|zip)( code)?$|^zip\/postal code$|^postal\/zip code$/ },
-  { key: "addressCountry", pattern: /^country$|^country \/ territory$|^country\/territory$/ },
+  { key: "addressCountry", pattern: /^country$|^country \/ territory$|^country\/territory$|^(?:phone )?country(?: dialing)? code(?: picker)?$/ },
   { key: "phoneType", pattern: /^phone (device )?type$|^type of phone$|^phone number type$/ },
   { key: "fieldOfStudy", pattern: /^(field|area) of study$|^major$|^discipline$/ }
 ];

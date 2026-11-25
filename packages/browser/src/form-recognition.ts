@@ -26,6 +26,12 @@ export type RawControl = {
    * the element as `data-ia-control` so the field can be found again.
    */
   ref?: string;
+  /**
+   * Adapter-internal: a bare ARIA combobox input (not react-select),
+   * "readonly" when it cannot be typed into. Its list is read by opening it
+   * (createPlaywrightPage.collectControls).
+   */
+  listbox?: "readonly" | "editable";
 };
 
 /** Required markers sites append to labels: `*`, `∗`, `✱`, `＊`, or "(required)". */
@@ -180,6 +186,22 @@ export const UNLABELED_CONTROL_LABEL = /^Unlabeled (?:input|textarea|select|butt
 /** Labels that must pause the run instead of being filled or submitted past. */
 export function isSafeguardField(field: BrowserField): boolean {
   return SAFEGUARD_PATTERN.test(field.label);
+}
+
+/** Ids of job-alert, newsletter, and talent-community signup boxes (Phenom's "notifiedEmail" box beside a posting). */
+const SIGNUP_ID = /notif(?:y|ied|ication)|job[-_]?alerts?|alert[-_]?email|subscri|newsletter|talent[-_]?(?:community|network)/i;
+
+/** A text or email box that signs up for job alerts or a newsletter: never an application field. Pure. */
+export function isSignupField(field: BrowserField): boolean {
+  return (field.kind === "text" || field.kind === "email") && SIGNUP_ID.test(field.id);
+}
+
+/** A list's own search box, labelled only "Search". */
+const SEARCH_BOX = /^(?:search|search\s*(?:\.\.\.|…)|type to search|search options)$/i;
+
+/** A list's own search box (Rippling's phone-country popover): never a question. Pure. */
+export function isListSearchBox(field: BrowserField): boolean {
+  return field.kind === "text" && SEARCH_BOX.test(stripRequiredMarker(readableText(field.label)).label);
 }
 
 /** Button labels that count as the terminal application submit. */
