@@ -4,6 +4,20 @@ import { promptSearchTerms, type AtsKind, type BrowserField, type FillDecision, 
 
 import { chooseApplyEntry, dismissCookieBanner, type ApplyEntryCandidate } from "./apply-entry";
 import { isDoverOrAshby } from "./ats/adapters";
+import {
+  ASHBY_BUSY_DETAIL,
+  ASHBY_RECLICK_SETTLE_MS,
+  ASHBY_SAVE_SETTLE_MS,
+  ASHBY_SPAM_CHECK_DETAIL,
+  ASHBY_SPAM_CHECK_MESSAGE,
+  ashbyBusyMessage,
+  EMPTY_ASHBY_SUBMIT_STATE,
+  isAshbyApplication,
+  nextAshbyStep,
+  readAshbySubmitStateIn,
+  watchAshbySubmitFeedbackIn,
+  type AshbySubmitState
+} from "./ats/ashby-submit";
 import { classifyFieldRole, isSensitiveRole } from "./ats/field-roles";
 import { matchSuggestion } from "./autofill-planner";
 import { findVisibleChallengeIn, isTurnstileFrameSource, SubmissionChallenged, SubmissionRefused, type VisibleChallenge } from "./challenge";
@@ -73,6 +87,17 @@ export type BrowserPage = {
    * when none is shown.
    */
   successText?(): Promise<string>;
+  /**
+   * Ashby only (ats/ashby-submit.ts): blurs the focused field, starts watching
+   * for Ashby's busy notice, and waits `waitMs` so the answer saves finish
+   * before a submit click.
+   */
+  settleAshbySaves?(waitMs: number): Promise<void>;
+  /**
+   * Ashby only: whether Ashby's busy notice appeared since the last settle
+   * (and is still shown), and its failure container's text.
+   */
+  ashbySubmitState?(): Promise<AshbySubmitState>;
   /**
    * Follows the posting's Apply entry once (chooseApplyEntry) and returns the
    * URL it reached, or null when the page has none.
@@ -236,6 +261,12 @@ export async function applyDecisions(
  *   holds the run (`SubmissionCodeNotFound`, nothing sent); a step still
  *   shown after entry fails closed. The code is never logged or put in an
  *   error, and every text returned or kept after it was typed is scrubbed.
+ * - Ashby (ats/ashby-submit.ts): the agent waits for Ashby's answer saves
+ *   before the click, and clicks again (at most 3 clicks) only after Ashby's
+ *   "We're updating your application" notice, which means that click sent
+ *   nothing, has gone. Ashby's spam-check failure is held as challenged and
+ *   any other failure container as refused (never clicked again); a closed
+ *   dialog never counts as a confirmation there.
  *
  * Every error after the click carries the page's evidence; the agent writes it
  * to the run's local folder.
@@ -244,15 +275,21 @@ export async function submitAndConfirm(
   page: BrowserPage,
   options: { timeoutMs?: number; pollMs?: number; securityCode?: SecurityCodeLookup | null; atsKind?: AtsKind | null } = {}
 ): Promise<string> {
+  const ashby = isAshbyApplication(page.url(), options.atsKind);
+  // Ashby refuses a submit click while an answer is still saving: let its saves finish first.
+  if (ashby && page.settleAshbySaves) await page.settleAshbySaves(ASHBY_SAVE_SETTLE_MS);
   const before = await page.bodyText();
   const beforeUrl = page.url();
   const successBefore = page.successText ? (await page.successText()).trim() : "";
   const invalidBefore = page.invalidFields ? await page.invalidFields().catch((): InvalidField[] => []) : [];
   const codeInputsBefore = page.securityCodeInputs ? await page.securityCodeInputs().catch(() => 0) : 0;
   const dialogOpenBefore = page.applicationDialogOpen ? await page.applicationDialogOpen().catch(() => false) : false;
-  const targetAts = isDoverOrAshby(beforeUrl, options.atsKind);
+  // Ashby's form is inline; its only dialogs are the type-ahead list and the cookie banner, so on Ashby a
+  // closed dialog is never a confirmation (its success container is).
+  const targetAts = isDoverOrAshby(beforeUrl, options.atsKind) && !ashby;
   const clickedAt = new Date();
   await page.clickSubmit();
+  let clicks = 1;
   // A submission is a network round trip: keep the page open and watch for a
   // new confirmation instead of reading once and closing mid-request.
   const timeoutMs = options.timeoutMs ?? 30_000;
@@ -279,6 +316,35 @@ export async function submitAndConfirm(
           `After the submit click the site showed ${challenge.detail}. The agent never solves CAPTCHAs, so this application is held for you: finish it in your own browser. The run is not marked submitted.`,
           scrubbed(await capturePostSubmitEvidence(page, "challenged", { bodyText: body, challenge: challenge.detail }))
         );
+      }
+      // Ashby's own submit feedback: its spam check or an error refuses the submission; a click made while an
+      // answer was still saving sent nothing, so it is made again once Ashby has finished saving.
+      if (ashby && page.ashbySubmitState) {
+        const state = await page.ashbySubmitState().catch(() => EMPTY_ASHBY_SUBMIT_STATE);
+        const step = nextAshbyStep(state, clicks);
+        if (step === "spam-check") {
+          throw new SubmissionChallenged(
+            ASHBY_SPAM_CHECK_MESSAGE,
+            scrubbed(await capturePostSubmitEvidence(page, "challenged", { bodyText: body, challenge: ASHBY_SPAM_CHECK_DETAIL, alertText: state.failureText }))
+          );
+        }
+        if (step === "refused") {
+          throw new SubmissionRefused(
+            `The site did not accept the submission ("${scrubSecret(state.failureText, secret).slice(0, 200)}"). The run is not marked submitted; check the application on the site before retrying.`,
+            scrubbed(await capturePostSubmitEvidence(page, "refused", { bodyText: body, alertText: state.failureText }))
+          );
+        }
+        if (step === "click-again") {
+          await page.settleAshbySaves?.(ASHBY_RECLICK_SETTLE_MS);
+          try {
+            await page.clickSubmit();
+            clicks += 1;
+            deadline = Date.now() + timeoutMs;
+          } catch {
+            // No submit control any more: keep reading the outcome until the deadline.
+          }
+          continue;
+        }
       }
       // If a modal dialog was open before submit and has now closed without errors, challenge, or refusal:
       if (dialogOpenBefore && page.applicationDialogOpen) {
@@ -351,7 +417,12 @@ export async function submitAndConfirm(
     const submitShown = page.submitControlShown ? await page.submitControlShown().catch(() => false) : false;
     const refusal = page.alertText ? (await page.alertText()).trim() : "";
     const kind = classifyUnconfirmed({ invalidBefore, invalidAfter, submitShown, alertText: refusal });
-    const evidence = scrubbed(await capturePostSubmitEvidence(page, kind, { invalidFields: invalidAfter, alertText: refusal }));
+    const ashbyBusy = ashby && page.ashbySubmitState ? (await page.ashbySubmitState().catch(() => EMPTY_ASHBY_SUBMIT_STATE)).busySeen : false;
+    const evidence = scrubbed(await capturePostSubmitEvidence(page, kind, {
+      invalidFields: invalidAfter,
+      alertText: refusal,
+      ...(kind === "unknown" && ashbyBusy ? { detail: ASHBY_BUSY_DETAIL } : {})
+    }));
     if (kind === "field-errors") {
       // No page text or field labels here: this message reaches the pipeline's notices.
       throw new SubmissionNeedsInput(
@@ -363,6 +434,7 @@ export async function submitAndConfirm(
     if (kind === "refused") {
       throw new SubmissionRefused(`The site did not accept the submission ("${scrubSecret(refusal, secret).slice(0, 200)}"). The run is not marked submitted; check the application on the site before retrying.`, evidence);
     }
+    if (kind === "unknown" && ashbyBusy) throw new SubmissionUnconfirmed(ashbyBusyMessage(clicks), evidence);
     const dialogClosed = page.applicationDialogOpen ? (dialogOpenBefore && !(await page.applicationDialogOpen().catch(() => true))) : false;
     if (dialogClosed && targetAts && kind === "unknown") {
       const success = page.successText ? (await page.successText().catch(() => "")).trim() : "";
@@ -618,6 +690,23 @@ export function createPlaywrightPage(page: Page): BrowserPage {
         return await page.evaluate(readSuccessTextIn);
       } catch {
         return "";
+      }
+    },
+    settleAshbySaves: async (waitMs) => {
+      try {
+        await ensureNameShim(page);
+        await page.evaluate(watchAshbySubmitFeedbackIn);
+      } catch {
+        // A read during a navigation: the wait below still runs.
+      }
+      await page.waitForTimeout(waitMs);
+    },
+    ashbySubmitState: async () => {
+      try {
+        await ensureNameShim(page);
+        return await page.evaluate(readAshbySubmitStateIn);
+      } catch {
+        return EMPTY_ASHBY_SUBMIT_STATE;
       }
     },
     followApplyEntry: async () => {

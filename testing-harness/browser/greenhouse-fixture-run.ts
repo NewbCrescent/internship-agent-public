@@ -96,7 +96,13 @@
  * Submit clicked (the form's Submit is not clicked again), then the
  * confirmation, with the code never in the returned text; no email and two
  * different codes hold the run (SubmissionCodeNotFound, verification-code
- * evidence) and nothing is sent.
+ * evidence) and nothing is sent. Ashby's answer saves (fixture ?saving= and
+ * ?failure=, derived from Ashby's public bundle): a submit click made while an
+ * answer is still saving (Ashby's "We're updating your application" notice,
+ * which sends nothing) is made again once the notice is gone and exactly one
+ * submission arrives; a save that never ends fails closed after one click
+ * with the notice in the evidence; Ashby's spam-check failure container is
+ * held as challenged and a generic one refused, neither clicked again.
  *
  * Usage: pnpm test:browser:greenhouse
  */
@@ -592,6 +598,47 @@ async function main(): Promise<void> {
       check(outcome instanceof SubmissionUnconfirmed && outcome.evidence.outcome === "unknown" && outcome.evidence.url === ASHBY,
         `Ashby with no success state, evidence: ${outcome instanceof SubmissionUnconfirmed ? JSON.stringify({ outcome: outcome.evidence.outcome, url: outcome.evidence.url }) : "none"}`);
       await silentTab.close();
+    }
+
+    // Ashby saves each answer as it is set and answers a submit click during a save with "We're updating your
+    // application", sending nothing (all five real Ashby submits, 2026-11-20 to 2026-11-25; behaviour from Ashby's public
+    // bundle). The agent lets the saves settle, clicks again once the notice is gone, and exactly one submission arrives;
+    // a save that never ends fails closed after one click; the spam check is held as challenged and an error refused,
+    // neither clicked again.
+    {
+      type AshbySubmits = { busyClicks: number; submitClicks: number; submitted: boolean };
+      const submits = (tab: Page) => tab.evaluate(() => (window as unknown as { fixture: AshbySubmits }).fixture);
+      const fillThenSubmit = async (query: string, timeoutMs: number) => {
+        const tab = await open(`${ASHBY}?${query}`);
+        const page = createPlaywrightPage(tab);
+        const form = await recognizeCurrentForm(page);
+        const id = (label: string) => form.fields.find((field) => field.label === label)?.id ?? `missing-${label}`;
+        const filled = await applyDecisions(page, form, [
+          { fieldId: id("Name"), action: "fill", value: PROFILE.fullName, basis: null, reason: "fixture", pause: null },
+          { fieldId: id("Resume"), action: "upload", value: null, basis: null, reason: "fixture", pause: null }
+        ], (decision) => (decision.action === "upload" ? resumePdf : null));
+        check(filled.unfilled.length === 0, `Ashby ?${query} unfilled: ${JSON.stringify(filled.unfilled)}`);
+        const outcome = await submitAndConfirm(page, { timeoutMs, pollMs: 100, atsKind: "ashby" }).then((text) => text, (error: unknown) => error);
+        return { tab, outcome, sent: await submits(tab) };
+      };
+      const race = await fillThenSubmit("submitted=default&saving=3000", 8_000);
+      check(typeof race.outcome === "string" && race.outcome.includes("successfully submitted"), `Ashby submit during a save: ${race.outcome instanceof Error ? race.outcome.message : String(race.outcome)}`);
+      check(race.sent.submitted && race.sent.submitClicks === 1 && race.sent.busyClicks <= 2, `Ashby submit during a save, fixture: ${JSON.stringify(race.sent)}`);
+      await race.tab.close();
+      const stuck = await fillThenSubmit("submitted=default&saving=forever", 2_500);
+      check(stuck.outcome instanceof SubmissionUnconfirmed && /still saving/.test(stuck.outcome.message) && stuck.outcome.message.includes("not marked submitted")
+        && /We're updating your application/.test(stuck.outcome.evidence.detail ?? ""), `Ashby save that never ends: ${stuck.outcome instanceof Error ? stuck.outcome.message : String(stuck.outcome)}`);
+      check(stuck.sent.busyClicks === 1 && stuck.sent.submitClicks === 0, `Ashby save that never ends, fixture: ${JSON.stringify(stuck.sent)}`);
+      await stuck.tab.close();
+      for (const [failure, Expected, outcomeKind] of [["spam", SubmissionChallenged, "challenged"], ["error", SubmissionRefused, "refused"]] as const) {
+        const tab = await open(`${ASHBY}?failure=${failure}`);
+        const outcome = await submitAndConfirm(createPlaywrightPage(tab), { timeoutMs: 3_000, pollMs: 100, atsKind: "ashby" }).then(() => null, (error: unknown) => error);
+        check(outcome instanceof Expected && postSubmitEvidenceOf(outcome)?.outcome === outcomeKind, `Ashby ?failure=${failure}: ${outcome instanceof Error ? `${outcome.constructor.name}: ${outcome.message}` : "submitted"}`);
+        if (failure === "spam") check(postSubmitEvidenceOf(outcome)?.challenge === "Ashby's spam check (reCAPTCHA Enterprise)", `Ashby ?failure=spam challenge: ${postSubmitEvidenceOf(outcome)?.challenge}`);
+        const sent = await submits(tab);
+        check(sent.submitClicks === 1 && !sent.submitted, `Ashby ?failure=${failure} clicked again: ${JSON.stringify(sent)}`);
+        await tab.close();
+      }
     }
 
     // Dover (jobs.dover.com, where app.dover.io links redirect): labels come from the sibling FormLabel div, never the

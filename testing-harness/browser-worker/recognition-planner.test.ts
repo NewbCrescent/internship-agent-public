@@ -3,6 +3,16 @@ import { describe, expect, it } from "vitest";
 import { promptSearchTerms } from "@internship-agent/domain";
 
 import {
+  ASHBY_BUSY_DETAIL,
+  ASHBY_MAX_SUBMIT_CLICKS,
+  ASHBY_RECLICK_SETTLE_MS,
+  ASHBY_SAVE_SETTLE_MS,
+  ASHBY_SPAM_CHECK_DETAIL,
+  isAshbyApplicationUrl,
+  isAshbyBusyNotice,
+  isAshbySpamCheck,
+  nextAshbyStep,
+  type AshbySubmitState,
   attachedNamesFromText,
   classifyFieldRole,
   classifyUploadRole,
@@ -454,18 +464,18 @@ describe("submission confirmation", () => {
       .rejects.toThrow(/no new confirmation appeared/);
   });
 
-  it("classifies a closed dialog on Dover or Ashby without errors as a confirmed submission", async () => {
+  it("classifies a closed dialog on Dover without errors as a confirmed submission, never on Ashby", async () => {
     const dover = submitPage({ confirmAfterReads: Infinity, dialogOpen: false, url: "https://jobs.dover.com/job/123" });
     await expect(submitAndConfirm(dover, { timeoutMs: 20, pollMs: 1 })).resolves.toContain("Application submitted");
 
     const ashby = submitPage({ confirmAfterReads: Infinity, dialogOpen: false, url: "https://jobs.ashbyhq.com/company/123/application" });
-    await expect(submitAndConfirm(ashby, { timeoutMs: 20, pollMs: 1 })).resolves.toContain("Application submitted");
+    await expect(submitAndConfirm(ashby, { timeoutMs: 20, pollMs: 1 })).rejects.toThrow(/dialog closed, but no confirmation text was recognized/);
 
     const explicitDover = submitPage({ confirmAfterReads: Infinity, dialogOpen: false });
     await expect(submitAndConfirm(explicitDover, { timeoutMs: 20, pollMs: 1, atsKind: "dover" })).resolves.toContain("Application submitted");
 
     const explicitAshby = submitPage({ confirmAfterReads: Infinity, dialogOpen: false });
-    await expect(submitAndConfirm(explicitAshby, { timeoutMs: 20, pollMs: 1, atsKind: "ashby" })).resolves.toContain("Application submitted");
+    await expect(submitAndConfirm(explicitAshby, { timeoutMs: 20, pollMs: 1, atsKind: "ashby" })).rejects.toThrow(/dialog closed, but no confirmation text was recognized/);
   });
 });
 
@@ -1615,5 +1625,149 @@ describe("post-submit outcomes", () => {
       expect(held.pauses.find((pause) => pause.fieldId === "other")).toEqual(other);
       expect(held.pauses.find((pause) => pause.fieldId === "gender")).toMatchObject({ status: "open", answer: null, sensitive: true, question: "Gender: Please select an option." });
     });
+  });
+});
+
+describe("Ashby's answer saves and submit feedback", () => {
+  const FAST = { timeoutMs: 50, pollMs: 1 };
+  const quiet: AshbySubmitState = { busySeen: false, busyShown: false, failureText: "", spamCheck: false };
+
+  function ashbyPage(options: {
+    url?: string;
+    state?: (clicks: number, reads: number) => AshbySubmitState;
+    successAtClick?: number;
+    successText?: string;
+  } = {}) {
+    const events: string[] = [];
+    let clicks = 0;
+    let reads = 0;
+    const page: BrowserPage = {
+      url: () => options.url ?? "https://jobs.ashbyhq.com/fixture/1/application",
+      title: async () => "Apply",
+      collectControls: async () => [],
+      bodyText: async () => "Robotics Software Intern Submit Application",
+      fillField: async () => {},
+      chooseOption: async () => {},
+      setChecked: async () => {},
+      uploadFile: async () => {},
+      clickSubmit: async () => {
+        events.push("click");
+        clicks += 1;
+      },
+      screenshot: async () => {},
+      close: async () => {},
+      successText: async () => (options.successAtClick !== undefined && clicks >= options.successAtClick ? options.successText ?? "Your application was successfully submitted." : ""),
+      settleAshbySaves: async (ms) => {
+        events.push(`settle:${ms}`);
+      },
+      ashbySubmitState: async () => {
+        if (clicks > 0) reads += 1;
+        return options.state ? options.state(clicks, reads) : quiet;
+      }
+    };
+    return { page, events, clicks: () => clicks };
+  }
+
+  it("settles Ashby's saves before the first click", async () => {
+    const { page, events } = ashbyPage({ successAtClick: 1 });
+    await expect(submitAndConfirm(page, FAST)).resolves.toContain("successfully submitted");
+    expect(events.slice(0, 2)).toEqual([`settle:${ASHBY_SAVE_SETTLE_MS}`, "click"]);
+  });
+
+  it("clicks again once Ashby's busy notice is gone, never while it is shown", async () => {
+    const { page, events } = ashbyPage({
+      successAtClick: 2,
+      state: (clicks, reads) => (clicks === 1 ? { ...quiet, busySeen: true, busyShown: reads <= 2 } : quiet)
+    });
+    await expect(submitAndConfirm(page, FAST)).resolves.toContain("successfully submitted");
+    expect(events).toEqual([`settle:${ASHBY_SAVE_SETTLE_MS}`, "click", `settle:${ASHBY_RECLICK_SETTLE_MS}`, "click"]);
+  });
+
+  it("fails closed after the last allowed click still met the notice", async () => {
+    const { page, clicks } = ashbyPage({ state: () => ({ ...quiet, busySeen: true }) });
+    const error = await submitAndConfirm(page, FAST).then(() => null, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SubmissionUnconfirmed);
+    const unconfirmed = error as SubmissionUnconfirmed;
+    expect(unconfirmed.message).toMatch(/still saving/);
+    expect(unconfirmed.message).toContain("not marked submitted");
+    expect(unconfirmed.evidence.detail).toBe(ASHBY_BUSY_DETAIL);
+    expect(unconfirmed.evidence.outcome).toBe("unknown");
+    expect(clicks()).toBe(ASHBY_MAX_SUBMIT_CLICKS);
+  });
+
+  it("holds Ashby's spam check as a challenge and never clicks again", async () => {
+    const { page, clicks } = ashbyPage({
+      state: (count) => (count > 0
+        ? { ...quiet, spamCheck: true, failureText: "We couldn't submit your application Your application could not be verified. Try these steps …" }
+        : quiet)
+    });
+    const error = await submitAndConfirm(page, FAST).then(() => null, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SubmissionChallenged);
+    expect(postSubmitEvidenceOf(error)?.outcome).toBe("challenged");
+    expect(postSubmitEvidenceOf(error)?.challenge).toBe(ASHBY_SPAM_CHECK_DETAIL);
+    expect(clicks()).toBe(1);
+  });
+
+  it("refuses on Ashby's failure container and never clicks again", async () => {
+    const { page, clicks } = ashbyPage({
+      state: (count) => (count > 0 ? { ...quiet, failureText: "We couldn't submit your application Something went wrong - sorry. We're looking into it!" } : quiet)
+    });
+    const error = await submitAndConfirm(page, FAST).then(() => null, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SubmissionRefused);
+    expect(postSubmitEvidenceOf(error)?.outcome).toBe("refused");
+    expect(clicks()).toBe(1);
+  });
+
+  it("leaves other sites alone", async () => {
+    const events: string[] = [];
+    let clicked = false;
+    const page: BrowserPage = {
+      url: () => "https://job-boards.greenhouse.io/fixture/jobs/1",
+      title: async () => "Apply",
+      collectControls: async () => [],
+      bodyText: async () => "Robotics Software Intern Submit Application",
+      fillField: async () => {},
+      chooseOption: async () => {},
+      setChecked: async () => {},
+      uploadFile: async () => {},
+      clickSubmit: async () => {
+        events.push("click");
+        clicked = true;
+      },
+      screenshot: async () => {},
+      close: async () => {},
+      successText: async () => (clicked ? "Your application was successfully submitted." : ""),
+      settleAshbySaves: async () => {
+        events.push("settle");
+      },
+      ashbySubmitState: async () => {
+        events.push("state");
+        return quiet;
+      }
+    };
+    await expect(submitAndConfirm(page, FAST)).resolves.toContain("successfully submitted");
+    expect(events).toEqual(["click"]);
+  });
+
+  it("reads Ashby's busy notice, spam check, and next step", () => {
+    expect(isAshbyBusyNotice("We're updating your application (e.g. uploading files), please try again when they're finished.")).toBe(true);
+    expect(isAshbyBusyNotice("We’re updating your application (e.g. uploading files), please try again when they’re finished.")).toBe(true);
+    expect(isAshbyBusyNotice("We're updating your forms (e.g. uploading files), please try again when they're finished.")).toBe(true);
+    expect(isAshbyBusyNotice("Please try again later.")).toBe(false);
+    expect(isAshbyBusyNotice("We're updating our privacy policy")).toBe(false);
+    expect(isAshbySpamCheck("Legitimate applications are occasionally flagged by mistake. Try these in order:")).toBe(true);
+    expect(isAshbySpamCheck("There was a problem verifying this submission with CAPTCHA. Please try turning off your ad blocker or try again later.")).toBe(true);
+    expect(isAshbySpamCheck("Something went wrong - sorry. We're looking into it!")).toBe(false);
+    expect(nextAshbyStep({ ...quiet, spamCheck: true, failureText: "We couldn't submit your application" }, 1)).toBe("spam-check");
+    expect(nextAshbyStep({ ...quiet, failureText: "We couldn't submit your application" }, 1)).toBe("refused");
+    expect(nextAshbyStep({ ...quiet, busySeen: true }, 1)).toBe("click-again");
+    expect(nextAshbyStep({ ...quiet, busySeen: true }, 2)).toBe("click-again");
+    expect(nextAshbyStep({ ...quiet, busySeen: true }, ASHBY_MAX_SUBMIT_CLICKS)).toBe("wait");
+    expect(nextAshbyStep({ ...quiet, busySeen: true, busyShown: true }, 1)).toBe("wait");
+    expect(nextAshbyStep(quiet, 1)).toBe("wait");
+    expect(isAshbyApplicationUrl("https://jobs.ashbyhq.com/fixture/1/application")).toBe(true);
+    expect(isAshbyApplicationUrl("https://jobs.dover.com/job/1")).toBe(false);
+    expect(isAshbyApplicationUrl("https://careers.example.com/jobs?ashby_jid=1")).toBe(false);
+    expect(isAshbyApplicationUrl("not a url")).toBe(false);
   });
 });

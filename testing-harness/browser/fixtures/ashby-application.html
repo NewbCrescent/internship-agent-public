@@ -42,6 +42,15 @@
     custom message (the theme's applicationSubmittedSuccessMessage). Query switch ?submitted=default
     shows the default text after the submit click, ?submitted=custom a custom message with no
     usual confirmation phrase; without it the click does nothing.
+    DERIVED, not captured (Ashby's public bundle, read 2026-11-24, no submission made): Ashby saves
+    each answer as it is set (a text field 500 ms after typing stops or at once on blur; a Yes/No
+    click or a file at once) and answers a submit click made while a save runs with the toast
+    "We're updating your application (e.g. uploading files), please try again when they're
+    finished.", sending nothing; the toast goes when a save finishes. Query switch ?saving=<ms>
+    turns the saves on (a file save takes <ms>, the others 300 ms); ?saving=forever saves that
+    never finish. ?failure=spam and ?failure=error draw Ashby's failure container (the spam-check
+    variant with its "Try these steps" pane, or a generic error) after the click. A refused
+    submission's server message here is fictional.
   -->
   <div id="root">
     <h1 class="ashby-job-posting-heading">Robotics Software Intern</h1>
@@ -125,8 +134,38 @@
       <textarea id="g-recaptcha-response-100000" name="g-recaptcha-response" class="g-recaptcha-response" style="display:none"></textarea></div>
   </div>
   <script>
-    const state = { uploads: {}, location: null, typed: [], yesno: {}, radio: null };
+    const params = new URLSearchParams(location.search);
+    const SAVING = params.get("saving");
+    const state = { uploads: {}, location: null, typed: [], yesno: {}, radio: null, pendingSaves: 0, busyClicks: 0, submitClicks: 0, submitted: false };
     window.fixture = state;
+    // Ashby's toasts: the busy notice goes here.
+    const toasts = document.createElement("div");
+    toasts.className = "_toasts";
+    document.getElementById("root").appendChild(toasts);
+    // An answer save to Ashby's server; when one finishes Ashby dismisses its busy toasts.
+    const save = (ms) => {
+      if (SAVING === null) return;
+      state.pendingSaves += 1;
+      if (SAVING === "forever") return;
+      setTimeout(() => {
+        state.pendingSaves -= 1;
+        toasts.innerHTML = "";
+      }, ms);
+    };
+    // Text fields save 500 ms after typing stops, or at once on blur.
+    for (const text of document.querySelectorAll("input.ashby-application-form-input-text")) {
+      let saveTimer = null;
+      text.addEventListener("input", () => {
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => { saveTimer = null; save(300); }, 500);
+      });
+      text.addEventListener("focusout", () => {
+        if (saveTimer === null) return;
+        clearTimeout(saveTimer);
+        saveTimer = null;
+        save(300);
+      });
+    }
     const PLACES = ["Berkeley, California, United States", "Berkeley Heights, New Jersey, United States", "South San Francisco, California, United States"];
     // The location box has no id or name, as on the captured page: found by its class.
     const input = document.querySelector(".ashby-application-form-input-autocomplete");
@@ -164,21 +203,44 @@
       const box = container.querySelector('input[type="checkbox"]');
       box.checked = button.dataset.option === "yes";
       state.yesno[box.name] = button.dataset.option;
+      save(300);
     });
     // The success state Ashby draws in place of the form once a submission is accepted.
     const MESSAGES = {
       default: "Your application was successfully submitted. We'll contact you if there are next steps.",
       custom: "We got it! The Fixture Robotics team reviews every application."
     };
+    const FAILURES = {
+      spam: `<div class="ashby-application-form-failure-container"><div class="_container"><div class="_summaryPane"><div role="alert"><h2>We couldn't submit your application</h2><p>Your application could not be verified.</p></div></div><div class="_detailsPane"><h3>Try these steps</h3><p>Legitimate applications are occasionally flagged by mistake. Try these in order:</p><ol><li>Turn off your VPN or proxy</li><li>Try again later</li></ol></div></div></div>`,
+      error: `<div class="ashby-application-form-failure-container"><div role="alert" aria-live="assertive"><h2>We couldn't submit your application</h2><p>Something went wrong - sorry. We're looking into it!</p></div></div>`
+    };
     document.querySelector(".ashby-application-form-submit-button").addEventListener("click", () => {
-      const message = MESSAGES[new URLSearchParams(location.search).get("submitted")];
+      // A click while an answer is still saving is refused with a toast and sends nothing.
+      if (state.pendingSaves > 0) {
+        state.busyClicks += 1;
+        toasts.innerHTML = `<div class="_toast"><h3 class="_heading">Warning</h3><p class="_message">We're updating your application (e.g. uploading files), please try again when they're finished.</p></div>`;
+        return;
+      }
+      state.submitClicks += 1;
+      const failure = FAILURES[params.get("failure")];
+      if (failure) {
+        setTimeout(() => {
+          document.querySelector(".ashby-application-form-container").insertAdjacentHTML("beforebegin", failure);
+        }, 200);
+        return;
+      }
+      const message = MESSAGES[params.get("submitted")];
       if (!message) return;
       setTimeout(() => {
         document.getElementById("form").innerHTML = `<div class="ashby-application-form-success-container"><div role="status" aria-live="polite" tabindex="-1"><h2>Success</h2><p>${message}</p></div></div>`;
+        state.submitted = true;
       }, 200);
     });
     document.addEventListener("change", (event) => {
-      if (event.target.type === "file") state.uploads[event.target.id || "autofill"] = event.target.files[0]?.name ?? null;
+      if (event.target.type === "file") {
+        state.uploads[event.target.id || "autofill"] = event.target.files[0]?.name ?? null;
+        if (SAVING !== null && SAVING !== "forever" && !Number.isNaN(Number(SAVING))) save(Number(SAVING));
+      }
       if (event.target.type === "radio") state.radio = document.querySelector(`label[for="${CSS.escape(event.target.id)}"]`).textContent;
     });
   </script>
