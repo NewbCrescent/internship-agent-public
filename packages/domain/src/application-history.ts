@@ -112,10 +112,17 @@ export function bachelorKind(value: string): "arts" | "science" | "other" | null
   return null;
 }
 
+/** A general "Bachelor's" that names no kind: "Bachelor's", "Bachelors Degree", "Bachelor's Level Degree" (micron.wd1). */
+const GENERAL_BACHELOR = /^\s*bachelor'?s?(?:'s)?(?:\s+level)?(?:\s+degree)?\s*(?:\(.*\))?\s*$/i;
+
 /**
  * The degree option for a row, or null when none fits (the run then asks).
  * A B.S. is never chosen for a B.A. or the reverse: the kind must match, or
- * the option must be a general "Bachelor's" that names no kind. Curly
+ * the option must be a general "Bachelor's" that names no kind. Exactly one
+ * option must fit: the one of the same kind, else the one general
+ * "Bachelor's" ("Bachelor's Degree", or "Bachelor's Level Degree" on
+ * micron.wd1, 2026-11-25); two options that fit equally return null so the
+ * run asks. Curly
  * apostrophes count as plain ones ("Bachelor’s Degree"); the option is
  * returned as offered. A high-school row picks a high-school diploma option,
  * then a plain high-school option, then a combined "Diploma or GED" / "or
@@ -134,10 +141,12 @@ export function chooseDegreeOption(row: EducationRow, options: string[]): string
   }
   if (row.level !== "bachelor" || !row.degree) return null;
   const held = bachelorKind(row.degree);
-  const bachelors = options.filter((option) => bachelorKind(option) !== null && !/master|doctor|mba|ph\.?d/i.test(option));
-  return bachelors.find((option) => bachelorKind(option) === held && held !== "other") ??
-    bachelors.find((option) => /^\s*bachelor'?s?(?:'s)?(?:\s+degree)?\s*(?:\(.*\))?\s*$/i.test(plainApostrophes(option)) && !/\b(?:arts|science|engineering|fine)\b/i.test(option)) ??
-    null;
+  const bachelors = [...new Set(options.filter((option) => bachelorKind(option) !== null && !/master|doctor|mba|ph\.?d/i.test(option)))];
+  // Exactly one option may fit: the same kind first, else a general "Bachelor's"; two that fit equally ask.
+  const sameKind = held === "other" ? [] : bachelors.filter((option) => bachelorKind(option) === held);
+  if (sameKind.length) return sameKind.length === 1 ? sameKind[0]! : null;
+  const general = bachelors.filter((option) => GENERAL_BACHELOR.test(plainApostrophes(option)) && !/\b(?:arts|science|engineering|fine)\b/i.test(option));
+  return general.length === 1 ? general[0]! : null;
 }
 
 const STOPWORDS = new Set(["of", "the", "at", "and", "in"]);
@@ -217,4 +226,30 @@ export function matchPromptOption(value: string, options: string[]): string | nu
     })
     .sort((a, b) => a.length - b.length);
   return containing[0] ?? null;
+}
+
+/** A word without a plural ending, for field-of-study names: "sciences" is "science", "studies" is "study"; "business", "analysis", "status" keep their form. */
+function singular(token: string): string {
+  if (token.length > 4 && token.endsWith("ies")) return `${token.slice(0, -3)}y`;
+  if (token.length > 3 && token.endsWith("s") && !/(?:ss|us|is)$/.test(token)) return token.slice(0, -1);
+  return token;
+}
+
+/**
+ * The field-of-study option for `value`: an option with the same words
+ * (matchPromptOption's same-words rule), else the one option whose words
+ * differ only by plural endings ("Computer sciences" for "Computer
+ * Science", micron.wd1 2026-11-25; two such options return null so the
+ * run asks), else matchPromptOption's containing match.
+ */
+export function matchFieldOfStudyOption(value: string, options: string[]): string | null {
+  const wanted = tokens(value);
+  if (wanted.length === 0) return null;
+  const same = options.find((option) => tokens(option).join(" ") === wanted.join(" "));
+  if (same) return same;
+  const key = wanted.map(singular).join(" ");
+  const folded = [...new Set(options.filter((option) => tokens(option).map(singular).join(" ") === key))];
+  if (folded.length === 1) return folded[0]!;
+  if (folded.length > 1) return null;
+  return matchPromptOption(value, options);
 }

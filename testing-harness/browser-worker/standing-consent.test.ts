@@ -238,3 +238,16 @@ describe("Jobvite residence and the application walls", () => {
     expect(icimsHostOf("not a url")).toBe(null);
   });
 });
+
+describe("background-check and drug-screen notices in the planner (littelfuse.wd1, 2026-11-25)", () => {
+  const BACKGROUND_NOTICE = "Subject to applicable federal and/or state law, you will be required at some point in the process to submit to a criminal background check, employment verification, and education verification. Please note that a criminal conviction will not necessarily disqualify you from employment.";
+  const DRUG_NOTICE = "Subject to applicable federal and/or state law, and subject to your receipt of a conditional offer of employment, you will be required post interview process to submit to a post-offer drug screen.";
+  const notice = (id: string, label: string): BrowserField => ({ id, label, kind: "select", required: true, options: ["Select One", "Acknowledged", "Not acknowledged"] });
+
+  it.each([["background check", BACKGROUND_NOTICE], ["drug screen", DRUG_NOTICE]])("chooses Acknowledged on the %s notice only under the attestation setting", (_name, label) => {
+    expect(decisionOf(form(notice("notice", label)), "notice", ATTEST_ON)).toMatchObject({
+      action: "choose", value: "Acknowledged", basis: { kind: "standing_consent", setting: "sign_attestations", group: "authorization", statement: label }
+    });
+    for (const standing of [undefined, ALL_OFF, DATA_ON]) expect(decisionOf(form(notice("notice", label)), "notice", standing).action).toBe("pause");
+  });
+});

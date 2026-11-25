@@ -4,6 +4,7 @@ import {
   bachelorKind,
   campusOption,
   chooseDegreeOption,
+  matchFieldOfStudyOption,
   matchPromptOption,
   planApplicationHistory,
   promptSearchTerms,
@@ -134,5 +135,26 @@ describe("application history", () => {
     expect(matchPromptOption("Northwind High School", schools)).toBeNull();
     expect(matchPromptOption("Computer Science", ["Computer Engineering", "Computer Science", "Computer Science and Engineering"])).toBe("Computer Science");
     expect(promptSearchTerms("UC Berkeley")).toEqual(["University of California, Berkeley", "UC Berkeley", "berkeley"]);
+  });
+
+  it("takes Micron's general \"Bachelor's Level Degree\" and asks when two options fit equally (micron.wd1, 2026-11-25)", () => {
+    const college: EducationRow = { key: "college", school: "UC Berkeley", level: "bachelor", degree: "B.A. Computer Science", fieldOfStudy: null, gpa: null, startYear: null, endYear: null };
+    const micron = ["Select One", "High School/ A levels / STPM/GED", "SPM / O levels / N levels", "Technical Certificate", "Technical / Professional Diploma",
+      "Advanced Diploma/Associate's Level Degree", "Bachelor's Level Degree", "Master's Level Degree", "Doctorate's Level Degree", "Post Doctorate"];
+    expect(chooseDegreeOption(college, micron)).toBe("Bachelor's Level Degree");
+    expect(chooseDegreeOption({ ...college, degree: "B.S. Computer Science" }, micron)).toBe("Bachelor's Level Degree");
+    expect(chooseDegreeOption(college, ["Bachelor of Arts", "Bachelor of Arts (BA)", "Bachelor's Degree"])).toBeNull();
+    expect(chooseDegreeOption(college, ["Bachelor of Science", "Bachelor's Degree", "Bachelor's Level Degree"])).toBeNull();
+  });
+
+  it("matches a field of study that differs only by a plural ending, exactly once (micron.wd1, 2026-11-25)", () => {
+    const micron = ["Applied Sciences", "Busin.computer sciences", "Computer sciences", "Data Science", "Engineering - Science/Plant", "Environmental Sciences",
+      "Food Science", "L. Breve Scienze Dei Materiali", "L. Breve Scienze dell'Edu/Form", "L. Scienze Biologiche"];
+    expect(matchFieldOfStudyOption("Computer Science", micron)).toBe("Computer sciences");
+    expect(matchFieldOfStudyOption("Computer Science", ["Computer Sciences", "Computer Science"])).toBe("Computer Science");
+    expect(matchFieldOfStudyOption("Computer Science", ["Computer Sciences", "Computers Science"])).toBeNull();
+    expect(matchFieldOfStudyOption("Computer Science", ["Computer and Information Science"])).toBe("Computer and Information Science");
+    expect(matchFieldOfStudyOption("Economics", ["Economic Development", "Business"])).toBeNull();
+    expect(matchFieldOfStudyOption("Business", ["Busines", "Business Administration"])).toBe("Business Administration");
   });
 });

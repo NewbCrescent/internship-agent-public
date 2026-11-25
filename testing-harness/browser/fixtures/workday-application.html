@@ -80,6 +80,9 @@
     // the Rockwell/enGen Degree click timeouts): the school is a plain text box whose suggestion layer, drawn inside
     // the field over the controls below it, closes only when the box loses focus.
     const schoolText = params.get("school") === "text";
+    // ?lists=micron (synthetic copy of the option texts micron.wd1 offered on 2026-11-25, run <run id>): the degree list names
+    // "… Level Degree" options and the field-of-study search offers the plural "Computer sciences".
+    const micronLists = params.get("lists") === "micron";
     const ACCOUNTS_KEY = "fixture-workday-accounts";
     const SESSION_KEY = "fixture-workday-session";
     const readAccounts = () => JSON.parse(localStorage.getItem(ACCOUNTS_KEY) || "{}");
@@ -113,8 +116,12 @@
     // ?parsed=1: Workday already shows a row parsed from a resume that is not the candidate's.
     if (params.get("parsed") === "1") state.work.push({ title: "Analyst", company: "Resume Parse Corp", location: "", current: false, fromM: "01", fromY: "2020", toM: "02", toY: "2020", description: "" });
     const schools = ["University of California, Berkeley", "University of California, Los Angeles", "Berkeley City College", "Northwind High School"];
-    const fields = ["Computer Science", "Computer Engineering", "Economics"];
-    const degrees = [...(realWidgets ? ["GED (High School Equivalent)"] : []), "High School Diploma", "Associate's Degree", "Bachelor of Science (BS)", "Bachelor of Arts (BA)", "Bachelor's Degree", "Master's Degree"];
+    const fields = micronLists
+      ? ["Applied Sciences", "Busin.computer sciences", "Computer sciences", "Data Science", "Engineering - Science/Plant", "Environmental Sciences", "Food Science"]
+      : ["Computer Science", "Computer Engineering", "Economics"];
+    const degrees = micronLists
+      ? ["High School/ A levels / STPM/GED", "SPM / O levels / N levels", "Technical Certificate", "Technical / Professional Diploma", "Advanced Diploma/Associate's Level Degree", "Bachelor's Level Degree", "Master's Level Degree", "Doctorate's Level Degree", "Post Doctorate"]
+      : [...(realWidgets ? ["GED (High School Equivalent)"] : []), "High School Diploma", "Associate's Degree", "Bachelor of Science (BS)", "Bachelor of Arts (BA)", "Bachelor's Degree", "Master's Degree"];
     window.fixture = state;
 
     /** Closes every open list: the popup and, with ?widgets=real, the list portals. */

@@ -13,7 +13,8 @@ import { manualOnly } from "./submission-mode";
  *   electronic signatures, acknowledgments (at-will, privacy or applicant
  *   notice, temporary internship, equal-opportunity statement), and
  *   background-check, drug-test, reference-check, and arbitration
- *   authorizations.
+ *   authorizations (including a notice that the process will require a
+ *   background check or drug screen, acknowledged).
  *
  * The classifier is a deterministic whitelist. Statements of fact about the
  * candidate (citizenship, export control, clearance, debarment, criminal
@@ -159,6 +160,16 @@ const AUTHORIZATION = /\b(?:authori[sz]e|consent to|agree to|permit|allow|unders
 const ARBITRATION = /\barbitrat\w*/i;
 const ARBITRATION_VERB = /\b(?:agree|acknowledge|accept|consent|understand)\b/i;
 
+/**
+ * A notice that the process will require a background check, employment or
+ * education verification, or a drug screen, answered by acknowledging it
+ * ("Subject to applicable federal and/or state law, you will be required at
+ * some point in the process to submit to a criminal background check …",
+ * littelfuse.wd1, 2026-11-25): a background-check or drug-test authorization.
+ * A question ("?") is never one; willingness is the candidate's own fact.
+ */
+const SCREENING_NOTICE = /\b(?:you will|you'll|you may|candidates will|applicants will)\b[^.?]{0,80}\b(?:required|asked)\b[^.?]{0,80}\bto (?:submit to|undergo|complete)\b[^.?]{0,60}\b(?:background (?:check|screening|investigation)s?|drug (?:test|testing|screen|screening)s?|reference checks?|employment verification|education verification)\b/i;
+
 const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
 
 /**
@@ -214,7 +225,7 @@ export function classifyStandingStatement(text: string): StandingClassification 
   if (AT_WILL.test(statement) || (!dataMatched && NOTICE_READ.test(statement)) || TEMPORARY.test(statement) || EEO_STATEMENT.test(statement)) {
     groups.push("acknowledgment");
   }
-  if (AUTHORIZATION.test(statement) || (ARBITRATION.test(statement) && ARBITRATION_VERB.test(statement))) groups.push("authorization");
+  if (AUTHORIZATION.test(statement) || (ARBITRATION.test(statement) && ARBITRATION_VERB.test(statement)) || (SCREENING_NOTICE.test(statement) && !statement.includes("?"))) groups.push("authorization");
   const factGroups = factGroupsOf(statement);
   return {
     groups,

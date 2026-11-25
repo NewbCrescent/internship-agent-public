@@ -473,6 +473,19 @@ async function main(): Promise<void> {
     failures.push(`workday covered degree: degrees not chosen: ${JSON.stringify(coveredState.education)}`);
   }
 
+  // Synthetic copy of the lists micron.wd1 offered on 2026-11-25 (run <run id>): a B.A. takes the one general
+  // "Bachelor's Level Degree", and "Computer Science" the one field differing only by a plural ending.
+  const micronTab = await launched.newPage();
+  await micronTab.goto(`${workdayUrl}?lists=micron`);
+  const micronWorkday = createWorkdayPage(micronTab);
+  await micronWorkday.enterApplication();
+  const micronWalk = await walkWorkdayApplication(micronWorkday, planWorkday, { mode: "fill", history: historyOptions });
+  const micronState = await fixtureState(micronTab);
+  if (micronWalk.outcome !== "review" || micronState.education[0]?.degree !== "Bachelor's Level Degree" || micronState.education[0]?.field !== "Computer sciences") {
+    failures.push(`workday Micron lists: expected Review with "Bachelor's Level Degree" and "Computer sciences", got ${micronWalk.outcome} ${JSON.stringify(micronState.education)} (${micronWalk.pauses
+      .filter((pause) => pause.status === "open").map((pause) => `${pause.fieldId}: ${pause.question}`).join(" | ")})`);
+  }
+
   const blockedTab = await launched.newPage();
   await blockedTab.goto(workdayUrl);
   const blockedWorkday = createWorkdayPage(blockedTab);

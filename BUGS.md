@@ -120,6 +120,21 @@ confirmation) from a session the candidate opens, then a Paylocity walker
 with a disposable-Chromium regression; until then `paylocity` stays in
 `ATS_KINDS_NEEDING_APPROVAL`.
 
+### Long accuracy certifications on Workday text boxes are read clipped
+
+Found 2026-11-25 on the real workspace, in pass 10. On neogen.wd5
+(<run id>) the run paused on a required multi-line text box (not a
+checkbox) under "I verify that the information given by me in this
+application is true, accurate and complete. I understand that if I have
+given false information …". Form recognition keeps 300 characters of a
+label (`MAX_LABEL` in `packages/browser/src/form-recognition.ts`, the
+`browserFieldSchema` label limit), so the label was read clipped ("…")
+and the rest, where any request to type a name would be, was not
+recorded. A clipped statement is never accepted and the visible part
+names no signature, so the box waits for the candidate. Next step: keep
+the full label for statement classification (a recognition and schema
+change) so a real run shows what the box asks.
+
 ## Resolved
 
 ### Workday ignored an account submit made within 500 ms of the form appearing
@@ -575,6 +590,49 @@ row then asks with the offered options
 `testing-harness/domain/application-history.test.ts` (`pnpm
 test:domain`) and the GED-first degree list in the `?widgets=real`
 scenario of `testing-harness/browser/fixture-run.ts`.
+
+### Workday's "Bachelor's Level Degree" and "Computer sciences" options were not matched
+
+Found 2026-11-25 on the real workspace, in pass 10. On micron.wd1
+(<run id>) the college row paused on Degree and Field of Study. Micron's
+degree list offers "Bachelor's Level Degree", which the general
+bachelor's rule did not read because of the word "Level", and its
+field-of-study search offered "Computer sciences", which the word match
+did not take for "Computer Science". `chooseDegreeOption` now reads
+"Bachelor's Level Degree" as a general bachelor's and picks only when
+exactly one option of the same kind, or else exactly one general option,
+fits; two that fit equally make the row ask. Fields of study use
+`matchFieldOfStudyOption`: the same words, then the one option whose
+words differ only by a plural ending (two such options ask), then the
+existing containing match (`packages/domain/src/application-history.ts`,
+`packages/browser/src/ats/workday-history.ts`). Regression: the new
+cases in `testing-harness/domain/application-history.test.ts` (`pnpm
+test:domain`) and the `?lists=micron` scenario of
+`testing-harness/browser/fixture-run.ts`. Open: Micron's high-school row
+read no degree options ("Options: ."); high-school rows wait on the
+candidate.
+
+### Background-check and drug-screen notices were left for the candidate
+
+Found 2026-11-25 on the real workspace, in pass 10. On littelfuse.wd1
+(<run id>) two required lists offering "Select One", "Acknowledged" and
+"Not acknowledged" paused: "Subject to applicable federal and/or state
+law, you will be required at some point in the process to submit to a
+criminal background check, employment verification, and education
+verification. …" and "… you will be required post interview process to
+submit to a post-offer drug screen." Neither states a fact about the
+candidate; each acknowledges a background-check or drug-test
+requirement, which `INTERNSHIP_AGENT_SIGN_ATTESTATIONS` covers. Cause:
+the whitelist's authorization phrasing needed a verb such as "I
+authorize" or "I consent to". `classifyStandingStatement` now also counts
+a statement that the process will require submitting to a background
+check, employment or education verification, or a drug screen as such an
+authorization when it asks no question; under the attestation setting
+its one affirmative option ("Acknowledged") is chosen and the exact text
+logged on the timeline (`packages/domain/src/standing-consent.ts`).
+Regression: the new cases in `testing-harness/domain/standing-consent.test.ts`
+(`pnpm test:domain`) and `testing-harness/browser-worker/standing-consent.test.ts`
+(`pnpm test:browser-worker:fast`).
 
 ### Start-date questions in other words were not answered, and Workday date fields were not typed
 

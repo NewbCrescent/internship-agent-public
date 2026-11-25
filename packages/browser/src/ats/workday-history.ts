@@ -2,6 +2,7 @@ import type { Locator, Page } from "playwright-core";
 
 import {
   chooseDegreeOption,
+  matchFieldOfStudyOption,
   matchPromptOption,
   promptSearchTerms,
   type ApplicationHistory,
@@ -366,7 +367,7 @@ async function fillEducationRow(page: Page, scope: Locator, row: EducationRow, r
   const fieldAnswer = answers.get(id("field"));
   const fieldWanted = row.fieldOfStudy ?? fieldAnswer ?? null;
   if (fieldWanted) {
-    await setChoice(page, scope, fieldMatch, fieldWanted, (options) => matchPromptOption(fieldWanted, options), id("field"), basis("fieldOfStudy"), record, fieldAnswer);
+    await setChoice(page, scope, fieldMatch, fieldWanted, (options) => matchFieldOfStudyOption(fieldWanted, options), id("field"), basis("fieldOfStudy"), record, fieldAnswer);
   } else if (await requiredAndEmpty(page, scope, fieldMatch)) {
     // Nothing saved states this row's field of study (a high school): ask before the step is saved.
     record.ask(id("field"), id("field"), `Workday requires a field of study for ${row.school}, and none is saved for it. Answer with the field of study to enter.`);

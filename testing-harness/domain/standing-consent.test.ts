@@ -322,3 +322,25 @@ describe("electronic signatures", () => {
     expect(affirmativeOption(["No", "Decline"])).toBe(null);
   });
 });
+
+describe("background-check and drug-screen notices (littelfuse.wd1, 2026-11-25)", () => {
+  const BACKGROUND_NOTICE = "Subject to applicable federal and/or state law, you will be required at some point in the process to submit to a criminal background check, employment verification, and education verification. Please note that a criminal conviction will not necessarily disqualify you from employment.";
+  const DRUG_NOTICE = "Subject to applicable federal and/or state law, and subject to your receipt of a conditional offer of employment, you will be required post interview process to submit to a post-offer drug screen.";
+
+  it.each([["background check", BACKGROUND_NOTICE], ["drug screen", DRUG_NOTICE]])("signs the %s notice as an authorization only under the attestation setting", (_name, statement) => {
+    const classified = classifyStandingStatement(statement);
+    expect(classified.fact).toBe(false);
+    expect(classified.groups).toEqual(["authorization"]);
+    expect(standingStatementDecision(statement, ATTESTATIONS_ONLY)).toEqual({ verdict: "accept", setting: "sign_attestations", groups: ["authorization"] });
+    expect(standingStatementDecision(statement, DATA_ONLY).verdict).toBe("needs-setting");
+    expect(standingStatementDecision(statement, NONE).verdict).toBe("needs-setting");
+  });
+
+  it("never takes a question about a background check or drug screen", () => {
+    for (const question of [
+      "If required, will you submit to a background check and drug screen?",
+      "You will be required to submit to a background check. Are you willing to do so?",
+      "Are you willing to undergo a background check?"
+    ]) expect(standingStatementDecision(question, BOTH).verdict).not.toBe("accept");
+  });
+});
