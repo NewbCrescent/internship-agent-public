@@ -19,7 +19,13 @@ describe("offer-relative start windows (startWindowDays)", () => {
     ["3 months or more", { min: 90, max: Infinity }],
     ["10 days", { min: 1, max: 10 }],
     ["Other", null],
-    ["Summer 2027", null]
+    ["Summer 2027", null],
+    // Offer-relative options that say so (micron.wd1, 2026-11-25; Track 32).
+    ["Immediately after offer acceptance", { min: 0, max: 0 }],
+    ["Within 1 month after offer acceptance", { min: 1, max: 30 }],
+    ["Within 2 months after offer acceptance", { min: 1, max: 60 }],
+    ["More than 2 months after offer acceptance", { min: 60, max: Infinity }],
+    ["After Graduation (For current grads)", null]
   ])("reads %s", (option, window) => {
     expect(startWindowDays(option)).toEqual(window);
   });
@@ -44,6 +50,22 @@ describe("start bucket from today and the available start date (startBucketOptio
     expect(startBucketOption(BUCKETS, "not-a-date", TODAY)).toBeNull();
     expect(startBucketOption(BUCKETS, "2027-02-30", TODAY)).toBeNull();
     expect(startBucketOption(["2 weeks", "Within 2 weeks"], "2026-11-30", TODAY)).toBeNull();
+  });
+
+  it("picks an \"after offer acceptance\" bucket, and keeps the tie rule between two \"Within\" buckets (Track 32)", () => {
+    const offer = [
+      "Select One",
+      "Immediately after offer acceptance",
+      "Within 1 month after offer acceptance",
+      "Within 2 months after offer acceptance",
+      "More than 2 months after offer acceptance",
+      "After Graduation (For current grads)"
+    ];
+    const today = "2026-11-25";
+    expect(startBucketOption(offer, "2027-05-15", today)?.option).toBe("More than 2 months after offer acceptance");
+    expect(startBucketOption(offer, "2027-01-10", today)?.option).toBe("Within 2 months after offer acceptance");
+    expect(startBucketOption(offer, "2026-12-10", today)).toBeNull();
+    expect(startBucketOption(offer, "2026-11-25", today)?.option).toBe("Immediately after offer acceptance");
   });
 });
 

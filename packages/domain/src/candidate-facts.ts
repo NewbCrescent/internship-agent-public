@@ -460,6 +460,15 @@ export const factDefinitions = {
     reusePolicy: "auto",
     explicitUserSourceRequired: true
   },
+  f1_optional_practical_training: {
+    label: "On or eligible for F-1 Optional Practical Training (OPT)",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "sensitive",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
   salary_expectation: {
     label: "Salary expectation",
     valueType: "text",
@@ -515,6 +524,7 @@ export const candidateFactKeySchema = z.enum([
   "us_person",
   "us_citizen_or_national",
   "us_citizen_or_permanent_resident",
+  "f1_optional_practical_training",
   "salary_expectation"
 ]);
 

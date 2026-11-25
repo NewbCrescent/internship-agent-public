@@ -6,7 +6,8 @@ import { booleanOption } from "./standard-answers";
  * posting's advertised range, own-expense relocation picks its option (or
  * "already located near the city" when the profile's place is the posting's
  * one place), the available start date picks an offer-relative bucket
- * ("2–4 weeks", "6+ weeks") counted from today, and background-check
+ * ("2–4 weeks", "6+ weeks", "Within 1 month after offer acceptance") counted
+ * from today, and background-check
  * willingness picks Yes or No. Each rule returns null rather than guess, so
  * the field pauses.
  */
@@ -41,10 +42,12 @@ const PLUS = new RegExp(`^(\\d+)\\s*\\+\\s*${UNIT}$`);
 const MORE_THAN = new RegExp(`^(?:more than|over|at least|longer than) (\\d+)\\s*${UNIT}$`);
 const OR_MORE = new RegExp(`^(\\d+)\\s*${UNIT} or (?:more|longer)$`);
 const UP_TO = new RegExp(`^(?:(?:within|less than|under|up to|in) )?(\\d+)\\s*${UNIT}$`);
+// "Within 1 month after offer acceptance" (micron.wd1, 2026-11-25): the window counts from the offer, as every bucket does.
+const OFFER_SUFFIX = /\s*\b(?:after|from|following|of)\s+(?:(?:the|an|my)\s+)?(?:offer(?:\s+acceptance)?|acceptance(?:\s+of\s+(?:(?:the|an)\s+)?offer)?|accepting\s+(?:(?:the|an)\s+)?offer)$/;
 
 /** The days from an offer an option allows ("2-4 weeks" is 14 to 28; "6+ weeks" is 42 or more); null when it names none. */
 export function startWindowDays(option: string): { min: number; max: number } | null {
-  const key = optionKey(option);
+  const key = optionKey(option).replace(OFFER_SUFFIX, "");
   if (IMMEDIATE.test(key)) return { min: 0, max: 0 };
   let match = RANGE.exec(key);
   if (match) {

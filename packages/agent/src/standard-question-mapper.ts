@@ -5,7 +5,8 @@ import { mentionsCompany, SAN_FRANCISCO, type CandidateFactKey, type FactScope, 
  * questions (citizenship and export control, clearance, criminal history,
  * debarment, restrictive covenants, conflicts of interest, relatives in
  * government or health care, living within 50 miles of a place, Department
- * of Defense work, salary expectations). Returns null when no group matches,
+ * of Defense work, salary expectations, F-1 Optional Practical Training).
+ * Returns null when no group matches,
  * so the mapper's later rules run. A question that combines several groups,
  * a negated statement, an open "describe" or "which" question asking for more
  * than a Yes/No, and a question broader or other than the saved fact all
@@ -38,6 +39,11 @@ const HEALTH = /\bhealth ?care (?:professionals?|providers?|practitioners?|worke
 const DISTANCE = /\bwithin\s+(\d{1,4}|fifty)\s*(?:-\s*)?(?:mi\b|miles?\b|mile radius)/;
 const DOD = /\bdepartment of defense\b|\bdod\b|\bdefense (?:projects?|programs?|contracts?|work|customers?|industry|sector)\b/;
 const EMPLOYER_REFERENCE = /\b(?:here|for us|with us|(?:this|our|the)\s+(?:company|organization|organisation|firm|employer))\b/;
+// F-1 Optional Practical Training (KLA, 2026-11-25). The acronym only in capitals, never "opt in"/"opt-out".
+const OPT_WORDS = /\boptional practical training\b/;
+const OPT_ACRONYM = /\b(?:STEM[- ])?OPT\b(?![- ]?(?:in|out|IN|OUT)\b)/;
+const OPT_CURRENT = /\b(?:currently|presently|now)\b[^?]{0,40}\b(?:on|in|using)\b[^?]{0,30}\b(?:optional practical training|(?:stem )?opt)\b|^(?:are|is) you (?:currently |presently )?(?:on|in) (?:a period of )?(?:optional practical training|(?:stem )?opt)\b/;
+const OPT_EXTENSION = /\beligib\w*\b[^?]{0,40}\b(?:(?:stem )?opt|optional practical training)\b[^?]{0,30}\bextension\b|\beligib\w*\b[^?]{0,20}\bstem opt\b/;
 
 type Prepared = {
   text: string;
@@ -109,7 +115,8 @@ export function mapStandardQuestion(question: string, context: QuestionContext):
     relativeGov: RELATIVE.test(n) && GOVERNMENT.test(n),
     familyHealth: RELATIVE.test(n) && HEALTH.test(n),
     distance: DISTANCE.test(n),
-    dod: DOD.test(n) && !clearance
+    dod: DOD.test(n) && !clearance,
+    opt: OPT_WORDS.test(n) || OPT_ACRONYM.test(text)
   };
   const matched = (Object.keys(groups) as Array<keyof typeof groups>).filter((group) => groups[group]);
   if (matched.length === 0) return null;
@@ -131,6 +138,7 @@ export function mapStandardQuestion(question: string, context: QuestionContext):
     case "familyHealth": return familyHealth(prepared);
     case "distance": return distance(prepared);
     case "dod": return dod(prepared);
+    case "opt": return optQuestion(prepared);
   }
 }
 
@@ -295,4 +303,13 @@ function dod(question: Prepared): QuestionMapping {
     return ambiguous("Only concerns about Department of Defense work are saved; answer this one directly.");
   }
   return yesNo(question, "concerns_working_on_dod_projects", "Concerns about working on Department of Defense projects question.");
+}
+
+/** Only "currently on OPT?" and "eligible for the (STEM) OPT extension?" Yes/No questions; a date, a future need, or a negation holds. */
+function optQuestion(question: Prepared): QuestionMapping {
+  const { n } = question;
+  if (!question.yesNo || NEGATION.test(n) || !(OPT_CURRENT.test(n) || OPT_EXTENSION.test(n))) {
+    return ambiguous("Only Yes/No questions about being on F-1 OPT now or eligible for its STEM extension are answered; answer this one directly.");
+  }
+  return yesNo(question, "f1_optional_practical_training", "F-1 Optional Practical Training (OPT) question.");
 }

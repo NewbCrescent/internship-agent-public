@@ -174,6 +174,16 @@ describe("saved answer mappings", () => {
     expect(await mapper.map(group, { companyName: "fixGen" })).toMatchObject({ status: "UNMAPPED" });
     expect(await mapper.map("Have you previously worked at Plaid?", { companyName: "Vandelay", employerSite: "vandelay" })).toMatchObject({ status: "UNMAPPED" });
     expect(await key("Did you work on a team project?")).not.toBe("previously_worked_here");
+    // The posting's company by its leading word (examplebrands.wd5, 2026-11-25), never another company sharing it (Track 32).
+    expect(await mapper.map("Have you worked for Fixturelux before?", { companyName: "Fixturelux Brands", employerSite: "fxbrands" })).toMatchObject({
+      status: "MAPPED", key: "previously_worked_here", scope: { kind: "company", name: "fixturelux brands" }
+    });
+    expect(await mapper.map("Have you worked for Fixturelux Energy before?", { companyName: "Fixturelux Brands", employerSite: "fxbrands" })).toMatchObject({ status: "UNMAPPED" });
+    // A family of companies (a parent group and "any of its subsidiaries") naming neither the posting's company nor the site stays with the candidate (employer-f.wd1).
+    expect(await mapper.map(
+      "Have you worked at Example Financial Group, Great Fixture Insurance Group, or any of its subsidiaries before? If yes, please answer the following question.",
+      { companyName: "Fixture Interstate Insurance", employerSite: "gfig" }
+    )).toMatchObject({ status: "UNMAPPED" });
   });
 
   it("maps age, pronouns, and relatives questions", async () => {
@@ -349,6 +359,15 @@ describe("standard legal and background phrasings (fictional companies and place
     ["Are you a U.S. citizen or national?", { key: "us_citizen_or_national" }],
     ["Are you a U.S. citizen, permanent resident, refugee, or asylee?", { key: "us_person" }],
     ["Do you hold dual citizenship?", "AMBIGUOUS"],
+    // An embargoed-country citizenship question (micron.wd1, 2026-11-25) is not U.S. citizenship.
+    ["All Fixture sites must observe U.S. export control rules that control information that may be provided to persons from Cuba, Iran, North Korea, and Syria. Are you a citizen of, or do you hold dual citizenship with any of these countries?", "AMBIGUOUS"],
+    // F-1 Optional Practical Training (employer-i.wd1, 2026-11-25): only "currently on" and "eligible for the extension" Yes/No questions.
+    ["Are you currently in a period of Optional Practical Training (OPT)?", { key: "f1_optional_practical_training" }],
+    ["Are you eligible for a 24-month OPT extension based upon a US degree in STEM?", { key: "f1_optional_practical_training" }],
+    ["Are you currently on STEM OPT?", { key: "f1_optional_practical_training" }],
+    ["When does your OPT end?", "AMBIGUOUS"],
+    ["Will you need OPT to work during the internship?", "AMBIGUOUS"],
+    ["Are you a U.S. citizen or currently on OPT?", "AMBIGUOUS"],
     // Clearance.
     ["Do you currently hold an active security clearance?", { key: "holds_security_clearance" }],
     ["Do you have an active Secret or Top Secret clearance?", { key: "holds_security_clearance" }],
@@ -418,6 +437,13 @@ describe("standard legal and background phrasings (fictional companies and place
     }
     expect(result, JSON.stringify(result)).toMatchObject({ status: "MAPPED", key: expected.key, method: "deterministic", ...(expected.scope ? { scope: expected.scope } : {}) });
     if (result.status === "MAPPED") expect(result.narrower === true, question).toBe(expected.narrower === true);
+  });
+
+  it("never reads \"opt in\" or \"OPT-IN\" as F-1 OPT", async () => {
+    for (const question of ["Would you like to opt in to text messages?", "OPT-IN: receive job alerts?", "Do you want to OPT IN to job alerts?"]) {
+      const result = await mapper.map(question);
+      expect(result.status === "MAPPED" ? result.key : null, question).not.toBe("f1_optional_practical_training");
+    }
   });
 
   it("keeps relatives at the company on its own key", async () => {
@@ -516,14 +542,18 @@ describe("known-answer gaps from the 2026-11-25 pass (posting wordings, no candi
     for (const question of [
       "What is the earliest date you can start employment?",
       "What is your timeline for starting the internship?",
-      "When can you start internship?"
+      "When can you start internship?",
+      "When would you be available if an offer was accepted?",
+      "When would you be available?"
     ]) {
       expect(await mapper.map(question), question).toMatchObject({ status: "MAPPED", key: "available_start_date", scope: { kind: "global" } });
     }
     for (const question of [
       "Are you able to start internship 2027 Spring AND Summer Semester?",
       "When can you start full-time employment after graduation?",
-      "Start date year"
+      "Start date year",
+      "When would you be available for an interview?",
+      "When would you be available to work weekends?"
     ]) {
       const result = await mapper.map(question);
       expect(result.status === "MAPPED" && result.key === "available_start_date", question).toBe(false);

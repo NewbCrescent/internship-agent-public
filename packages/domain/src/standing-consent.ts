@@ -11,7 +11,8 @@ import { manualOnly } from "./submission-mode";
  *   of applying (the candidate's decision, 2026-11-24).
  * - INTERNSHIP_AGENT_SIGN_ATTESTATIONS=1 signs accuracy certifications,
  *   electronic signatures, acknowledgments (at-will, privacy or applicant
- *   notice, temporary internship, equal-opportunity statement), and
+ *   notice, including a Yes to "Have you read the privacy notice?", temporary
+ *   internship, equal-opportunity statement), and
  *   background-check, drug-test, reference-check, and arbitration
  *   authorizations (including a notice that the process will require a
  *   background check or drug screen, acknowledged).
@@ -152,7 +153,7 @@ const FALSE_STATEMENTS = /\b(?:false|misleading|inaccurate|incomplete)\b[^.]{0,4
 const CONSEQUENCE = /\b(?:result in|grounds for|lead to|cause|may)\b[^.]{0,60}\b(?:disqualif\w*|reject\w*|dismiss\w*|terminat\w*|withdraw\w*|rescind\w*|revo\w*)\b/i;
 
 const AT_WILL = /\bat[- ]will\b/i;
-const NOTICE_READ = /\b(?:acknowledge|have read|read and understand|confirm that i (?:have )?read|reviewed)\b[^.]{0,80}\b(?:privacy (?:notice|policy|statement)|applicant (?:privacy )?notice|notice to applicants|candidate privacy)\b/i;
+const NOTICE_READ = /\b(?:acknowledge|have read|(?:have|did) you (?:read|review(?:ed)?)|read and understand|confirm that i (?:have )?read|reviewed)\b[^.]{0,80}\b(?:privacy (?:notice|policy|statement)|applicant (?:privacy )?notice|notice to applicants|candidate privacy)\b/i;
 const TEMPORARY = /\b(?:internship|position|role|assignment)\b[^.]{0,80}\b(?:temporary|fixed[- ]term|limited (?:duration|term)|seasonal)\b|\bnot (?:a )?(?:guarantee|promise|offer) of (?:full[- ]time|permanent|future|continued) employment\b/i;
 const EEO_STATEMENT = /\b(?:acknowledge|have read|read and understand|understand|reviewed)\b[^.]{0,80}\b(?:equal (?:employment )?opportunity|eeo|affirmative action)\b/i;
 
@@ -310,4 +311,28 @@ export function affirmativeOption(options: string[]): string | null {
     return AFFIRMATIVE.test(text) && !NEGATIVE.test(text);
   });
   return matches.length === 1 ? matches[0]! : null;
+}
+
+/** "Have you read the Fixture Privacy Policy?": a Yes/No question asking whether the candidate read a privacy policy or notice. */
+const PRIVACY_READ_QUESTION = /^(?:have|did) you (?:read|review(?:ed)?)\b[^.?]{0,80}\b(?:privacy (?:policy|notice|statement)|applicant privacy|candidate privacy|data (?:protection|privacy) (?:policy|notice|statement))\b/i;
+
+/** True when a label asks whether the candidate read a privacy policy or notice. */
+export function isPrivacyReadQuestion(label: string): boolean {
+  return PRIVACY_READ_QUESTION.test(normalize(label));
+}
+
+/**
+ * The statement a privacy-policy read question's one affirmative option makes (littelfuse.wd1, 2026-11-25):
+ * the question and that option together ("Have you read the … Privacy Policy? — Yes, I have read and consent
+ * to the Global Privacy Policy"), decided like any statement, so an option that also consents needs the
+ * data-consent setting. Null for another label, a clipped label, no single affirmative option, or a
+ * statement over 300 characters (the basis limit).
+ */
+export function privacyReadStatement(label: string, options: readonly string[]): { option: string; statement: string } | null {
+  const question = normalize(label);
+  if (!PRIVACY_READ_QUESTION.test(question) || question.endsWith("…")) return null;
+  const option = affirmativeOption([...options]);
+  if (!option) return null;
+  const statement = `${question} — ${normalize(option)}`;
+  return statement.length <= 300 ? { option, statement } : null;
 }

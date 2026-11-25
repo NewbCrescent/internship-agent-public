@@ -251,3 +251,18 @@ describe("background-check and drug-screen notices in the planner (littelfuse.wd
     for (const standing of [undefined, ALL_OFF, DATA_ON]) expect(decisionOf(form(notice("notice", label)), "notice", standing).action).toBe("pause");
   });
 });
+
+describe("\"Have you read the privacy policy?\" lists in the planner (littelfuse.wd1, 2026-11-25; Track 32)", () => {
+  const label = "Have you read the Fixture Robotics Privacy Policy?https://careers.fixturerobotics.com/privacy";
+  const consenting = "Yes, I have read and consent to the Global Privacy Policy";
+  const privacy: BrowserField = { id: "privacy", label, kind: "select", required: true, options: ["Select One", consenting, "No"] };
+
+  it("chooses the consenting option under the data-consent setting, logged with the question and option together", () => {
+    expect(decisionOf(form(privacy), "privacy", BOTH_ON)).toMatchObject({
+      action: "choose",
+      value: consenting,
+      basis: { kind: "standing_consent", setting: "accept_data_consent", group: "privacy-policy", statement: `${label} — ${consenting}` }
+    });
+    for (const standing of [undefined, ALL_OFF, ATTEST_ON]) expect(decisionOf(form(privacy), "privacy", standing).action).toBe("pause");
+  });
+});

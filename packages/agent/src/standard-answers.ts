@@ -24,8 +24,10 @@ import type { FactFile } from "./profile-facts";
 
 /**
  * Resolve-time rules for the candidate's standard legal and background
- * answers: the four answers built from saved facts (U.S. person, U.S. citizen
- * or national, U.S. citizen or permanent resident, and the salary rule), the
+ * answers: the five answers built from saved facts (U.S. person, U.S. citizen
+ * or national, U.S. citizen or permanent resident, F-1 OPT (only ever No, from
+ * a saved U.S. citizenship or citizen/national or permanent-resident status),
+ * and the salary rule), the
  * non-solicitation agreement's end date (after it, the agreement answers No
  * and its explanation is not used), and the guard that never lets the
  * explanation name a former employer. Every answer comes from the
@@ -161,6 +163,18 @@ function resolveRule(
       return needs(lookup, "No U.S. citizenship answer is saved; the candidate adds it with pnpm profile:facts.");
     }
     return make(false, status, "Built from your saved export-control status.");
+  }
+
+  if (key === "f1_optional_practical_training") {
+    // OPT and its STEM extension exist only for F-1 students; a U.S. citizen, national, or permanent resident has neither.
+    const citizen = get("us_citizen");
+    if (citizen?.value === true) return make(false, citizen, "Built from your saved U.S. citizenship answer (OPT is for F-1 students).");
+    const status = get("us_person_export_controls");
+    const category = exportCategoryOf(status);
+    if (status && (category === "citizen_or_national" || category === "permanent_resident")) {
+      return make(false, status, "Built from your saved export-control status (OPT is for F-1 students).");
+    }
+    return needs(lookup, "Your saved answers do not say whether you are on or eligible for F-1 OPT; answer it directly.");
   }
 
   if (key === "salary_expectation") {

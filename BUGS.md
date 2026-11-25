@@ -666,6 +666,142 @@ test:agent:retry`). Open: Illumio's <run id> and <run id> captures have no
 network record, so their GDPR acknowledgment text ("please review the
 points below") still refuses them.
 
+### Previous-employment questions naming the employer by its first word were not answered
+
+Found 2026-11-25 on the real workspace, in pass 13. Example Brands'
+"Have you worked for Constellation before?" (examplebrands.wd5, run <run id>)
+paused unmapped although the candidate's saved previous-employment answer
+covers it. Cause: the mapper took a question as this employer's only when it
+said "here" or "this company", named the posting's whole company name
+(`mentionsCompany`), or spelled the Workday tenant; "Constellation" is
+neither the whole name nor the tenant (examplebrands). Fix: `mentionsCompanyLead`
+(`packages/domain/src/company-name.ts`) also counts the first word or words
+(never all) of the normalized company name, capitalized, as whole words
+right after "for", "at", "by", "with", "within" or "of" (optionally "the"),
+and never followed by another capitalized word ("Constellation Energy" is
+another company); the first word needs at least 4 letters and a one-word
+name never matches here. The mapper's previous-employment rule uses it
+(`packages/agent/src/question-mapper.ts`); the scope stays the posting's
+company and a saved No still never answers a question that also names a
+company with a saved Yes. National Interstate's "Have you worked at American
+Financial Group, Great American Insurance Group, or any of its subsidiaries
+before?" (employer-f.wd1, run <run id>) deliberately stays with the candidate: it
+names a family of companies, not the posting's company, and no saved answer
+covers every company in it. Regression: the `mentionsCompanyLead` cases in
+`testing-harness/domain/candidate-facts.test.ts` (`pnpm test:domain`), the
+leading-word and family-of-companies cases in
+`testing-harness/agent/question-mapper.test.ts` (`pnpm test:agent`), and the
+saved-No and saved-Yes-company cases in
+`testing-harness/agent/memory-service.integration.test.ts` (`pnpm
+test:memory`). Not verified live: the run was not retried in this change.
+
+### F-1 OPT questions were not answered from the saved citizenship answers
+
+Found 2026-11-25 on the real workspace, in pass 13. KLA's "Are you
+currently in a period of Optional Practical Training…" and "Are you
+eligible for a 24-month OPT extension…" (employer-i.wd1, run <run id>) paused
+unmapped. Cause: no rule read OPT questions, although Optional Practical
+Training exists only for F-1 students, which a U.S. citizen, national or
+permanent resident cannot be. Fix: a derived key
+`f1_optional_practical_training` (`packages/domain/src/candidate-facts.ts`,
+`packages/domain/src/standard-answers.ts`; never stored, like the other
+derived standard answers, and excluded from `pnpm profile:facts` in
+`packages/agent/src/profile-facts.ts`). The standard mapper
+(`packages/agent/src/standard-question-mapper.ts`) maps only Yes/No
+"currently on (in a period of) OPT" and "eligible for the (STEM) OPT
+extension" questions, the acronym only in capitals and never "opt in" or
+"opt-out"; another OPT question (a date, a future need, a negation, or one
+combined with citizenship) holds. The resolver
+(`packages/agent/src/standard-answers.ts`) answers No only from a saved Yes
+to U.S. citizenship or a saved citizen/national or permanent-resident
+export-control status; anything else asks the candidate, and it never
+answers Yes. Sponsorship questions that mention STEM OPT still map to
+sponsorship. Regression: the OPT rows in
+`testing-harness/agent/question-mapper.test.ts` (`pnpm test:agent`), the
+derived-key case in `testing-harness/domain/standard-answers.test.ts`
+(`pnpm test:domain`), and the OPT cases in
+`testing-harness/agent/memory-service.integration.test.ts` (`pnpm
+test:memory`). Not verified live: the run also holds candidate questions
+(years of experience related to the position, the AI-matching choice, the
+basic job requirements) and was not retried.
+
+### Offer-relative availability options ending "after offer acceptance" were not read
+
+Found 2026-11-25 on the real workspace, in pass 12. Micron's "When would
+you be available if an offer was accepted?" (micron.wd1, run <run id>),
+offering "Immediately after offer acceptance", "Within 1 month after offer
+acceptance", "Within 2 months after offer acceptance", "More than 2 months
+after offer acceptance" and "After Graduation (For current grads)", paused
+unmapped. Cause: the mapper's start-date wording did not include "when
+would you be available", and `startWindowDays` read only bare buckets
+("Within 1 month"), so the "after offer acceptance" suffix hid every
+window. Fix: the start-date wording also reads "When (can, could, would,
+will) you be available?" alone, "… if (after, once, upon) an offer is
+accepted", "… to join or commence" and "… for employment or this role",
+never "for an interview" or "to work weekends"
+(`packages/agent/src/question-mapper.ts`); `startWindowDays` strips a
+trailing "after (from, following) offer acceptance" before reading the
+window (`packages/domain/src/fact-options.ts`), and the existing rule picks
+the matching bucket with the latest start from today and the saved
+available start date; a tie between two buckets still pauses, and "After
+Graduation" names no window. Regression: the offer-suffix rows and bucket
+cases in `testing-harness/domain/fact-options.test.ts` (`pnpm
+test:domain`), the start-date wording cases in
+`testing-harness/agent/question-mapper.test.ts` (`pnpm test:agent`), and the
+planner case in `testing-harness/browser-worker/consent-and-facts.test.ts`
+(`pnpm test:browser-worker:fast`). Not verified live: the run also holds
+questions the candidate was asked about and was not retried; its
+embargoed-country citizenship question stays with the candidate.
+
+### "Have you read the privacy policy?" lists were held although the option consents
+
+Found 2026-11-25 on the real workspace, in pass 13. Littelfuse's "Have you
+read the Littelfuse Privacy Policy?" list (littelfuse.wd1, run <run id>),
+offering "Yes, I have read and consent to the Global Privacy Policy" and
+"No", paused although the candidate's standing data-consent setting covers
+privacy-policy consent given as a condition of applying. Cause: the
+standing classifier read only the label, a question that consents to
+nothing by itself; the consent is in the option. Fix: a list or radio set
+whose label asks whether the candidate read a privacy policy or notice
+(`isPrivacyReadQuestion`) is decided on the question and its one affirmative
+option together ("<question> — <option>", `privacyReadStatement` in
+`packages/domain/src/standing-consent.ts`), like any statement, in
+`standingFieldDecision` (`packages/browser/src/standing-fields.ts`): an
+option that also consents is privacy-policy consent under the data-consent
+setting, a bare "Yes" is a privacy-notice acknowledgment under the
+attestation setting, a fact or marketing option vetoes, and a clipped label
+never counts. The decision's basis and the timeline entry carry that
+combined exact text. Regression: the privacy-read cases in
+`testing-harness/domain/standing-consent.test.ts` (`pnpm test:domain`) and
+`testing-harness/browser-worker/standing-consent.test.ts` (`pnpm
+test:browser-worker:fast`). Not verified live: the run was not retried in
+this change.
+
+### A Workday radio whose accessible name is not its label could not be chosen
+
+Found 2026-11-25 on the real workspace, in pass 13. Example
+Nonprofit's "Have you previously been employed by Example
+Nonprofit?" (employer-e.wd5, run <run id>) was mapped and answered from
+the saved answer, but the fill failed: "The agent could not fill …: the
+page did not accept the value." The cause is not confirmed: no form-step DOM
+was captured. The Workday adapter chose a radio with Playwright's
+`getByLabel(option, { exact: true })`, which reads the accessible name,
+while the form is read by each radio's `label[for]` text; a radio labelled
+by its question (aria-labelledby) has the question as its accessible name,
+so the planned option is not found. Fix (hardening): `chooseWorkdayRadio`
+(`packages/browser/src/ats/workday.ts`) finds the one radio whose label
+read as `collectWorkdayControlsIn` reads it (`label[for]` text, else
+aria-label, else value) is the planned option, checks it, else clicks it
+through its label (else a dispatched click), and reads it back for up to
+2 s; no match, several matches, or a choice the page did not keep pauses
+with that plain reason, never echoing the option. Regression: the `?gaps=1`
+previous-worker radios of
+`testing-harness/browser/fixtures/workday-application.html` are labelled by
+their question, and `testing-harness/browser/fixture-run.ts` checks the
+choice reads No (`xvfb-run -a pnpm test:browser:fixture`); with the old
+lookup the walk pauses on that radio. Not verified live: Compassion's real
+radio markup is unknown.
+
 ### Start-date questions in other words were not answered, and Workday date fields were not typed
 
 Found 2026-11-25 on the real workspace, in manual pass 5. Neogen's

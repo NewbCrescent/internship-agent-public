@@ -119,6 +119,19 @@ describe("saved facts that pick an offered option", () => {
     expect(decide(start, { resolution: DATE }).decision.action).toBe("pause");
   });
 
+  it("picks an \"after offer acceptance\" bucket for \"When would you be available if an offer was accepted?\" (micron.wd1; Track 32)", () => {
+    const available = list("avail", "When would you be available if an offer was accepted?", [
+      "Select One",
+      "Immediately after offer acceptance",
+      "Within 1 month after offer acceptance",
+      "Within 2 months after offer acceptance",
+      "More than 2 months after offer acceptance",
+      "After Graduation (For current grads)"
+    ]);
+    expect(decide(available, { resolution: DATE, standing: { acceptDataConsent: false, signAttestations: false, today: "2026-11-25" } }).decision)
+      .toMatchObject({ action: "choose", value: "More than 2 months after offer acceptance", basis: { kind: "fact", key: "available_start_date" } });
+  });
+
   it("answers background-check willingness from its own fact", () => {
     const check = list("bg", "Are you willing to undergo a background check?", ["Yes, I am willing", "No"]);
     expect(decide(check, { resolution: resolved("willing_background_check", true, "Yes") }).decision)

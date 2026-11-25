@@ -53,3 +53,29 @@ export function mentionsSiteTenant(text: string, tenant: string): boolean {
   }
   return false;
 }
+
+const LEAD_PREPOSITION = /\b(?:for|at|by|with|within|of)\s+(?:the\s+)?$/i;
+
+/**
+ * True when the text names the company by its leading word or words alone, as "Have you worked for
+ * Constellation before?" names Example Brands: the first one or more (never all) words of the
+ * normalized name, as whole words with a capital first letter, right after "for", "at", "by", "with",
+ * "within" or "of" (optionally "the"), and not followed by another capitalized word ("Constellation
+ * Energy" names another company). The first word needs at least 4 letters; a one-word name never
+ * matches here (mentionsCompany decides it). Exact, never fuzzy.
+ */
+export function mentionsCompanyLead(text: string, companyName: string): boolean {
+  const words = normalizeCompanyName(companyName).split(" ").filter(Boolean);
+  if (words.length < 2 || words[0]!.length < 4) return false;
+  const plain = text.normalize("NFKD").replace(/[̀-ͯ]/g, "");
+  for (let count = 1; count < words.length; count += 1) {
+    const pattern = new RegExp(`(?<![A-Za-z0-9])${words.slice(0, count).join("[^A-Za-z0-9]+")}(?![A-Za-z0-9])`, "gi");
+    for (const match of plain.matchAll(pattern)) {
+      if (!/^[A-Z]/.test(match[0])) continue;
+      if (!LEAD_PREPOSITION.test(plain.slice(0, match.index))) continue;
+      if (/^\s+[A-Z]/.test(plain.slice(match.index + match[0].length))) continue;
+      return true;
+    }
+  }
+  return false;
+}

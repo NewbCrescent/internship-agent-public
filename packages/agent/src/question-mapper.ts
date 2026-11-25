@@ -1,5 +1,5 @@
 import { isHearAboutQuestion } from "@internship-agent/browser";
-import { mentionsCompany, mentionsSiteTenant, normalizeCompanyName, type CandidateFactKey, type FactScope, type QuestionContext, type QuestionMapping } from "@internship-agent/domain";
+import { mentionsCompany, mentionsCompanyLead, mentionsSiteTenant, normalizeCompanyName, type CandidateFactKey, type FactScope, type QuestionContext, type QuestionMapping } from "@internship-agent/domain";
 import { readPlace } from "@internship-agent/jobs";
 
 import { mapStandardQuestion } from "./standard-question-mapper";
@@ -21,9 +21,11 @@ const NOT_WORK_AUTHORIZATION = /\b(?:government|federal|public sector|dod|depart
 const AUTHORIZED_TO_WORK = /\b(?:legally )?authori[sz]ed to work\b|\bwork authori[sz]ation\b/i;
 // Ashby's short-titled form: "Visa Support: Do you require any visa support to work in the U.S.?" (Track 22).
 const SPONSORSHIP = /\b(?:require|need).{0,30}(?:sponsor|sponsorship)\b|\bvisa sponsorship\b|\b(?:require|need)\b.{0,30}\bvisa support\b/i;
-// Start-date questions in other words ("earliest date you can start", "when can you start", "timeline for starting");
-// a full-time or after-graduation start and a yes/no question ("Are you able to start …?") are not the internship start date.
-const START_WORDING = /\b(?:earliest|soonest)\b.{0,40}\b(?:start|begin)\w*|\bwhen (?:can|could|would|will) you (?:be (?:able|available) to )?(?:start|begin)\b|\btimeline for (?:starting|beginning)\b/i;
+// Start-date questions in other words ("earliest date you can start", "when can you start", "timeline for starting",
+// "When would you be available if an offer was accepted?" (micron.wd1, 2026-11-25), "When would you be available?");
+// availability for an interview or to work a schedule ("to work weekends"), a full-time or after-graduation start, and
+// a yes/no question ("Are you able to start …?") are not the internship start date.
+const START_WORDING = /\b(?:earliest|soonest)\b.{0,40}\b(?:start|begin)\w*|\bwhen (?:can|could|would|will) you (?:be (?:able|available) to )?(?:start|begin)\b|\btimeline for (?:starting|beginning)\b|\bwhen (?:can|could|would|will) you be available\b(?:\s+(?:to (?:join|commence)\b|(?:if|after|once|upon) (?:an |the |you )?(?:accept\w* )?(?:an |the |our |this )?offer\b|for (?:employment|this (?:role|position|internship|job))\b)|\s*\?\s*\*?$)/i;
 const NOT_INTERNSHIP_START = /\bfull[- ]?time\b|\bafter (?:you )?graduat\w*|\bpost[- ]?graduat\w*/i;
 const YES_NO_LEAD = /^(?:are|is|do|does|did|have|has|had|can|could|will|would|should)\b/i;
 // Relocation the candidate pays for is its own answer (willing_to_relocate_at_own_expense).
@@ -202,12 +204,14 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
     }
 
     // Previous employment only for this employer: "here", "this company", the
-    // posting's company by name, or the employer that runs the Workday site
-    // (its tenant, e.g. Highmark Health for an enGen posting on
-    // highmarkhealth.wd1). Another company's name stays unmapped.
+    // posting's company by name or by its leading word(s) ("Constellation" for
+    // Example Brands), or the employer that runs the Workday site (its
+    // tenant, e.g. Highmark Health for an enGen posting on highmarkhealth.wd1).
+    // Another company's name stays unmapped.
     if (PREVIOUS_EMPLOYMENT.test(normalized) &&
       (EMPLOYER_REFERENCE.test(normalized) ||
         (context.companyName && mentionsCompany(trimmed, context.companyName)) ||
+        (context.companyName && mentionsCompanyLead(trimmed, context.companyName)) ||
         (context.employerSite && mentionsSiteTenant(trimmed, context.employerSite)))) {
       return {
         status: "MAPPED",

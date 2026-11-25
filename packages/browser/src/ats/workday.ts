@@ -494,7 +494,7 @@ export function createWorkdayPage(page: Page): WorkdayPage {
     chooseOption: async (field, option) => {
       const box = container(field);
       if (await box.locator('input[type="radio"]').count()) {
-        await box.getByLabel(option, { exact: true }).check();
+        await chooseWorkdayRadio(page, box, option);
         return;
       }
       if (!(await box.locator('button[aria-haspopup="listbox"]').count())) {
@@ -639,6 +639,44 @@ export function createWorkdayPage(page: Page): WorkdayPage {
       return { moved: false, errors: ["Workday did not move to the next step within 20 seconds."] };
     }
   };
+}
+
+/**
+ * Checks the radio whose option label, read as collectWorkdayControlsIn reads it (its label[for] text, else
+ * aria-label, else value), is the planned option, so a radio whose accessible name differs from its label
+ * (aria-labelledby pointing at the question) is still found. A radio Playwright cannot check is clicked
+ * through its label (else a dispatched click) and read back for up to 2 s. Throws FieldUnfillable with a
+ * plain reason (the option is never echoed): no or several radios carry the option, or the page did not
+ * keep the choice.
+ */
+async function chooseWorkdayRadio(page: Page, box: Locator, option: string): Promise<void> {
+  await ensureNameShim(page);
+  const index = await box.evaluate((element, wanted) => {
+    const textOf = (node: Element | null) => (node?.textContent ?? "").replace(/\s+/g, " ").trim();
+    const labelOf = (radio: Element) => textOf(element.ownerDocument.querySelector(`label[for="${CSS.escape(radio.id)}"]`)) ||
+      radio.getAttribute("aria-label") || radio.getAttribute("value") || "";
+    const matches = Array.from(element.querySelectorAll('input[type="radio"]'))
+      .map((radio, position) => ({ position, label: labelOf(radio) }))
+      .filter((entry) => entry.label === wanted);
+    return matches.length === 1 ? matches[0]!.position : matches.length === 0 ? -1 : -2;
+  }, option);
+  if (index === -1) throw new FieldUnfillable("the option was not found");
+  if (index === -2) throw new FieldUnfillable("more than one option matched");
+  const radio = box.locator('input[type="radio"]').nth(index);
+  if (await radio.isChecked().catch(() => false)) return;
+  try {
+    await radio.check({ timeout: 10_000 });
+  } catch {
+    const id = await radio.getAttribute("id").catch(() => null);
+    const label = id ? page.locator(`label[for="${id.replace(/["\\]/g, "\\$&")}"]`) : null;
+    if (label && (await label.count().catch(() => 0)) > 0) await label.first().click({ timeout: 10_000 }).catch(() => undefined);
+    else await radio.dispatchEvent("click").catch(() => undefined);
+  }
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (await radio.isChecked().catch(() => false)) return;
+    await page.waitForTimeout(200);
+  }
+  throw new FieldUnfillable("the site did not keep the choice");
 }
 
 /**

@@ -5,8 +5,10 @@ import {
   classifyStandingStatement,
   factGroupsOf,
   type FactGroup,
+  isPrivacyReadQuestion,
   isSignatureDateLabel,
   isSignatureLabel,
+  privacyReadStatement,
   signatureDateValue,
   standingConsentSettings,
   standingStatementDecision,
@@ -342,5 +344,36 @@ describe("background-check and drug-screen notices (littelfuse.wd1, 2026-11-25)"
       "You will be required to submit to a background check. Are you willing to do so?",
       "Are you willing to undergo a background check?"
     ]) expect(standingStatementDecision(question, BOTH).verdict).not.toBe("accept");
+  });
+});
+
+describe("\"Have you read the privacy policy?\" lists (littelfuse.wd1, 2026-11-25; Track 32)", () => {
+  const LABEL = "Have you read the Fixture Robotics Privacy Policy?https://example.com/privacy";
+  const CONSENTING = "Yes, I have read and consent to the Global Privacy Policy";
+
+  it("recognizes a privacy-policy read question and nothing else", () => {
+    expect(isPrivacyReadQuestion(LABEL)).toBe(true);
+    expect(isPrivacyReadQuestion("Did you review the Fixture Robotics Candidate Privacy Notice?")).toBe(true);
+    expect(isPrivacyReadQuestion("Have you read the job description?")).toBe(false);
+  });
+
+  it("builds the statement from the question and its one affirmative option", () => {
+    expect(privacyReadStatement(LABEL, ["Select One", CONSENTING, "No"])).toEqual({ option: CONSENTING, statement: `${LABEL} — ${CONSENTING}` });
+    expect(privacyReadStatement("Have you read the Fixture Robotics Privacy Policy…", ["Select One", CONSENTING, "No"])).toBeNull();
+    expect(privacyReadStatement(LABEL, ["Yes", "Yes, I agree", "No"])).toBeNull();
+    expect(privacyReadStatement("Have you read the job description?", ["Yes", "No"])).toBeNull();
+  });
+
+  it("accepts a consenting option under the data-consent setting and a bare Yes as an acknowledgment", () => {
+    const consent = privacyReadStatement(LABEL, ["Select One", CONSENTING, "No"])!.statement;
+    const accepted = standingStatementDecision(consent, BOTH);
+    expect(accepted).toMatchObject({ verdict: "accept", setting: "accept_data_consent" });
+    expect(accepted.verdict === "accept" && accepted.groups).toContain("privacy-policy");
+    expect(standingStatementDecision(consent, ATTESTATIONS_ONLY).verdict).toBe("needs-setting");
+    const plain = privacyReadStatement(LABEL, ["Yes", "No"])!.statement;
+    expect(standingStatementDecision(plain, BOTH)).toEqual({ verdict: "accept", setting: "sign_attestations", groups: ["acknowledgment"] });
+    expect(standingStatementDecision(plain, DATA_ONLY).verdict).toBe("needs-setting");
+    const fact = privacyReadStatement(LABEL, ["Yes, and I am a U.S. citizen", "No"])!.statement;
+    expect(standingStatementDecision(fact, BOTH).verdict).toBe("fact");
   });
 });

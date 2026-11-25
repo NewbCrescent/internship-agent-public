@@ -139,6 +139,11 @@ describe("company-, country-, and protected-scoped answers", () => {
     expect(await resolveCandidateQuestion("Have you ever been employed by Fixture Health or Vandelay?", site, { database })).toMatchObject({ status: "NEEDS_INPUT" });
     expect(await resolveCandidateQuestion("Did you work here before?", { companyName: "Vandelay Inc." }, { database })).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
 
+    // The posting's company named by its leading word (Track 32): the saved No answers it, but never alongside a saved-Yes company.
+    const lead = { companyName: "Fixturelux Brands", employerSite: "fxbrands" };
+    expect(await resolveCandidateQuestion("Have you worked for Fixturelux before?", lead, { database })).toMatchObject({ status: "RESOLVED", displayAnswer: "No" });
+    expect(await resolveCandidateQuestion("Have you worked for Fixturelux or Vandelay before?", lead, { database })).toMatchObject({ status: "NEEDS_INPUT" });
+
     // A remembered Yes with no company named is used once, never saved globally.
     const before = factCount(database);
     expect(await answerCandidateQuestion({ question, answer: "yes", remember: true, context: {} }, { database })).toMatchObject({ status: "ANSWERED_ONCE" });
@@ -329,7 +334,35 @@ describe("standard legal and background answers (fictional answers)", () => {
     expect(await resolve(database, "Are you a U.S. citizen or lawful permanent resident?")).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
     expect(await resolve(database, "Are you a U.S. citizen or national?")).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
     expect(() => save(database, "us_person", true)).toThrow(/never stored/);
+    // F-1 OPT (Track 32): a saved U.S. citizenship Yes decides No; the answer is never stored.
+    for (const question of [
+      "Are you currently in a period of Optional Practical Training (OPT)?",
+      "Are you eligible for a 24-month OPT extension based upon a US degree in STEM?"
+    ]) {
+      expect(await resolve(database, question), question).toMatchObject({
+        status: "RESOLVED", displayAnswer: "No", fact: { key: "f1_optional_practical_training", id: "derived:f1_optional_practical_training" }
+      });
+    }
+    expect(() => save(database, "f1_optional_practical_training", false)).toThrow(/never stored/);
     database.close();
+  });
+
+  it("answers F-1 OPT questions No only from a saved citizen or permanent-resident status, and never Yes (Track 32)", async () => {
+    const question = "Are you currently in a period of Optional Practical Training (OPT)?";
+    const resident = workspace();
+    save(resident, "us_person_export_controls", "A lawful permanent resident of the United States");
+    expect(await resolve(resident, question)).toMatchObject({ status: "RESOLVED", displayAnswer: "No", fact: { key: "f1_optional_practical_training" } });
+    resident.close();
+
+    const foreign = workspace();
+    save(foreign, "us_citizen", false);
+    save(foreign, "us_person_export_controls", "None of the above");
+    expect(await resolve(foreign, question)).toMatchObject({ status: "NEEDS_INPUT" });
+    foreign.close();
+
+    const empty = workspace();
+    expect(await resolve(empty, question)).toMatchObject({ status: "NEEDS_INPUT" });
+    empty.close();
   });
 
   it("answers a narrower question only with a saved No", async () => {

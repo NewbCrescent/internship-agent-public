@@ -6,6 +6,7 @@ import {
   candidateFactSchema,
   factDefinitions,
   mentionsCompany,
+  mentionsCompanyLead,
   mentionsSiteTenant,
   normalizeCompanyName,
   parseFactAnswer,
@@ -127,6 +128,19 @@ describe("company scope, text facts, and saved self-identification keys", () => 
     expect(mentionsSiteTenant("Have you ever been employed by Fixture Healthcare?", "fixturehealth")).toBe(false);
     expect(mentionsSiteTenant("Have you ever been employed by ab?", "ab")).toBe(false);
     expect(mentionsSiteTenant("Fixture Health", "FIXTUREHEALTH")).toBe(true);
+  });
+
+  it("finds a company named by its leading word or words after for, at, by, or with, never another company (Track 32)", () => {
+    expect(mentionsCompanyLead("Have you worked for Fixturelux before?", "Fixturelux Brands")).toBe(true);
+    expect(mentionsCompanyLead("Have you previously been employed by Fixturelux? CURRENT EMPLOYEES: apply internally.", "Fixturelux Brands")).toBe(true);
+    expect(mentionsCompanyLead("Have you worked at the Fixturelux Group before?", "Fixturelux Group Holdings")).toBe(true);
+    // Another company sharing the first word, a lower-case word, no preposition, a one-word name, a short lead, or the whole name.
+    expect(mentionsCompanyLead("Have you worked for Fixturelux Energy before?", "Fixturelux Brands")).toBe(false);
+    expect(mentionsCompanyLead("Have you worked for fixturelux before?", "Fixturelux Brands")).toBe(false);
+    expect(mentionsCompanyLead("Fixturelux employees: have you worked here?", "Fixturelux Brands")).toBe(false);
+    expect(mentionsCompanyLead("Have you worked for Fixturelux before?", "Fixturelux")).toBe(false);
+    expect(mentionsCompanyLead("Have you worked for Abc before?", "Abc Brands")).toBe(false);
+    expect(mentionsCompanyLead("Have you worked for Fixturelux Brands before?", "Fixturelux Brands")).toBe(false);
   });
 
   it("allows a Yes for previous employment or relatives only for a named company", () => {

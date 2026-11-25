@@ -299,6 +299,7 @@ async function main(): Promise<void> {
   if (gapsState.values["formField-phoneType"] !== "Home Mobile") failures.push(`workday gaps: phone type should be Home Mobile, got ${gapsState.values["formField-phoneType"]}`);
   if (gapsState.resumes.join() !== "resume.pdf") failures.push(`workday gaps: expected the resume on My Experience's "Upload a file" input, got ${gapsState.resumes.join()}`);
   if (gapsState.values["formField-earliestStart"] !== "06/01/2027") failures.push(`workday gaps: the start date should read 06/01/2027 (month, day, year), got ${gapsState.values["formField-earliestStart"]}`);
+  if (gapsState.values["formField-candidateIsPreviousWorker"] !== "No") failures.push(`workday gaps: the previous-worker radio labelled by the question (aria-labelledby) should be answered No, got ${gapsState.values["formField-candidateIsPreviousWorker"]}`);
 
   // Synthetic, modeled on the 2026-11-25 evidence of neogen.wd5, itw.wd5, littelfuse.wd1, Activision and zoll.wd5:
   // the resume shows "<file> loading" for 2.5 s, then "<file> successfully uploaded", and Save and Continue moves

@@ -50,7 +50,7 @@ import { formerEmployerNamed, standardAnswerFactFile } from "./standard-answers"
  * every saved value prints only as "set". Unknown keys fail, naming the key.
  */
 // Built at resolve time from other saved answers; never written by a fact file.
-const NOT_STORED = [COURSEWORK_FACT_KEY, "us_person", "us_citizen_or_national", "us_citizen_or_permanent_resident", "salary_expectation"] as const;
+const NOT_STORED = [COURSEWORK_FACT_KEY, "us_person", "us_citizen_or_national", "us_citizen_or_permanent_resident", "f1_optional_practical_training", "salary_expectation"] as const;
 
 export const factFileSchema = z.object({
   facts: z.array(z.object({

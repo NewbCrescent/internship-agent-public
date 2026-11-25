@@ -3,8 +3,10 @@ import {
   affirmativeOption,
   booleanOption,
   classifyStandingStatement,
+  isPrivacyReadQuestion,
   isSignatureDateLabel,
   isSignatureLabel,
+  privacyReadStatement,
   signatureDateValue,
   standingStatementDecision,
   type StandingBasisSetting,
@@ -115,6 +117,20 @@ export function standingFieldDecision(field: BrowserField, form: RecognizedForm,
     return null;
   }
   if ((field.kind === "select" || field.kind === "radio") && (field.options?.length ?? 0) >= 2) {
+    // "Have you read the … Privacy Policy?": decided on the question and its affirmative option together (Track 32).
+    if (isPrivacyReadQuestion(field.label)) {
+      const read = privacyReadStatement(field.label, field.options!);
+      const decision = read ? standingStatementDecision(read.statement, standing) : null;
+      if (!read || decision?.verdict !== "accept") return null;
+      return {
+        fieldId: field.id,
+        action: "choose",
+        value: read.option,
+        basis: { kind: "standing_consent", setting: decision.setting, group: decision.groups[0]!, statement: read.statement },
+        reason: `Accepted under your standing ${SETTING_TEXT[decision.setting]} setting.`,
+        pause: null
+      };
+    }
     const decision = standingStatementDecision(field.label, standing);
     const option = decision.verdict === "accept" && !optionalTerms(decision, field) ? affirmativeOption(field.options!) : null;
     if (decision.verdict === "accept" && option) {

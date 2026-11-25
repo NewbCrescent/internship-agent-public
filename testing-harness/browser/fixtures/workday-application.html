@@ -68,7 +68,10 @@
     // offers Workday's "Home Mobile" style options (xboxgaming.wd1); My Experience's resume input sits in a
     // formField container with an empty suffix labelled "Upload a file (5MB max)" (littelfuse.wd1, zoll.wd5);
     // Application Questions adds a required start date drawn as Month, Day and Year sections (neogen.wd5),
-    // recorded as state.values["formField-earliestStart"] = "MM/DD/YYYY".
+    // recorded as state.values["formField-earliestStart"] = "MM/DD/YYYY". The previous-worker radios are labelled
+    // by their question (aria-labelledby), so their accessible name is the question while label[for] still says
+    // Yes/No (employer-e.wd5, 2026-11-25: "the page did not accept the value" on this radio; no form-step DOM was
+    // captured); the chosen option is recorded as state.values["formField-candidateIsPreviousWorker"].
     const gaps = params.get("gaps") === "1";
     // ?upload=slow|fail (synthetic, modeled on the 2026-11-25 evidence of neogen.wd5, itw.wd5, littelfuse.wd1,
     // Activision and zoll.wd5): a chosen resume shows "<file> loading" in an alert for 2.5 s with the file listed,
@@ -175,9 +178,9 @@
         ${listbox("formField-phoneType", "Phone Device Type*", gaps ? ["Home Mobile", "Home Phone", "Work Mobile", "Work Phone"] : ["Home", "Mobile", "Work"], state.values["formField-phoneType"])}
         ${prompt("formField-countryPhoneCode", "Country Phone Code*", "United States of America (+1)")}
         <div data-automation-id="formField-candidateIsPreviousWorker">
-          <label>Have you previously worked for Fixture Aerospace?*</label>
-          <input type="radio" id="prev-yes" name="prev" value="true"><label for="prev-yes">Yes</label>
-          <input type="radio" id="prev-no" name="prev" value="false"><label for="prev-no">No</label>
+          <label id="prev-question">Have you previously worked for Fixture Aerospace?*</label>
+          <input type="radio" id="prev-yes" name="prev" value="true"${gaps ? ' aria-labelledby="prev-question"' : ""}><label for="prev-yes">Yes</label>
+          <input type="radio" id="prev-no" name="prev" value="false"${gaps ? ' aria-labelledby="prev-question"' : ""}><label for="prev-no">No</label>
         </div>`,
       () => `
         <div data-automation-id="workExperienceSection">
@@ -681,6 +684,9 @@
         // ?gaps=1: the start date's three sections are recorded together, and it is missing unless all three are filled.
         const startParts = [...document.querySelectorAll("#fields input[data-start]")].map((input) => input.value);
         if (startParts.length) state.values["formField-earliestStart"] = startParts.every(Boolean) ? startParts.join("/") : "";
+        // The previous-worker choice, by its label[for] text (the ?gaps=1 check reads it).
+        const previous = document.querySelector('#fields [data-automation-id="formField-candidateIsPreviousWorker"] input[type=radio]:checked');
+        if (previous) state.values["formField-candidateIsPreviousWorker"] = document.querySelector(`label[for="${previous.id}"]`)?.textContent ?? previous.value;
         for (const earlier of document.querySelectorAll("[data-fixture-error]")) earlier.remove();
         const missing = missingRequired();
         if (state.step === 1) missing.push(...historyMissing().map((label) => ({ label, container: null })));

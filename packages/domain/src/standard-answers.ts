@@ -14,7 +14,7 @@ import { compensationPeriodSchema } from "./job-posting";
  * nothing here infers one.
  */
 
-/** Stored keys, then the four built at resolve time from them. */
+/** Stored keys, then the five built at resolve time from them. */
 export const STANDARD_ANSWER_KEYS: ReadonlySet<CandidateFactKey> = new Set<CandidateFactKey>([
   "us_citizen",
   "us_person_export_controls",
@@ -37,6 +37,7 @@ export const STANDARD_ANSWER_KEYS: ReadonlySet<CandidateFactKey> = new Set<Candi
   "us_person",
   "us_citizen_or_national",
   "us_citizen_or_permanent_resident",
+  "f1_optional_practical_training",
   "salary_expectation"
 ]);
 
@@ -45,6 +46,7 @@ export const DERIVED_STANDARD_KEYS: ReadonlySet<CandidateFactKey> = new Set<Cand
   "us_person",
   "us_citizen_or_national",
   "us_citizen_or_permanent_resident",
+  "f1_optional_practical_training",
   "salary_expectation"
 ]);
 
