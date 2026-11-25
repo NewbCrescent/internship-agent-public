@@ -17,7 +17,7 @@ import type { WorkspaceProfile } from "@internship-agent/domain";
 const holdSchema = z.object({
   kind: z.enum([
     "captcha", "verify-email", "exists-no-password", "exists", "password-refused", "wrong-password", "interrupted", "locked",
-    "consent-setting", "consent-unknown", "profile", "unexpected"
+    "consent-setting", "attestation-setting", "consent-unknown", "profile", "unexpected"
   ]),
   reason: z.string().max(500),
   at: z.string(),

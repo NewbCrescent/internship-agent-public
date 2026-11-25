@@ -16,7 +16,13 @@
  * again); a verification link from a fake mailbox is opened before signing
  * in; the same flow when iCIMS draws its account screens inside the career
  * site's same-host content frame (created, signed in again, and a CAPTCHA
- * inside the frame held before anything is typed). Jobvite's residence follows the profile country and Accept is clicked,
+ * inside the frame held before anything is typed); a privacy-notice
+ * acknowledgment whose legal text sits in the box's own block (iCIMS's
+ * #gdpr_container) is read whole, without iCIMS's screen-reader-only
+ * description, ticked under the attestation setting and logged "Accepted
+ * attestation", and held as attestation-setting with the data-consent setting
+ * alone; a box whose legal text is empty ("I accept") stays held as
+ * consent-unknown. Jobvite's residence follows the profile country and Accept is clicked,
  * with no click when no option matches. An attestation form is signed and
  * dated under the settings, and nothing is checked without them. The password
  * never reaches database rows, console output, or caught errors.
@@ -132,7 +138,7 @@ async function main(): Promise<void> {
       return frame.evaluate((query) => (document.querySelector(query) as HTMLInputElement | null)?.value ?? null, selector);
     };
 
-    async function icims(name: string, host: string, mode: string, acceptDataConsent = true, framed = false): Promise<{ tab: Page; result: string | null; error: Error | null }> {
+    async function icims(name: string, host: string, mode: string, acceptDataConsent = true, framed = false, signAttestations = false): Promise<{ tab: Page; result: string | null; error: Error | null }> {
       scenarios += 1;
       const tab = await context.newPage();
       const applicationUrl = framed ? framedLoginUrl(host, mode) : loginUrl(host, mode);
@@ -140,7 +146,7 @@ async function main(): Promise<void> {
       const page = createApplicationPage(tab);
       try {
         const result = await ensureIcimsAccount(page, {
-          database, jobId, applicationUrl, company: COMPANY, candidate: CANDIDATE, runtime, acceptDataConsent
+          database, jobId, applicationUrl, company: COMPANY, candidate: CANDIDATE, runtime, acceptDataConsent, signAttestations
         });
         return { tab, result, error: null };
       } catch (error) {
@@ -254,6 +260,34 @@ async function main(): Promise<void> {
     const framedAgainState = await fixtureState(framedAgain.tab);
     check(framedAgainState.creates === 1 && framedAgainState.signIns === 1, `framed again: ${framedAgainState.creates} creates, ${framedAgainState.signIns} sign-ins`);
     await framedAgain.tab.close();
+
+    // A privacy-notice acknowledgment beside the box (the box's own block): read whole, ticked under the attestation setting.
+    const ackHost = "careers-fixture9.icims.com";
+    const ack = await icims("ack", ackHost, "ack", true, false, true);
+    check(ack.result === "created", `ack: expected "created", got ${ack.result ?? ack.error?.message}`);
+    const ackEvent = events().find((detail) => detail.endsWith(`(iCIMS email step at ${ackHost})`)) ?? "";
+    check(ackEvent.startsWith("Accepted attestation: 'Please review the Fixture Robotics Applicant Privacy Notice"), `ack: the event is ${ackEvent}`);
+    check(ackEvent.includes("I acknowledge I have reviewed and understand the Fixture Robotics Applicant Privacy Notice."), `ack: the event misses the acknowledgment: ${ackEvent}`);
+    check(!ackEvent.includes("You must indicate"), `ack: the screen-reader description was read as the statement: ${ackEvent}`);
+    check((await fixtureState(ack.tab)).gdprChecked, "ack: the acknowledgment box was not ticked");
+    await ack.tab.close();
+
+    // The same acknowledgment with the data-consent setting alone: held as attestation-setting, nothing typed.
+    const ackOffHost = "careers-fixture10.icims.com";
+    const ackOff = await icims("ack without attestations", ackOffHost, "ack", true, false, false);
+    heldWith("ack without attestations", ackOff, "only under your standing attestation setting");
+    check(getIcimsAccount(file, ackOffHost)?.hold?.kind === "attestation-setting", `ack without attestations: the hold is ${getIcimsAccount(file, ackOffHost)?.hold?.kind}`);
+    check(((await fixtureState(ackOff.tab)).emailSubmits ?? 0) === 0, "ack without attestations: the email was submitted");
+    check((await inputValue(ackOff.tab, "#email")) === "", "ack without attestations: the email was typed");
+    await ackOff.tab.close();
+
+    // A box whose legal text is empty ("I accept"): held as consent-unknown with both settings on, nothing typed.
+    const blankHost = "careers-fixture11.icims.com";
+    const blank = await icims("blank", blankHost, "blank", true, false, true);
+    heldWith("blank", blank, `asks you to agree to "I accept"`);
+    check(getIcimsAccount(file, blankHost)?.hold?.kind === "consent-unknown", `blank: the hold is ${getIcimsAccount(file, blankHost)?.hold?.kind}`);
+    check((await inputValue(blank.tab, "#email")) === "", "blank: the email was typed");
+    await blank.tab.close();
 
     // hCaptcha inside the content frame: held before anything is typed.
     const framedCaptchaHost = "careers-fixture8.icims.com";

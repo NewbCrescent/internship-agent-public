@@ -46,6 +46,7 @@ import type { RawControl } from "@internship-agent/browser";
 import {
   advancePipeline,
   AutomaticRunStopped,
+  PostingClosed,
   getReviewQueue,
   pipelineSettings,
   approveApplication,
@@ -2846,6 +2847,50 @@ describe("posting pages behind an Apply link", () => {
     expect(getBrowserRuns(jobId, database)).toEqual([]);
     database.close();
   });
+
+  const WORKDAY_URL = "https://fixturechips.wd5.myworkdayjobs.com/External/job/US-CA-Santa-Clara/Robotics-Intern_JR1000001?source=Eightfold";
+  const workdayStep: Step = { url: WORKDAY_URL, controls: [{ tag: "button", label: "Apply" }], body: "Robotics Intern\nApply" };
+
+  it("hands an Apply entry that reaches a Workday posting to the Workday gates, and stops without a Workday sign-in", async () => {
+    const database = disposableDatabase();
+    const jobId = qualifiedExternalJob(database);
+    const page = postingPage(workdayStep);
+    const stopped = automaticStart(database, jobId, page);
+    await expect(stopped).rejects.toBeInstanceOf(AutomaticRunStopped);
+    await expect(stopped).rejects.toThrow(/opens .*Workday posting at fixturechips\.wd5\.myworkdayjobs\.com/);
+    expect(page.follows).toEqual([POSTING_URL]);
+    expect(page.filled.size).toBe(0);
+    expect(page.uploads.size).toBe(0);
+    expect(getBrowserRuns(jobId, database)).toEqual([]);
+    database.close();
+  });
+
+  it("continues a candidate-started run in the Workday run once the posting page is closed", async () => {
+    const database = disposableDatabase();
+    const jobId = approvedJobId(database);
+    setApplicationType(database, jobId, "EXTERNAL_ATS");
+    const posting = postingPage(workdayStep);
+    let postingClosed = false;
+    const close = posting.close;
+    posting.close = async () => {
+      postingClosed = true;
+      await close();
+    };
+    const opened: Array<{ url: string; postingClosed: boolean }> = [];
+    const stopped = startBrowserRun(jobId, POSTING_URL, {
+      database, dataDir: disposableDataDir(), voiceDrafter: null, renderPdf: async () => ({ pages: 1 }),
+      openPage: async (url: string) => {
+        opened.push({ url, postingClosed });
+        if (url === POSTING_URL) return posting;
+        throw new Error("workday page opened");
+      }
+    });
+    await expect(stopped).rejects.toThrow("workday page opened");
+    expect(opened).toEqual([{ url: POSTING_URL, postingClosed: false }, { url: WORKDAY_URL, postingClosed: true }]);
+    expect(posting.filled.size).toBe(0);
+    expect(getBrowserRuns(jobId, database)).toEqual([]);
+    database.close();
+  });
 });
 
 describe("runs that never reached an application form", () => {
@@ -3025,6 +3070,48 @@ describe("runs that never reached an application form", () => {
     expect(page.filled.size).toBe(0);
     expect(page.uploads.size).toBe(0);
     expect(getBrowserRuns(jobId, database)).toEqual([]);
+    database.close();
+  });
+
+  it("names a posting page that says the job is closed, on automatic and candidate-started runs", async () => {
+    for (const automatic of [true, false]) {
+      const database = disposableDatabase();
+      const jobId = automatic ? qualifiedExternalJob(database) : approvedExternalJob(database);
+      const page = fakePage({ url: POSTING_URL, title: "Job Not Found", controls: [{ tag: "button", label: "Apply" }], body: "We're sorry, that job does not exist or is not currently active." });
+      const stopped = start(database, jobId, POSTING_URL, page, automatic);
+      await expect(stopped).rejects.toThrow(/says "that job does not exist or is not currently active": the posting looks closed/);
+      if (automatic) {
+        await expect(stopped).rejects.toBeInstanceOf(AutomaticRunStopped);
+        await expect(stopped).rejects.toBeInstanceOf(PostingClosed);
+      } else await expect(stopped).rejects.not.toBeInstanceOf(AutomaticRunStopped);
+      expect(page.filled.size).toBe(0);
+      expect(getBrowserRuns(jobId, database)).toEqual([]);
+      database.close();
+    }
+  });
+
+  it("skips a careers page that says the posting is closed as \"Posting closed\" in the pipeline, once, and never runs it again", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = qualifiedExternalJob(database);
+    const report = await advancePipeline({
+      database, dataDir, settings: { minFit: 0, autoApply: true }, voiceDrafter: null,
+      openPage: async () => fakePage({ url: POSTING_URL, title: "Job Not Found", controls: [{ tag: "button", label: "Apply" }], body: "We're sorry, that job does not exist or is not currently active." })
+    });
+    expect(report.stopped).toEqual([]);
+    expect(report.skipped).toEqual([{ jobId, reasons: [expect.stringMatching(/^Posting closed: The posting page at careers\.fixturerobotics\.example says "that job does not exist or is not currently active"/)] }]);
+    expect(getDiscoverySkip(database, jobId)?.reason).toBe("Posting closed");
+    const details = (database.prepare("SELECT detail FROM application_events WHERE job_id = ? ORDER BY rowid").all(jobId) as Array<{ detail: string | null }>).map((row) => row.detail ?? "");
+    expect(details.filter((detail) => detail.startsWith("Automatic browser run found the posting closed: "))).toHaveLength(1);
+    expect(details.some((detail) => detail.startsWith("Automatic browser run needs you: "))).toBe(false);
+    expect(getBrowserRuns(jobId, database)).toEqual([]);
+
+    const second = await advancePipeline({
+      database, dataDir, settings: { minFit: 0, autoApply: true }, voiceDrafter: null, openPage: async () => { throw new Error("must not run a closed posting"); }
+    });
+    expect(second.started).toEqual([]);
+    expect(second.stopped).toEqual([]);
+    expect(second.errors).toEqual([]);
     database.close();
   });
 

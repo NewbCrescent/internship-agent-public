@@ -1,4 +1,4 @@
-import type { Page } from "playwright-core";
+import type { Locator, Page } from "playwright-core";
 
 import { rejectCookieConsent } from "./cookie-consent";
 
@@ -9,6 +9,15 @@ import { rejectCookieConsent } from "./cookie-consent";
  * only to the same site, the same company domain, or a known ATS host.
  * Third-party sign-in buttons ("Apply with LinkedIn"), job aggregators,
  * sharing, referral, and save-for-later links are never followed.
+ *
+ * A careers page that embeds a Greenhouse application (an iframe or frame
+ * from Greenhouse's embed, or Greenhouse's embed script plus the page's own
+ * `gh_jid`) is opened at that embed's own address (greenhouseEmbedTarget);
+ * the board is read only from the page, never guessed. A clicked Apply button
+ * that opens a new tab (Eightfold's Apply Now, which opens the employer's
+ * Workday posting) is read and closed, and its address is followed only under
+ * the same rule as a link: the same site, the same company domain, or a known
+ * ATS host (adoptablePopup, clickApplyEntry).
  */
 
 export type ApplyEntryCandidate = {
@@ -119,6 +128,110 @@ export function hostRank(pageHost: string, host: string): number | null {
   if (lastTwoLabels(host) === lastTwoLabels(pageHost)) return 1;
   if (KNOWN_ATS_HOSTS.some((suffix) => hostEndsWith(host, suffix))) return 2;
   return null;
+}
+
+const GREENHOUSE_EMBED_HOSTS = new Set(["boards.greenhouse.io", "job-boards.greenhouse.io", "boards.eu.greenhouse.io", "job-boards.eu.greenhouse.io"]);
+const BOARD_TOKEN = /^[A-Za-z0-9_-]{1,80}$/;
+const GREENHOUSE_JOB_ID = /^\d{1,20}$/;
+
+/**
+ * The Greenhouse application a careers page embeds, or null. Read only from
+ * the page's own embed, never from a guessed board: an iframe or frame at
+ * Greenhouse's `/embed/job_app?for=<board>&token=<id>` (kept on its own host;
+ * its token must equal the page's `gh_jid` when the page has one), else, when
+ * the page carries a `gh_jid` and exactly one Greenhouse embed script or board
+ * (`/embed/job_board/js?for=<board>`), the application Greenhouse's embed
+ * script itself builds: `job-boards.greenhouse.io/embed/job_app?for=<board>&token=<gh_jid>`.
+ * The embed address, not the board's job page, because the board's own job
+ * page redirects back to the company's careers page. Several distinct
+ * applications or boards give null. Pure.
+ */
+export function greenhouseEmbedTarget(pageUrl: string, sources: readonly string[]): string | null {
+  const page = parsedUrl(pageUrl);
+  const ghJid = page?.searchParams.get("gh_jid") ?? null;
+  const pageJob = ghJid !== null && GREENHOUSE_JOB_ID.test(ghJid) ? ghJid : null;
+  const applications = new Set<string>();
+  const boards = new Set<string>();
+  for (const source of sources) {
+    const url = parsedUrl(source);
+    if (!url || url.protocol !== "https:" || url.username || url.password || url.port) continue;
+    const host = url.hostname.toLowerCase();
+    if (!GREENHOUSE_EMBED_HOSTS.has(host)) continue;
+    const board = url.searchParams.get("for");
+    if (board === null || !BOARD_TOKEN.test(board)) continue;
+    const path = url.pathname.replace(/\/+$/, "");
+    if (path === "/embed/job_app") {
+      const token = url.searchParams.get("token");
+      if (token === null || !GREENHOUSE_JOB_ID.test(token)) continue;
+      if (pageJob !== null && token !== pageJob) continue;
+      applications.add("https://" + host + "/embed/job_app?for=" + board + "&token=" + token);
+    } else if (path === "/embed/job_board/js" || path === "/embed/job_board") {
+      const boardHost = host.includes(".eu.") ? "job-boards.eu.greenhouse.io" : "job-boards.greenhouse.io";
+      boards.add(boardHost + "\n" + board);
+    }
+  }
+  if (applications.size === 1) return [...applications][0]!;
+  if (applications.size > 1) return null;
+  if (pageJob !== null && boards.size === 1) {
+    const [boardHost, board] = [...boards][0]!.split("\n") as [string, string];
+    return "https://" + boardHost + "/embed/job_app?for=" + board + "&token=" + pageJob;
+  }
+  return null;
+}
+
+/**
+ * The addresses a page could embed a Greenhouse application from: every
+ * frame's address, plus the main frame's iframe, frame, and script sources.
+ * The caller has already run ensureNameShim; an unreadable page gives the
+ * frame addresses alone.
+ */
+export async function embedSourcesOf(page: Page): Promise<string[]> {
+  const frames = page.frames().map((frame) => frame.url());
+  const elements = await page.evaluate(() => Array.from(document.querySelectorAll("iframe[src], frame[src], script[src]"))
+    .map((element) => (element as HTMLIFrameElement | HTMLScriptElement).src)).catch(() => [] as string[]);
+  return [...frames, ...elements];
+}
+
+/**
+ * The new tab a clicked Apply entry opened that the agent may follow: exactly
+ * one opened address, https, on the same host, the same company domain, or a
+ * known ATS host (hostRank). Null otherwise (none, several, about:blank, an
+ * aggregator). Pure.
+ */
+export function adoptablePopup(pageUrl: string, opened: readonly string[]): string | null {
+  if (opened.length !== 1) return null;
+  const page = parsedUrl(pageUrl);
+  const target = parsedUrl(opened[0]);
+  if (!page || !target || target.protocol !== "https:") return null;
+  return hostRank(page.hostname.toLowerCase(), target.hostname.toLowerCase()) === null ? null : opened[0]!;
+}
+
+/**
+ * Clicks an Apply button and waits up to settleMs for what it does: the
+ * address changes in place (Oracle Candidate Experience routes to its email
+ * step), or a new tab opens (Eightfold's Apply Now opens the employer's
+ * Workday posting). A new tab is read, closed, and followed in this page only
+ * when adoptablePopup allows it. Never types or submits.
+ */
+export async function clickApplyEntry(page: Page, target: Locator, settleMs = 5_000): Promise<void> {
+  const before = new Set(page.context().pages());
+  const startUrl = page.url();
+  await target.click({ timeout: 10_000 });
+  const opened = () => page.context().pages().filter((tab) => !before.has(tab));
+  for (let waited = 0; waited < settleMs && opened().length === 0 && page.url() === startUrl; waited += 100) {
+    await page.waitForTimeout(100);
+  }
+  const openedUrls: string[] = [];
+  for (const tab of opened()) {
+    for (let waited = 0; waited < settleMs && (tab.url() === "" || tab.url() === "about:blank"); waited += 100) {
+      await tab.waitForTimeout(100).catch(() => undefined);
+    }
+    openedUrls.push(tab.url());
+    await tab.close().catch(() => undefined);
+  }
+  const follow = adoptablePopup(startUrl, openedUrls);
+  if (follow) await page.goto(follow, { waitUntil: "domcontentloaded" });
+  else await page.waitForLoadState("domcontentloaded").catch(() => undefined);
 }
 
 /**

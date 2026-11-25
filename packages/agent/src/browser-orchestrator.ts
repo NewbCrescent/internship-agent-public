@@ -10,6 +10,7 @@ import { ZodError } from "zod";
 import {
   getBaseResume,
   getBrowserRun,
+  getBrowserSession,
   getCandidate,
   getCurrentFact,
   getCurrentPackage,
@@ -39,6 +40,7 @@ import {
   choicesNotTaken,
   classifyAts,
   classifyFieldRole,
+  closedPostingNotice,
   createApplicationPage,
   createWorkdayPage,
   formChangedPause,
@@ -92,6 +94,7 @@ import {
   planApplicationHistory,
   scopeKey,
   standingConsentSettings,
+  workdaySiteKey,
   type StandingConsentSettings
 } from "@internship-agent/domain";
 import type {
@@ -139,7 +142,7 @@ import {
   type PauseAnswerOutcome
 } from "./question-answers";
 import { blockedPause, walkWorkday, WorkdaySignInRequired, type WorkdayRunContext } from "./workday-run";
-import type { WorkdayAccountRuntime } from "./workday-account-service";
+import { workdayAccountWait, type WorkdayAccountRuntime } from "./workday-account-service";
 import { getWorkdayAccount } from "./workday-account-store";
 import type { VerificationMailboxFactory } from "./workday-verification-mail";
 
@@ -587,6 +590,18 @@ function noFormReachedReason(url: string): string {
   return `No application form was reached at ${url}: the page shows no question the agent can fill or ask you about. It may sit behind an Apply button or a step the agent cannot take; start the run yourself from the form's address.`;
 }
 
+/** A no-form page that says the posting is closed: named as such instead of an Apply button the agent may have missed. */
+function closedPostingReason(url: string, notice: string): string {
+  return `The posting page at ${hostOf(url)} says "${notice}": the posting looks closed, so no application form was found and nothing was filled. Check the posting on the site.`;
+}
+
+/** An Apply entry reached the employer's Workday posting: the generic run hands over to the Workday run. Module-private. */
+class WorkdayHandoff extends Error {
+  constructor(readonly url: string) {
+    super("Workday handoff");
+  }
+}
+
 function hostOf(url: string): string {
   try {
     return new URL(url).hostname.toLowerCase();
@@ -755,6 +770,7 @@ export async function startBrowserRun(
 
   const candidate = getCandidate(database, candidateId);
   const page = await openPage(applicationUrl);
+  let handoff: string | null = null;
   try {
     // A signed-out Handshake session stops before anything changes.
     assertHandshakeSignedIn(database, page.url());
@@ -766,6 +782,7 @@ export async function startBrowserRun(
     // save the form's address, so continue and submit reopen the form itself.
     if (!inDialog && page.followApplyEntry && !form.fields.some((field) => field.kind !== "unknown") && !onHandshakeHost(page.url())) {
       const reached = await page.followApplyEntry();
+      if (reached && parseWorkdayUrl(reached)) throw new WorkdayHandoff(reached);
       if (reached) {
         form = await recognizeCurrentForm(page);
         formUrl = reached;
@@ -776,6 +793,7 @@ export async function startBrowserRun(
     // account creation, or a submit), and save the address the walk reached.
     if (!inDialog && !onHandshakeHost(page.url()) && hasSiteNavigation(page) && !hasApplicationFields(form.fields)) {
       const outcome = await page.advanceToApplicationForm();
+      if (outcome.stop === "adapter" && parseWorkdayUrl(outcome.url)) throw new WorkdayHandoff(outcome.url);
       if (outcome.moved) {
         form = await recognizeCurrentForm(page);
         formUrl = outcome.url;
@@ -795,7 +813,8 @@ export async function startBrowserRun(
       form = await recognizeCurrentForm(page);
     } else if (wallKind === "icims-account" && automatic && options.icimsAccounts && hasIcimsSteps(page)) {
       await runIcimsAccountStep(database, page, {
-        jobId, dataDir, company: posting.companyName, candidate, runtime: options.icimsAccounts, acceptDataConsent: standing.acceptDataConsent
+        jobId, dataDir, company: posting.companyName, candidate, runtime: options.icimsAccounts,
+        acceptDataConsent: standing.acceptDataConsent, signAttestations: standing.signAttestations
       });
     } else {
       const wall = applicationWallReason(page.url(), body);
@@ -823,6 +842,9 @@ export async function startBrowserRun(
         if (blocking) {
           throw new AutomaticRunStopped(`The application page at ${hostOf(page.url())} showed ${blocking.detail}; the agent never solves CAPTCHAs, so start this application yourself.`);
         }
+        const notice = closedPostingNotice(await page.bodyText().catch(() => ""));
+        // A closed posting is a PostingClosed: the pipeline skips it as "Posting closed" (as for Workday).
+        if (notice) throw new PostingClosed(closedPostingReason(page.url(), notice));
         throw new AutomaticRunStopped("No application form was found at " + applicationUrl + ". It may sit behind an Apply button; start the run yourself from the form's address.");
       }
     }
@@ -885,8 +907,9 @@ export async function startBrowserRun(
     }
     // Only skips (a copy-link box, a cookie panel's toggles): no application form was reached, so nothing is saved.
     if (!reachedApplicationForm(decisions)) {
-      const reason = noFormReachedReason(page.url());
-      throw automatic ? new AutomaticRunStopped(reason) : new Error(reason);
+      const notice = closedPostingNotice(await page.bodyText().catch(() => ""));
+      const reason = notice ? closedPostingReason(page.url(), notice) : noFormReachedReason(page.url());
+      throw automatic ? (notice ? new PostingClosed(reason) : new AutomaticRunStopped(reason)) : new Error(reason);
     }
     const uploadPathFor = await prepareUploads(
       database,
@@ -931,9 +954,33 @@ export async function startBrowserRun(
     });
     noteMixedProfile(database, settled, posting.companyName, candidateId, manualPin);
     return { run: settled, form, applied };
+  } catch (error) {
+    if (error instanceof WorkdayHandoff) handoff = error.url;
+    else throw error;
   } finally {
     await page.close();
   }
+  if (handoff === null) throw new Error("The run ended without a result.");
+  // An Apply entry that leads to the employer's Workday posting (Eightfold's Apply Now opens one in a new tab): the Workday run takes it there, behind the pipeline's own Workday gates.
+  const location = parseWorkdayUrl(handoff)!;
+  if (automatic && getBrowserSession(database, workdaySiteKey(location))?.status !== "connected") {
+    if (!options.workdayAccounts) {
+      throw new AutomaticRunStopped(`The Apply button at ${hostOf(applicationUrl)} opens ${posting.companyName}'s Workday posting at ${location.host}, and no Workday sign-in is connected there. Connect it on the Workday accounts page, then start the run yourself from ${handoff}.`);
+    }
+    const held = workdayAccountWait({ runtime: options.workdayAccounts }, location.host, candidate?.email);
+    if (held) throw new WorkdayAccountHeld(held);
+  }
+  const status = getJobPosting(database, jobId)?.status ?? posting.status;
+  logApplicationEvent(database, {
+    jobId, fromStatus: status, toStatus: status,
+    detail: `The Apply button at ${hostOf(applicationUrl)} leads to the Workday posting ${handoff}; the run continues there.`.slice(0, 1_000)
+  });
+  const report = await startWorkdayRun(database, { jobId, candidateId, applicationUrl: handoff, posting, current, variantId: variant.id, automatic, lock }, {
+    dataDir, openPage: options.openPage, renderPdf, voiceDrafter: options.voiceDrafter,
+    account: automatic && options.workdayAccounts ? { runtime: options.workdayAccounts, mode: "create" } : null, standing
+  });
+  noteMixedProfile(database, report.run, posting.companyName, candidateId, manualPin);
+  return report;
 }
 
 /**
@@ -964,7 +1011,7 @@ async function runIcimsAccountStep(
   page: BrowserPage & { icims: IcimsAccountSteps },
   input: {
     jobId: string; dataDir: string; company: string; candidate: ReturnType<typeof getCandidate>;
-    runtime: IcimsAccountRuntime; acceptDataConsent: boolean;
+    runtime: IcimsAccountRuntime; acceptDataConsent: boolean; signAttestations: boolean;
   }
 ): Promise<never> {
   const host = icimsHostOf(page.url());
@@ -979,7 +1026,7 @@ async function runIcimsAccountStep(
         email: input.candidate?.email, legalFirstName: input.candidate?.legalFirstName,
         legalLastName: input.candidate?.legalLastName, phone: input.candidate?.phone
       },
-      runtime: input.runtime, acceptDataConsent: input.acceptDataConsent
+      runtime: input.runtime, acceptDataConsent: input.acceptDataConsent, signAttestations: input.signAttestations
     });
   } catch (error) {
     if (error instanceof IcimsAccountHeld) await evidence("icims-account", error.message);

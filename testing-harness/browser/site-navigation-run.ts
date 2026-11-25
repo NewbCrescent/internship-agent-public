@@ -25,7 +25,14 @@
  * through "I'm interested" to the DataDome page and stops on the challenge;
  * the Oracle Cloud HCM reconstruction gives no field on its posting (its
  * copy-link box is skipped) and is walked through Apply Now to the email step,
- * named as a wall. No followed page reaches another site.
+ * named as a wall. (v) a careers page that embeds a Greenhouse application
+ * (a cross-origin iframe, or only Greenhouse's embed script plus the page's
+ * gh_jid) is opened at the embed's own address by followApplyEntry and by the
+ * walker (an "embed" hop), whose form shows First Name and Email; an Oracle
+ * posting whose Apply Now button is drawn 2.5 s after the load event is still
+ * followed to its email step; an Eightfold-style Apply Now that opens the
+ * employer's Workday posting in a new tab is followed there, the tab closed,
+ * and the walker stops as "adapter". No followed page reaches another site.
  *
  * Usage: pnpm test:browser:site-navigation
  */
@@ -58,6 +65,18 @@ const PAYLOCITY_POSTING = "https://recruiting.paylocity.com/Recruiting/Jobs/Deta
 const PAYLOCITY_APPLY = "https://recruiting.paylocity.com/Recruiting/Jobs/Apply/1000001";
 const SMARTRECRUITERS_POSTING = "https://jobs.smartrecruiters.com/FixtureRobotics/744000000000002-robotics-software-intern";
 const ORACLE_POSTING = "https://fixture.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/10001";
+const LATE_ORACLE_POSTING = "https://fixture.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/10002";
+const EMBED_POSTING = "https://careers.fixturehealth.example/careers/jobs/7000002-robotics-intern?gh_jid=7000002";
+const EMBED_APPLICATION = "https://job-boards.greenhouse.io/embed/job_app?for=fixturehealth&token=7000002";
+const SCRIPT_EMBED_POSTING = "https://careers.fixturehealth.example/careers/jobs/7000003-robotics-intern?gh_jid=7000003";
+const EIGHTFOLD_POSTING = "https://jobs.fixturechips.example/careers/job/900001";
+const WORKDAY_POSTING = "https://fixturechips.wd5.myworkdayjobs.com/External/job/US-CA-Santa-Clara/Robotics-Intern_JR1000001?source=Eightfold";
+/** A careers page whose only Greenhouse trace is the embed script (aborted here; its src stays in the page). */
+const SCRIPT_EMBED_PAGE = `<!doctype html><html><head><title>Robotics Intern - Fixture Health</title></head><body><h1>Robotics Intern</h1>
+  <script src="https://boards.greenhouse.io/embed/job_board/js?for=fixturehealth"></script><div id="grnhse_app"></div></body></html>`;
+/** A minimal Workday posting page behind the Eightfold-style posting. */
+const WORKDAY_PAGE = `<!doctype html><html><head><title>Robotics Intern</title></head><body><h1>Robotics Intern</h1>
+  <a data-automation-id="adventureButton" href="#" role="button">Apply</a></body></html>`;
 /** The fictional candidate profile the forms are filled from. */
 const PROFILE = { fullName: "Jordan Rivera", legalFirstName: "Jordan", legalLastName: "Rivera", email: "jordan@example.test", phone: "+1 555 555 0100" };
 /** The DataDome page the read-only capture browsers met on SmartRecruiters' application page, reduced. */
@@ -82,7 +101,13 @@ async function main(): Promise<void> {
       "recruiting.paylocity.com/Recruiting/Jobs/Apply/1000001": fixture("paylocity-application.html"),
       "jobs.smartrecruiters.com/FixtureRobotics/744000000000002-robotics-software-intern": fixture("smartrecruiters-share-posting.html"),
       "fixture.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/10001": fixture("oracle-candidate-experience.html"),
-      "fixture.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/10001/apply/email": fixture("oracle-apply-email.html")
+      "fixture.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/10001/apply/email": fixture("oracle-apply-email.html"),
+      "fixture.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/10002": fixture("late-apply-posting.html"),
+      "careers.fixturehealth.example/careers/jobs/7000002-robotics-intern": fixture("greenhouse-embed-posting.html"),
+      "careers.fixturehealth.example/careers/jobs/7000003-robotics-intern": SCRIPT_EMBED_PAGE,
+      "job-boards.greenhouse.io/embed/job_app": fixture("greenhouse-embed-application.html"),
+      "jobs.fixturechips.example/careers/job/900001": fixture("eightfold-posting.html"),
+      "fixturechips.wd5.myworkdayjobs.com/External/job/US-CA-Santa-Clara/Robotics-Intern_JR1000001": WORKDAY_PAGE
     };
     const documentRequests: string[] = [];
     const context = await browser.newContext();
@@ -91,7 +116,11 @@ async function main(): Promise<void> {
       let url: URL | null = null;
       try { url = new URL(request.url()); } catch { /* not a URL */ }
       // Main-frame documents only: the DataDome page's own CAPTCHA frame is not a followed entry (it is aborted).
-      if (url && request.resourceType() === "document" && request.frame().parentFrame() === null) documentRequests.push(url.href);
+      // A new tab's first navigation is issued before its frame exists: it is a main-frame document too.
+      const mainFrame = (() => {
+        try { return request.frame().parentFrame() === null; } catch { return request.isNavigationRequest(); }
+      })();
+      if (url && request.resourceType() === "document" && mainFrame) documentRequests.push(url.href);
       const body = url && request.resourceType() === "document"
         ? (url.hostname === "jobs.smartrecruiters.com" && url.pathname.startsWith("/oneclick-ui/") ? DATADOME_PAGE : byPath[`${url.hostname}${url.pathname}`])
         : undefined;
@@ -236,9 +265,61 @@ async function main(): Promise<void> {
       await tab.close();
     }
 
+    // (v) A careers page embedding a Greenhouse application: followed to the embed's own address.
+    {
+      const tab = await open(EMBED_POSTING);
+      const reached = await createPlaywrightPage(tab).followApplyEntry!();
+      check(reached === EMBED_APPLICATION, `Greenhouse embed followed to: ${reached}`);
+      const form = await recognizeCurrentForm(createApplicationPage(tab));
+      const labels = form.fields.map((field) => field.label);
+      check(["First Name", "Email"].every((label) => labels.includes(label)), `Greenhouse embed fields: ${labels.join("|")}`);
+      await tab.close();
+
+      const walked = await open(EMBED_POSTING);
+      const outcome = await createApplicationPage(walked).advanceToApplicationForm();
+      check(outcome.stop === "form" && outcome.url === EMBED_APPLICATION, `Greenhouse embed walk: ${outcome.stop} at ${outcome.url}`);
+      check(JSON.stringify(outcome.hops.map((hop) => hop.kind)) === JSON.stringify(["embed"]), `Greenhouse embed hops: ${JSON.stringify(outcome.hops)}`);
+      await walked.close();
+
+      const scripted = await open(SCRIPT_EMBED_POSTING);
+      const fromScript = await createPlaywrightPage(scripted).followApplyEntry!();
+      check(fromScript === "https://job-boards.greenhouse.io/embed/job_app?for=fixturehealth&token=7000003", `Greenhouse embed script followed to: ${fromScript}`);
+      await scripted.close();
+    }
+
+    // (v) An Oracle posting whose Apply Now is drawn after the load event: still followed to the email step.
+    {
+      const tab = await open(LATE_ORACLE_POSTING);
+      const reached = await createPlaywrightPage(tab).followApplyEntry!();
+      check(reached === `${LATE_ORACLE_POSTING}/apply/email`, `late Apply Now followed to: ${reached}`);
+      const email = await recognizeCurrentForm(createApplicationPage(tab));
+      check(siteWallReason(tab.url(), email.fields)?.startsWith("Oracle Cloud HCM asks for your email at fixture.fa.ocs.oraclecloud.com") === true,
+        `late Oracle wall: ${siteWallReason(tab.url(), email.fields)}`);
+      await tab.close();
+    }
+
+    // (v) An Eightfold-style Apply Now opening the employer's Workday posting in a new tab.
+    {
+      const tab = await open(EIGHTFOLD_POSTING);
+      const pagesBefore = context.pages().length;
+      const reached = await createPlaywrightPage(tab).followApplyEntry!();
+      check(reached === WORKDAY_POSTING, `Eightfold Apply Now followed to: ${reached}`);
+      check(context.pages().length === pagesBefore, `the new tab was left open: ${context.pages().length} pages, ${pagesBefore} before`);
+      await tab.close();
+
+      const walked = await open(EIGHTFOLD_POSTING);
+      const outcome = await createApplicationPage(walked).advanceToApplicationForm();
+      check(outcome.stop === "adapter" && outcome.url === WORKDAY_POSTING, `Eightfold walk: ${outcome.stop} at ${outcome.url}`);
+      check(JSON.stringify(outcome.hops) === JSON.stringify([{ kind: "apply", text: "Apply Now" }]), `Eightfold hops: ${JSON.stringify(outcome.hops)}`);
+      await walked.close();
+    }
+
     const thirdParty = documentRequests.filter((href) => {
       const host = new URL(href).hostname;
-      return !["careers.fixturerobotics.example", "recruiting.paylocity.com", "jobs.smartrecruiters.com", "fixture.fa.ocs.oraclecloud.com"].includes(host);
+      return ![
+        "careers.fixturerobotics.example", "recruiting.paylocity.com", "jobs.smartrecruiters.com", "fixture.fa.ocs.oraclecloud.com",
+        "careers.fixturehealth.example", "job-boards.greenhouse.io", "jobs.fixturechips.example", "fixturechips.wd5.myworkdayjobs.com"
+      ].includes(host);
     });
     check(thirdParty.length === 0, `a followed entry reached another site: ${thirdParty.join(", ")}`);
     await context.close();
@@ -250,7 +331,7 @@ async function main(): Promise<void> {
     console.error(`SITE_NAVIGATION_REPORT {"status":"failed","failures":${JSON.stringify(failures)}}`);
     process.exit(1);
   }
-  console.log(`SITE_NAVIGATION_REPORT {"status":"passed","scenarios":6}`);
+  console.log(`SITE_NAVIGATION_REPORT {"status":"passed","scenarios":9}`);
 }
 
 main().catch((error) => {

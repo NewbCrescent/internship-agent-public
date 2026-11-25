@@ -1,8 +1,11 @@
 import type { Frame, Page } from "playwright-core";
 
-import type { BrowserField, FieldRole } from "@internship-agent/domain";
+import { parseWorkdayUrl, type BrowserField, type FieldRole } from "@internship-agent/domain";
 
-import { applicationWallKind, chooseApplyEntry, hostRank, isCookieBannerCandidate, NEVER_FOLLOWED, type ApplyEntryCandidate } from "./apply-entry";
+import {
+  applicationWallKind, chooseApplyEntry, clickApplyEntry, embedSourcesOf, greenhouseEmbedTarget, hostRank, isCookieBannerCandidate, NEVER_FOLLOWED,
+  type ApplyEntryCandidate
+} from "./apply-entry";
 import { classifyFieldRole } from "./ats/field-roles";
 import { findVisibleChallengeIn } from "./challenge";
 import { rejectCookieConsent } from "./cookie-consent";
@@ -20,6 +23,12 @@ import { collectControlsIn, ensureNameShim } from "./handshake-executor";
  * creation, third-party apply ("Apply with LinkedIn"), sharing, a cookie
  * control, a link to another site, or a button that submits a form with
  * inputs, and it never types, uploads, or submits. No model participates.
+ * A page that embeds a Greenhouse application (apply-entry.ts
+ * greenhouseEmbedTarget) is opened at the embed's address as an "embed" hop.
+ * A clicked button that opens a new tab is followed only to the same site,
+ * the same company domain, or a known ATS host (clickApplyEntry). An entry
+ * that reaches a Workday posting stops the walk as "adapter": the Workday run
+ * takes it from there.
  */
 
 /** The roles only an application form asks for: a page showing one of them is the form. */
@@ -216,7 +225,7 @@ export function multiStepStopReason(url: string, buttons: StepButtons): string |
   return `The application at ${host} continues over several pages (its button says "${buttons.next}"), and the agent fills several-page forms only on sites it has an adapter for. Finish this application in your own browser.`;
 }
 
-export type NavigationHop = { kind: "consent" | NavigationEntryKind; text: string };
+export type NavigationHop = { kind: "consent" | "embed" | NavigationEntryKind; text: string };
 
 export type NavigationOutcome = {
   /** Where the walk ended. */
@@ -228,12 +237,22 @@ export type NavigationOutcome = {
    * form: an application field is shown; challenge: a CAPTCHA or bot check is
    * shown; wall: an account or email step in front of the form; no-entry:
    * nothing left to follow; hop-limit: four entries followed; left-site: an
-   * entry led to another site.
+   * entry led to another site; adapter: an entry led to a site the agent has
+   * its own run for (a Workday posting).
    */
-  stop: "form" | "challenge" | "wall" | "no-entry" | "hop-limit" | "left-site";
+  stop: "form" | "challenge" | "wall" | "no-entry" | "hop-limit" | "left-site" | "adapter";
 };
 
 const MAX_HOPS = 4;
+
+/** A posting page saying the job is closed or gone (Greenhouse's "no longer open", Garmin's careers 404, Paylocity's Job Not Found). */
+const CLOSED_POSTING = /\b(?:the job you are looking for is no longer open|this job is no longer (?:open|available|accepting applications)|this (?:position|posting|job) (?:has been filled|is closed|has closed|is no longer available)|no longer accepting applications|(?:that|this) job does not exist or is not currently active|this job may be no longer available|the page you are looking for no longer exists)\b/i;
+
+/** A posting page saying the job is closed or gone (Greenhouse's "no longer open", Garmin's careers 404, Paylocity's Job Not Found); the matched words, or null. Pure. */
+export function closedPostingNotice(bodyText: string): string | null {
+  const text = bodyText.replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ");
+  return CLOSED_POSTING.exec(text)?.[0] ?? null;
+}
 const NAME_SHIM = "globalThis.__name = globalThis.__name || ((target) => target);";
 
 function hostOf(url: string): string | null {
@@ -272,6 +291,21 @@ export async function advanceToApplicationForm(page: Page): Promise<NavigationOu
     if (applicationWallKind(page.url(), body) || siteWallReason(page.url(), fields)) return outcome("wall");
     if (hasApplicationFields(fields)) return outcome("form");
     if (hop >= MAX_HOPS) return outcome("hop-limit");
+    // A careers page that embeds a Greenhouse application: open the embed's own address.
+    const embedded = greenhouseEmbedTarget(page.url(), await embedSourcesOf(page));
+    if (embedded && embedded !== page.url() && !followed.has(embedded)) {
+      followed.add(embedded);
+      try {
+        await page.goto(embedded, { waitUntil: "domcontentloaded" });
+      } catch {
+        return outcome("no-entry");
+      }
+      hops.push({ kind: "embed", text: "Greenhouse application" });
+      moved = true;
+      await ensureNameShim(page).catch(() => undefined);
+      await waitForStableControls(() => page.locator("body").evaluate(countVisibleControlsIn).catch(() => 0), { timeoutMs: 10_000 });
+      continue;
+    }
     const pageUrl = page.url();
     const pageHost = hostOf(pageUrl);
     const main = page.mainFrame();
@@ -293,8 +327,7 @@ export async function advanceToApplicationForm(page: Page): Promise<NavigationOu
       if (choice.candidate.tag === "a" && choice.candidate.href) {
         await page.goto(choice.candidate.href, { waitUntil: "domcontentloaded" });
       } else {
-        await frames[choice.candidate.frame]!.locator(`[data-ia-nav-entry="${choice.candidate.index}"]`).first().click({ timeout: 10_000 });
-        await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+        await clickApplyEntry(page, frames[choice.candidate.frame]!.locator(`[data-ia-nav-entry="${choice.candidate.index}"]`).first());
       }
     } catch {
       return outcome("no-entry");
@@ -303,6 +336,7 @@ export async function advanceToApplicationForm(page: Page): Promise<NavigationOu
     moved = true;
     await ensureNameShim(page).catch(() => undefined);
     await waitForStableControls(() => page.locator("body").evaluate(countVisibleControlsIn).catch(() => 0), { timeoutMs: 10_000 });
+    if (parseWorkdayUrl(page.url())) return outcome("adapter");
     const host = hostOf(page.url());
     if (host === null || hostRank(originalHost, host) === null) return outcome("left-site");
   }

@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { getJobPosting, logApplicationEvent, resolveProfileDataDirectory } from "@internship-agent/db";
 import { icimsHostOf, resolveDataDir, type IcimsAccountSteps, type IcimsStepResult, type IcimsWaitOptions } from "@internship-agent/browser";
-import { manualOnly, standingStatementDecision, type WorkspaceProfile } from "@internship-agent/domain";
+import { DATA_CONSENT_GROUPS, manualOnly, standingStatementDecision, type WorkspaceProfile } from "@internship-agent/domain";
 
 import { gmailMailboxFactory } from "./gmail-mailbox";
 import { getIcimsAccount, icimsAccountsFile, IcimsAccountsFileError, putIcimsAccount, type IcimsAccountEntry, type IcimsAccountHoldKind } from "./icims-account-store";
@@ -21,7 +21,8 @@ import { MailboxUnavailable, type VerificationMailboxFactory } from "./workday-v
  * INTERNSHIP_AGENT_WORKDAY_ACCOUNT_EMAIL), mirroring the Workday account
  * service. Each iCIMS host gets one random password, saved before it is typed
  * anywhere. The email step's data-consent box is ticked only under the
- * standing data-consent setting. CAPTCHAs, existing accounts without a saved
+ * standing data-consent setting, and an attestation box (a privacy-notice
+ * acknowledgment) only under the standing attestation setting. CAPTCHAs, existing accounts without a saved
  * password, refused passwords, codes, and unknown screens hold the host for
  * the candidate; nothing is solved, bypassed, or reset. No event, error, or
  * return value carries the password or the email.
@@ -95,7 +96,8 @@ export function icimsAccountWait(
   host: string,
   candidateEmail: string | null | undefined,
   now: Date = new Date(),
-  acceptDataConsent = false
+  acceptDataConsent = false,
+  signAttestations = false
 ): string | null {
   if ("disabled" in resolved) return resolved.disabled;
   if (!emailMatches(candidateEmail, resolved.runtime.email)) return MISMATCH;
@@ -110,6 +112,7 @@ export function icimsAccountWait(
   if (!hold) return null;
   if (hold.kind === "verify-email") return verifyDue(hold.at, hold.attempts, now) ? null : hold.reason;
   if (hold.kind === "consent-setting") return acceptDataConsent ? null : hold.reason;
+  if (hold.kind === "attestation-setting") return signAttestations ? null : hold.reason;
   return hold.reason;
 }
 
@@ -126,6 +129,8 @@ export type IcimsAccountInput = {
   runtime: IcimsAccountRuntime;
   /** The candidate's standing data-consent setting: the email step's data-consent box is ticked only when it is on. */
   acceptDataConsent: boolean;
+  /** The candidate's standing attestation setting: privacy-notice acknowledgments and other attestations are ticked only when it is on. */
+  signAttestations?: boolean;
 };
 
 /**
@@ -136,7 +141,7 @@ export type IcimsAccountInput = {
  * every hold.
  */
 export async function ensureIcimsAccount(page: { url(): string; icims: IcimsAccountSteps }, input: IcimsAccountInput): Promise<"signed-in" | "created"> {
-  const { database, jobId, applicationUrl, company, candidate, runtime, acceptDataConsent } = input;
+  const { database, jobId, applicationUrl, company, candidate, runtime, acceptDataConsent, signAttestations = false } = input;
   const now = runtime.now ?? (() => new Date());
   const host = icimsHostOf(page.url());
   if (!host) throw new IcimsAccountHeld("iCIMS: the page is not an iCIMS site, so no account step ran.");
@@ -207,21 +212,30 @@ export async function ensureIcimsAccount(page: { url(): string; icims: IcimsAcco
     throw new IcimsAccountHeld(current.hold?.reason ?? `iCIMS ${host}: iCIMS refused the saved account. ${yourself}`);
   }
 
-  // Only a data-processing consent, and only under the candidate's standing setting.
-  const dataConsent = (statement: string) => standingStatementDecision(statement, { acceptDataConsent: true, signAttestations: false }).verdict === "accept";
-  const accept = (statement: string) => acceptDataConsent && dataConsent(statement);
+  // Only a statement the candidate's standing settings cover (data consent, attestations), and only while that setting is on.
+  const settings = { acceptDataConsent, signAttestations };
+  const decide = (statement: string) => standingStatementDecision(statement, settings);
+  const accept = (statement: string) => decide(statement).verdict === "accept";
+  const ACCEPTED_WORDS = { accept_data_consent: "Accepted data consent", sign_attestations: "Accepted attestation", both: "Accepted data consent and attestation" } as const;
   const logged = new Set<string>();
   const logAccepted = (statements: string[], step: string) => {
     for (const statement of statements) {
       if (logged.has(statement)) continue;
       logged.add(statement);
-      event(`Accepted data consent: '${statement}' (iCIMS ${step} at ${host})`);
+      const decision = decide(statement);
+      const words = decision.verdict === "accept" ? ACCEPTED_WORDS[decision.setting] : "Accepted data consent";
+      event(`${words}: '${statement}' (iCIMS ${step} at ${host})`);
     }
   };
   const consentHold = (statement: string, step: string): never => {
     const quoted = statement.slice(0, 200);
-    if (!acceptDataConsent && dataConsent(statement)) {
-      return hold("consent-setting", `iCIMS ${host}: the ${step} asks you to agree to "${quoted}"; the agent accepts it only under your standing data-consent setting.`);
+    const decision = decide(statement);
+    if (decision.verdict === "needs-setting") {
+      const needsData = decision.groups.some((group) => DATA_CONSENT_GROUPS.has(group));
+      if (needsData && !acceptDataConsent) {
+        return hold("consent-setting", `iCIMS ${host}: the ${step} asks you to agree to "${quoted}"; the agent accepts it only under your standing data-consent setting.`);
+      }
+      return hold("attestation-setting", `iCIMS ${host}: the ${step} asks you to agree to "${quoted}"; the agent accepts it only under your standing attestation setting.`);
     }
     return hold("consent-unknown", `iCIMS ${host}: the ${step} asks you to agree to "${quoted}", which is not a data-processing consent the agent may accept. ${yourself}`);
   };

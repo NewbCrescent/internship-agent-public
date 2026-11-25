@@ -94,6 +94,26 @@ function inspectIcimsIn(mark: string): Inspection {
   const statementOf = (box: HTMLInputElement): string => {
     const own = labelOf(box).replace(marker, "");
     if (own.length >= 40 && !/^(?:i agree|i accept|yes|agree|accept)\.?$/i.test(own)) return own.slice(0, 600);
+    // The box's own block: its highest ancestor below the form that holds no other control (iCIMS's
+    // #gdpr_container, whose legal text sits beside the box's row). Screen-reader-only descriptions are
+    // not the statement the candidate sees, and a block of more than 600 characters is not read as one.
+    let block: Element | null = box.parentElement;
+    while (block && block.parentElement && block.parentElement !== scope && !inScope.some((other) => other !== box && block!.parentElement!.contains(other))) {
+      block = block.parentElement;
+    }
+    if (block && block !== scope && !inScope.some((other) => other !== box && block!.contains(other))) {
+      let text = collapse((block as HTMLElement).innerText ?? block.textContent ?? "");
+      const described = (box.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean)
+        .map((id) => document.getElementById(id)).filter((element): element is HTMLElement => element !== null);
+      const hidden = Array.from(block.querySelectorAll(".sr-only, .visually-hidden, .screen-reader-text"));
+      for (const element of [...described, ...hidden]) {
+        const words = collapse((element as HTMLElement).innerText ?? element.textContent ?? "");
+        const quiet = collapse(element.textContent ?? "");
+        for (const remove of [words, quiet]) if (remove) text = text.split(remove).join(" ");
+      }
+      text = collapse(text);
+      if (text.length > own.length && text.includes(own) && text.length <= 600) return text;
+    }
     const parts: string[] = [];
     // The text of the box's row's previous siblings (at most 3, stopping at another control).
     let row: Element = box;

@@ -35,6 +35,7 @@ import {
   evaluateAndPersistMatch,
   getBrowserRuns,
   getIcimsAccount,
+  IcimsAccountHeld,
   prepareApplication,
   readJobEvidence,
   startBrowserRun,
@@ -320,16 +321,16 @@ describe("iCIMS's account step on an automatic run", () => {
     { tag: "input", type: "submit", label: "Next" }
   ];
 
-  function icimsPage(file: string, mode: "new" | "existing") {
+  function icimsPage(file: string, mode: "new" | "existing", statement = GDPR) {
     const page = fakePage({ url: LOGIN, title: "Fixture Robotics Careers", controls: loginControls, body: `Enter Your Information\nEmail\nI agree\nSoftware Powered by iCIMS` });
     const state = { screen: "email" as IcimsAccountScreen, creates: 0, signIns: 0, savedFirst: false, typed: [] as string[] };
     const icims: IcimsAccountSteps = {
       screen: async () => state.screen,
       submitEmail: async (email, accept) => {
         state.typed.push(email);
-        if (!accept(GDPR)) return { accepted: [], result: "consent-needed", statement: GDPR };
+        if (!accept(statement)) return { accepted: [], result: "consent-needed", statement };
         state.screen = mode === "existing" ? "sign-in" : "create";
-        return { accepted: [GDPR], result: "next", screen: state.screen };
+        return { accepted: [statement], result: "next", screen: state.screen };
       },
       createProfile: async (input: IcimsProfileInput, _accept, beforeSubmit) => {
         const before = getIcimsAccount(file, HOST);
@@ -398,6 +399,52 @@ describe("iCIMS's account step on an automatic run", () => {
     }
     expect(message).not.toContain("Rivera");
     expect(logs.join("\n")).not.toContain("Rivera");
+    database.close();
+  });
+
+  const NOTICE = "I confirm I have read the Candidate Data Privacy Notice linked below.";
+  const automaticIcims = (database: DatabaseSync, jobId: string, page: BrowserPage, file: string, standingConsent: StandingConsentSettings) => startBrowserRun(jobId, LOGIN, {
+    database, dataDir: disposableDataDir(), voiceDrafter: null, renderPdf: async () => ({ pages: 1 }), openPage: async () => page,
+    automatic: true, icimsAccounts: runtimeFor(file), standingConsent
+  });
+
+  it("ticks a privacy-notice acknowledgment under the attestation setting and logs it as an attestation", async () => {
+    const database = disposableDatabase();
+    const jobId = approvedJobId(database);
+    saveProfile(database);
+    const file = accountsFile();
+    const page = icimsPage(file, "new", NOTICE);
+    await expect(automaticIcims(database, jobId, page, file, BOTH)).rejects.toBeInstanceOf(AutomaticRunStopped);
+    expect(getIcimsAccount(file, HOST)).toMatchObject({ account: "created", hold: null });
+    expect(page.icimsState.creates).toBe(1);
+    expect(eventDetails(database, jobId)).toContain(`Accepted attestation: '${NOTICE}' (iCIMS email step at ${HOST})`);
+    database.close();
+  });
+
+  it("holds the same acknowledgment as attestation-setting with the data-consent setting alone", async () => {
+    const database = disposableDatabase();
+    const jobId = approvedJobId(database);
+    saveProfile(database);
+    const file = accountsFile();
+    const page = icimsPage(file, "new", NOTICE);
+    const stopped = automaticIcims(database, jobId, page, file, DATA);
+    await expect(stopped).rejects.toBeInstanceOf(IcimsAccountHeld);
+    await expect(stopped).rejects.toThrow(/only under your standing attestation setting/);
+    expect(getIcimsAccount(file, HOST)?.hold?.kind).toBe("attestation-setting");
+    expect(page.icimsState.creates).toBe(0);
+    expect(eventDetails(database, jobId).some((detail) => detail.startsWith("Accepted"))).toBe(false);
+    database.close();
+  });
+
+  it("keeps a bare \"I accept\" held as unknown consent with both settings on", async () => {
+    const database = disposableDatabase();
+    const jobId = approvedJobId(database);
+    saveProfile(database);
+    const file = accountsFile();
+    const page = icimsPage(file, "new", "I accept");
+    await expect(automaticIcims(database, jobId, page, file, BOTH)).rejects.toBeInstanceOf(IcimsAccountHeld);
+    expect(getIcimsAccount(file, HOST)?.hold?.kind).toBe("consent-unknown");
+    expect(page.icimsState.creates).toBe(0);
     database.close();
   });
 

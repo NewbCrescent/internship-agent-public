@@ -1,6 +1,8 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Software Engineer Intern | Careers at Fixture Robotics</title></head>
+<head><meta charset="utf-8"><title>Software Engineer Intern | Careers at Fixture Robotics</title>
+<style>.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }</style>
+</head>
 <body>
   <!--
     A fictional iCIMS account flow for careers-fixture*.icims.com, simulated in the page and served
@@ -14,7 +16,12 @@
 
     The query parameter `fixture` picks the behaviour: new (default), existing (an account for the
     email already exists with a password the agent does not know), captcha (a visible hCaptcha frame
-    on load), verify (the create asks to verify the email first), wrongpw (like existing). The path
+    on load), verify (the create asks to verify the email first), wrongpw (like existing), ack and
+    blank (like new, with another email step: ack draws a privacy-notice acknowledgment the way the
+    2026-11-25 read-only capture of a career site's email step did, its legal text in a
+    #gdpr_container beside a box labelled "Acknowledgement Received" with iCIMS's screen-reader-only
+    description; blank draws the same container with empty legal text and a box labelled "I accept").
+    The path
     picks the screen: .../login is the email step, .../candidate the application, .../verify marks
     the pending account verified. Before a create or login completes the page awaits
     window.onFixtureIcimsSubmit(kind) when the runner exposes it. State is kept per host in
@@ -50,13 +57,30 @@
         app.innerHTML = '<p>Check your email: we sent a link to verify your email address.</p>';
       }
 
+      var SR_DESCRIPTION = '<span id="icims_accept_gdpr_desc" class="sr-only">You must indicate that you have read the privacy notice and consent to the processing of your personal data before you can continue.</span>';
+      function gdprBlock() {
+        if (mode === "ack") {
+          return '<div id="gdpr_container"><div id="gdpr_legal_text">' +
+            '<p>Please review the Fixture Robotics Applicant Privacy Notice, which can be found <a href="#">here</a>.</p>' +
+            '<p class="gdprLegalTitle">Acknowledgement of Privacy Notice</p>' +
+            '<p>I acknowledge I have reviewed and understand the Fixture Robotics Applicant Privacy Notice.</p>' +
+            '<p></p></div>' +
+            '<div class="checkbox gdpr_wrapper"><label for="accept_gdpr"><input type="checkbox" id="accept_gdpr" name="accept_gdpr" aria-required="true" aria-describedby="icims_accept_gdpr_desc"> Acknowledgement Received</label>' + SR_DESCRIPTION + '</div></div>';
+        }
+        if (mode === "blank") {
+          return '<div id="gdpr_container"><div id="gdpr_legal_text"><p class="gdprLegalTitle"></p><p></p></div>' +
+            '<div class="checkbox gdpr_wrapper"><label for="accept_gdpr"><input type="checkbox" id="accept_gdpr" name="accept_gdpr" aria-required="true" aria-describedby="icims_accept_gdpr_desc"> I accept</label>' + SR_DESCRIPTION + '</div></div>';
+        }
+        return '<div class="iCIMS_TableRow"><p>I consent to Fixture Robotics collecting, processing and storing my personal data for recruitment purposes as described in its privacy policy.</p></div>' +
+          '<div class="iCIMS_TableRow"><input type="checkbox" id="accept_gdpr" name="accept_gdpr" required><label for="accept_gdpr">I agree</label></div>';
+      }
+
       function emailScreen() {
         heading.textContent = "Enter Your Information";
         app.innerHTML =
           '<form id="loginForm" method="post" action="#">' +
           '<div class="iCIMS_TableRow"><label for="email">Email</label><input type="email" id="email" name="loginName" required></div>' +
-          '<div class="iCIMS_TableRow"><p>I consent to Fixture Robotics collecting, processing and storing my personal data for recruitment purposes as described in its privacy policy.</p></div>' +
-          '<div class="iCIMS_TableRow"><input type="checkbox" id="accept_gdpr" name="accept_gdpr" required><label for="accept_gdpr">I agree</label></div>' +
+          gdprBlock() +
           '<div class="iCIMS_TableRow"><input type="checkbox" id="job_alerts" name="job_alerts"><label for="job_alerts">Send me job alerts and news</label></div>' +
           '<input type="submit" id="enterEmailSubmitButton" class="iCIMS_Button" value="Next">' +
           '</form>';

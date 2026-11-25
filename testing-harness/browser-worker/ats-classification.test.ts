@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   adapterProfileFor,
+  adoptablePopup,
   applicationWallReason,
   atsFlowFor,
   chooseApplyEntry,
@@ -9,6 +10,8 @@ import {
   chooseNavigationEntry,
   classifyAts,
   classifyFieldRole,
+  closedPostingNotice,
+  greenhouseEmbedTarget,
   hasApplicationFields,
   isCookieBannerCandidate,
   isSensitiveRole,
@@ -264,6 +267,51 @@ describe("Jobvite and iCIMS, and posting pages behind an Apply link", () => {
     // When appearing before the real apply entry, the apply entry is reached rather than halted
     expect(chooseApplyEntry(page, [onetrustAccept, privacyPref, cookieAllow, applyEntry])).toEqual(applyEntry);
 
+  });
+});
+
+describe("company careers pages: embedded Greenhouse, new-tab entries, closed postings", () => {
+  const PAGE = "https://careers.fixturehealth.example/careers/jobs/7000002-intern?gh_jid=7000002";
+  const EMBED = "https://job-boards.greenhouse.io/embed/job_app?for=fixturehealth&token=7000002";
+
+  it("opens the Greenhouse application the page itself embeds, and never a guessed board", () => {
+    expect(greenhouseEmbedTarget(PAGE, [PAGE, EMBED])).toBe(EMBED);
+    // The embed's job must be the page's own job.
+    expect(greenhouseEmbedTarget("https://careers.fixturehealth.example/careers/jobs?gh_jid=7000009", [EMBED])).toBeNull();
+    // Greenhouse's embed script plus the page's gh_jid: the application that script builds.
+    expect(greenhouseEmbedTarget("https://careers.fixturehealth.example/careers/jobs?gh_jid=7000003", ["https://boards.greenhouse.io/embed/job_board/js?for=fixturehealth"]))
+      .toBe("https://job-boards.greenhouse.io/embed/job_app?for=fixturehealth&token=7000003");
+    expect(greenhouseEmbedTarget("https://careers.fixturehealth.example/careers/jobs", ["https://boards.greenhouse.io/embed/job_board/js?for=fixturehealth"])).toBeNull();
+    expect(greenhouseEmbedTarget("https://careers.fixturehealth.example/careers/jobs?gh_jid=7000003", [
+      "https://boards.greenhouse.io/embed/job_board/js?for=fixturehealth",
+      "https://boards.greenhouse.io/embed/job_board/js?for=otherboard"
+    ])).toBeNull();
+    expect(greenhouseEmbedTarget(PAGE, ["https://job-boards.greenhouse.io.evil.example/embed/job_app?for=fixturehealth&token=7000002"])).toBeNull();
+    expect(greenhouseEmbedTarget(PAGE, ["http://job-boards.greenhouse.io/embed/job_app?for=fixturehealth&token=7000002"])).toBeNull();
+    expect(greenhouseEmbedTarget(PAGE, ["https://job-boards.greenhouse.io/embed/job_app?for=../x&token=7000002"])).toBeNull();
+    expect(greenhouseEmbedTarget(PAGE, ["https://boards.greenhouse.io/embed/job_app?for=fixturehealth&token=7000002"]))
+      .toBe("https://boards.greenhouse.io/embed/job_app?for=fixturehealth&token=7000002");
+    expect(greenhouseEmbedTarget("https://careers.fixturehealth.example/careers/jobs?gh_jid=7000004", ["https://boards.eu.greenhouse.io/embed/job_board/js?for=fixturehealth"]))
+      .toBe("https://job-boards.eu.greenhouse.io/embed/job_app?for=fixturehealth&token=7000004");
+  });
+
+  it("follows a new tab only to the same site, the company domain, or a known ATS host", () => {
+    const POSTING = "https://jobs.fixturechips.example/careers/job/900001";
+    const WORKDAY = "https://fixturechips.wd5.myworkdayjobs.com/External/job/US-CA-Santa-Clara/Robotics-Intern_JR1000001?source=Eightfold";
+    expect(adoptablePopup(POSTING, [WORKDAY])).toBe(WORKDAY);
+    expect(adoptablePopup(POSTING, ["https://www.jobaggregator.example/job/900001"])).toBeNull();
+    expect(adoptablePopup(POSTING, [WORKDAY, WORKDAY])).toBeNull();
+    expect(adoptablePopup(POSTING, ["about:blank"])).toBeNull();
+    expect(adoptablePopup(POSTING, ["http://fixturechips.wd5.myworkdayjobs.com/External/job/X_JR1"])).toBeNull();
+    expect(adoptablePopup(POSTING, [])).toBeNull();
+  });
+
+  it("names a posting page that says the job is closed", () => {
+    expect(closedPostingNotice("Fixture Devices Careers\nThe page you are looking for no longer exists. We're sorry, but it looks like this job may be no longer available or does not exist."))
+      .toBe("The page you are looking for no longer exists");
+    expect(closedPostingNotice("Fixture Engineering\nWe’re sorry, that job does not exist or is not currently active.")).toBe("that job does not exist or is not currently active");
+    expect(closedPostingNotice("The job you are looking for is no longer open.")).toBe("The job you are looking for is no longer open");
+    expect(closedPostingNotice("Software Engineering Intern\nAbout the role: build robots.\nApply")).toBeNull();
   });
 });
 

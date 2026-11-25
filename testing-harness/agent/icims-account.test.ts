@@ -141,4 +141,19 @@ describe("the iCIMS hold gate", () => {
       expect(icimsAccountWait(resolved(file), HOST, EMAIL, new Date(now.getTime() + 86_400_000 * 3), true)).toBe(`held: ${kind}`);
     }
   });
+
+  it("releases an attestation-setting hold only once the attestation setting is on", () => {
+    const file = accountsFile();
+    putIcimsAccount(file, entry({ kind: "attestation-setting", reason: "needs the attestation setting", at: now.toISOString(), attempts: 1 }));
+    expect(icimsAccountWait(resolved(file), HOST, EMAIL, now)).toBe("needs the attestation setting");
+    expect(icimsAccountWait(resolved(file), HOST, EMAIL, now, true)).toBe("needs the attestation setting");
+    expect(icimsAccountWait(resolved(file), HOST, EMAIL, now, true, false)).toBe("needs the attestation setting");
+    expect(icimsAccountWait(resolved(file), HOST, EMAIL, now, false, true)).toBeNull();
+    // The attestation setting releases neither a consent-setting nor a consent-unknown hold.
+    putIcimsAccount(file, entry({ kind: "consent-setting", reason: "needs the setting", at: now.toISOString(), attempts: 1 }));
+    expect(icimsAccountWait(resolved(file), HOST, EMAIL, now, false, true)).toBe("needs the setting");
+    expect(icimsAccountWait(resolved(file), HOST, EMAIL, now, true, true)).toBeNull();
+    putIcimsAccount(file, entry({ kind: "consent-unknown", reason: "held: unknown", at: now.toISOString(), attempts: 1 }));
+    expect(icimsAccountWait(resolved(file), HOST, EMAIL, now, true, true)).toBe("held: unknown");
+  });
 });

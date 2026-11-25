@@ -291,7 +291,8 @@ export async function advancePipeline(options: {
   const runtime = accounts && "runtime" in accounts ? accounts.runtime : null;
   const icimsAccounts = settings.icimsAccounts ? resolveIcimsAccounts(settings.icimsAccounts, options.dataDir) : null;
   const icimsRuntime = icimsAccounts && "runtime" in icimsAccounts ? icimsAccounts.runtime : null;
-  const acceptDataConsent = standingConsentSettings().acceptDataConsent;
+  const standingSettings = standingConsentSettings();
+  const acceptDataConsent = standingSettings.acceptDataConsent;
   // Runs the pipeline started that reached the submit step clean since their start pass (answered, or held only by the
   // target, the AI fit, or a cap) go through the same policy check (candidate decision, 2026-11-21).
   if (autoSubmit) {
@@ -353,7 +354,7 @@ export async function advancePipeline(options: {
     // With the iCIMS account opt-in, a held iCIMS host waits without opening a browser.
     const icimsHost = icimsHostOf(url);
     if (icimsHost && icimsAccounts) {
-      const held = icimsAccountWait(icimsAccounts, icimsHost, getCandidate(database, candidateId)?.email, new Date(), acceptDataConsent);
+      const held = icimsAccountWait(icimsAccounts, icimsHost, getCandidate(database, candidateId)?.email, new Date(), acceptDataConsent, standingSettings.signAttestations);
       if (held) {
         report.waiting.push({ jobId: job.id, siteKey: `icims:${icimsHost}`, reason: "icims-account", detail: held });
         continue;

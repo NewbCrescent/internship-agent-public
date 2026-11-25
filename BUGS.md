@@ -865,6 +865,113 @@ saved-company cases in `testing-harness/agent/memory-service.integration.test.ts
 (`pnpm test:domain`). Not changed: an answer typed for such a pause is
 mapped without the site's tenant.
 
+### Greenhouse applications embedded in company careers pages were not followed
+
+Found 2026-11-25 on the real workspace. Oscar's posting
+(oscarhealth.com/careers/jobs?gh_jid=…, <run id>) stopped with "No
+application form was found … It may sit behind an Apply button". The page
+draws Greenhouse's application in a cross-origin iframe
+(`job-boards.greenhouse.io/embed/job_app?for=<board>&token=<id>`); its two
+Apply buttons read "Apply\nApply", and the agent's Apply entry read only
+same-host frames, so nothing was followed. Greenhouse's own job page for
+the board redirects back to the careers page. Fix: the Apply entry and the
+site walker now open the embed's own address (`greenhouseEmbedTarget` in
+`packages/browser/src/apply-entry.ts`): an embed iframe or frame whose job
+equals the page's `gh_jid`, or, with a `gh_jid` and exactly one Greenhouse
+embed script on the page, the address that script builds; the board is
+read only from the page, never guessed. Regressions: the embed cases in
+`testing-harness/browser-worker/ats-classification.test.ts`
+(`pnpm test:browser-worker:fast`) and the embed scenarios in
+`testing-harness/browser/site-navigation-run.ts`
+(`xvfb-run -a pnpm test:browser:site-navigation`). Not changed: Nintendo's
+posting (<run id>) carries a `gh_jid` but its page has no Greenhouse
+embed, so it stays stopped; whether Greenhouse's embed confirms a
+submission like the job board does was not verifiable without a real
+submission (an unrecognized confirmation holds the run).
+
+### Apply buttons drawn after the page loaded, or opening a new tab, were not followed
+
+Found 2026-11-25 on the real workspace. Carnival's Oracle Candidate
+Experience posting (<run id>) draws its Apply Now button 1.5–2.5 s after the
+load event, after the controls wait had already returned, so neither the
+Apply entry nor the walker saw it ("No application form was found").
+NVIDIA's Eightfold posting (<run id>) has an "Apply Now" button that opens
+the employer's Workday posting in a new tab; the agent clicked it, read the
+unchanged address, left the tab open, and stopped with "no entry". Fix:
+`followApplyEntry` looks again every 500 ms for up to 8 s; a clicked button
+waits up to 5 s for the address to change or a new tab (`clickApplyEntry`),
+and a new tab is read, closed, and followed only to the same site, the
+company domain, or a known ATS host (`adoptablePopup`). An entry that
+reaches a Workday posting ends the walk as `adapter`, and `startBrowserRun`
+hands the run to the Workday run after closing the posting page, behind the
+pipeline's Workday gates on automatic runs (a connected sign-in, else the
+account opt-in with the host not held). Regressions: the `adoptablePopup`
+cases in `testing-harness/browser-worker/ats-classification.test.ts`
+(`pnpm test:browser-worker:fast`), the late Oracle and Eightfold scenarios
+in `testing-harness/browser/site-navigation-run.ts`
+(`xvfb-run -a pnpm test:browser:site-navigation`), and the Workday handoff
+cases in `testing-harness/browser-worker/run-lifecycle.integration.test.ts`
+(`pnpm test:browser-worker:local`). Not changed: Corvane's Oracle posting
+(2026-11-21) showed the same symptom and was not probed again; the handoff
+does not look for another job record of the same Workday requisition (none
+exists for NVIDIA's); Microsoft's apply pages (<run id>, <run id>,
+<run id>) need a Microsoft sign-in and stay stopped.
+
+### Closed postings were reported as a form behind an Apply button
+
+Found 2026-11-25 on the real workspace. Garmin's careers page
+(careers.garmin.com/jobs/…, <run id>) shows "The page you are looking for
+no longer exists … this job may be no longer available", and
+Shive-Hattery's Paylocity posting (<run id>) now leads to "We're sorry, that
+job does not exist or is not currently active."; both runs stopped saying
+the form "may sit behind an Apply button". Fix: a no-form page whose text
+says the posting is closed (`closedPostingNotice` in
+`packages/browser/src/site-navigation.ts`) stops with "The posting page at
+<host> says "<words>": the posting looks closed, so no application form was
+found and nothing was filled." on automatic and candidate-started runs.
+On an automatic run it is a `PostingClosed` (Track 28's class), so the
+pipeline skips the job as "Posting closed" and does not retry it, as it
+does for Workday's closed-posting page (`restoreDiscoveredJob` undoes the
+skip). Regressions: the `closedPostingNotice` cases in
+`testing-harness/browser-worker/ats-classification.test.ts`
+(`pnpm test:browser-worker:fast`) and the closed-posting case and the
+pipeline "Posting closed" skip case in
+`testing-harness/browser-worker/run-lifecycle.integration.test.ts`
+(`pnpm test:browser-worker:local`). Not changed: the automatic-retry
+closed-posting text in `packages/agent/src/unsubmitted-evidence.ts`; the
+jobs already stopped before this fix are not skipped retroactively.
+
+### iCIMS privacy-notice acknowledgments were held as unknown consent
+
+Found 2026-11-25 on the real workspace. iCIMS held
+careers-viasat.icims.com (<run id>) with "the email step asks you to agree
+to "Acknowledgement Received"" and us-careers-rivian.icims.com (<run id>)
+with "I confirm I have read the Candidate Data Privacy Notice linked
+below." as `consent-unknown`. Two causes: Viasat's legal text ("I
+acknowledge I have reviewed and understand the Viasat Applicant Privacy
+Notice.") sits in a container beside the box's row, ending in an empty
+paragraph, so only the label was read as the statement; and the iCIMS step
+decided every box with the data-consent setting alone, never the
+candidate's standing attestation setting, which covers privacy-notice
+acknowledgments. Fix: the statement is read from the box's own block (its
+highest ancestor in the form holding no other control, at most 600
+characters) without screen-reader-only descriptions; the step decides with
+both standing settings, logs "Accepted attestation: '<statement>' (iCIMS
+<step> at <host>)", and a box that needs the attestation setting while it
+is off holds as `attestation-setting`, released once the setting is on.
+Regressions: the attestation cases in
+`testing-harness/browser-worker/account-consent.integration.test.ts`
+(`pnpm test:browser-worker:local`), the `attestation-setting` hold case in
+`testing-harness/agent/icims-account.test.ts`
+(`pnpm test:agent:icims-account`), and the `ack` and `blank` scenarios in
+`testing-harness/browser/account-consent-run.ts`
+(`xvfb-run -a pnpm test:browser:account-consent`). Not changed: the
+stored Viasat and Rivian holds stay until cleared with
+`pnpm icims:account --profile real --site <host> --clear-hold` after this
+fix is merged; hq-lifeway.icims.com stays held, since its box says only "I
+accept" beside empty legal text (iCIMS's hidden screen-reader text is not
+read as its statement), and neither setting was widened.
+
 ### A run held on Greenhouse's unread security code could not be resent
 
 Found 2026-11-25 on the real workspace, after the fix above. The Artefact

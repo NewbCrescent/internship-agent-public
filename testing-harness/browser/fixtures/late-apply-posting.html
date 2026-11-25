@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Robotics Software Intern - Fixture Robotics Careers</title></head>
+<body>
+  <!--
+    A synthetic Oracle Cloud HCM Candidate Experience posting whose Apply Now button is drawn late
+    ("Fixture Robotics", job 10002). DERIVED from timings measured on a read-only visit
+    (2026-11-25), with every name and id fictional: one hidden input is present from the start, the
+    `button.apply-now-button` is inserted 2,500 ms after the load event, and its click routes in
+    the page, 600 ms later, to /job/10002/apply/email (history.pushState), which draws the email
+    step: an Email Address box and an "I agree with the terms and conditions" box.
+  -->
+  <main id="app">
+    <input type="text" id="hidden-search" style="display:none">
+    <h1>Robotics Software Intern</h1>
+    <section class="job-details"><p>Build robots.</p></section>
+    <div id="actions"></div>
+  </main>
+  <script>
+    window.addEventListener("load", () => {
+      setTimeout(() => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "apply-now-button";
+        button.textContent = "Apply Now";
+        button.addEventListener("click", () => {
+          setTimeout(() => {
+            history.pushState({}, "", location.pathname.replace(/\/$/, "") + "/apply/email");
+            document.getElementById("app").innerHTML = `
+              <form class="apply-flow-email" novalidate>
+                <div><label for="primary-email">Email Address</label><input id="primary-email" type="email" name="primaryEmail" aria-required="true"></div>
+                <div><input type="checkbox" id="legal-disclaimer" name="legalDisclaimer"><label for="legal-disclaimer">I agree with the terms and conditions</label></div>
+                <button type="button">Next</button>
+              </form>`;
+          }, 600);
+        });
+        document.getElementById("actions").appendChild(button);
+      }, 2500);
+    });
+  </script>
+</body>
+</html>

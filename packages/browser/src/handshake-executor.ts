@@ -2,7 +2,7 @@ import type { Locator, Page } from "playwright-core";
 
 import { promptSearchTerms, type AtsKind, type BrowserField, type FillDecision, type PauseRecord, type RecognizedForm } from "@internship-agent/domain";
 
-import { chooseApplyEntry, dismissCookieBanner, type ApplyEntryCandidate } from "./apply-entry";
+import { chooseApplyEntry, clickApplyEntry, dismissCookieBanner, embedSourcesOf, greenhouseEmbedTarget, type ApplyEntryCandidate } from "./apply-entry";
 import { isDoverOrAshby } from "./ats/adapters";
 import {
   ASHBY_ACCEPTED_CONFIRMATION,
@@ -145,8 +145,12 @@ export type BrowserPage = {
    */
   ashbySubmitDiagnostics?(): Promise<AshbySubmitDiagnostics | null>;
   /**
-   * Follows the posting's Apply entry once (chooseApplyEntry) and returns the
-   * URL it reached, or null when the page has none.
+   * Follows the posting's Apply entry once (chooseApplyEntry), or opens the
+   * Greenhouse application the page embeds (greenhouseEmbedTarget), and
+   * returns the URL it reached, or null when the page has none. Looks again
+   * every 500 ms for up to 8 s (entries drawn after the load event); a
+   * clicked button that opens a new tab is followed only to the same site, the
+   * same company domain, or a known ATS host (clickApplyEntry).
    */
   followApplyEntry?(): Promise<string | null>;
   /**
@@ -629,6 +633,8 @@ export async function submitAndConfirm(
  * no-op stand-in. It is a string, which no compiler rewrites.
  */
 const NAME_SHIM = "globalThis.__name = globalThis.__name || ((target) => target);";
+/** How long followApplyEntry looks again for an Apply entry drawn after the load event. */
+const APPLY_ENTRY_WAIT_MS = 8_000;
 const shimmedPages = new WeakSet<Page>();
 
 export async function ensureNameShim(page: Page): Promise<void> {
@@ -992,29 +998,41 @@ export function createPlaywrightPage(page: Page): BrowserPage {
       try {
         await ensureNameShim(page);
         await dismissCookieBanner(page);
-        const pageHost = hostOf(page.url());
-        const main = page.mainFrame();
-        const frames = [main, ...page.frames().filter((frame) => frame !== main && pageHost !== null && hostOf(frame.url()) === pageHost)];
-        const candidates: ApplyEntryCandidate[] = [];
-        for (const [number, frame] of frames.entries()) {
-          try {
-            await frame.evaluate(NAME_SHIM);
-            const found = await frame.locator("body").evaluate(collectApplyEntriesIn);
-            for (const entry of found) candidates.push({ ...entry, frame: number });
-          } catch {
-            // A frame that went away or runs no scripts offers no entry.
+        // A client-rendered posting draws its Apply entry, or Greenhouse's embed, after the load event (Oracle Candidate Experience: about 2 s); look again every 500 ms.
+        const deadline = Date.now() + APPLY_ENTRY_WAIT_MS;
+        for (;;) {
+          const embedded = greenhouseEmbedTarget(page.url(), await embedSourcesOf(page));
+          if (embedded && embedded !== page.url()) {
+            await page.goto(embedded, { waitUntil: "domcontentloaded" });
+            return page.url();
           }
+          const pageHost = hostOf(page.url());
+          const main = page.mainFrame();
+          const frames = [main, ...page.frames().filter((frame) => frame !== main && pageHost !== null && hostOf(frame.url()) === pageHost)];
+          const candidates: ApplyEntryCandidate[] = [];
+          for (const [number, frame] of frames.entries()) {
+            try {
+              await frame.evaluate(NAME_SHIM);
+              const found = await frame.locator("body").evaluate(collectApplyEntriesIn);
+              for (const entry of found) candidates.push({ ...entry, frame: number });
+            } catch {
+              // A frame that went away or runs no scripts offers no entry.
+            }
+          }
+          const chosen = chooseApplyEntry(page.url(), candidates);
+          if (chosen) {
+            await dismissCookieBanner(page);
+            if (chosen.tag === "a" && chosen.href) {
+              await page.goto(chosen.href, { waitUntil: "domcontentloaded" });
+            } else {
+              await clickApplyEntry(page, frames[chosen.frame]!.locator(`[data-ia-apply-entry="${chosen.index}"]`).first());
+            }
+            return page.url();
+          }
+          if (Date.now() >= deadline) return null;
+          await page.waitForTimeout(500);
+          await ensureNameShim(page).catch(() => undefined);
         }
-        const chosen = chooseApplyEntry(page.url(), candidates);
-        if (!chosen) return null;
-        await dismissCookieBanner(page);
-        if (chosen.tag === "a" && chosen.href) {
-          await page.goto(chosen.href, { waitUntil: "domcontentloaded" });
-        } else {
-          await frames[chosen.frame]!.locator(`[data-ia-apply-entry="${chosen.index}"]`).first().click({ timeout: 10_000 });
-          await page.waitForLoadState("domcontentloaded").catch(() => undefined);
-        }
-        return page.url();
       } catch {
         return null;
       }
