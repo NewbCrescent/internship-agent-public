@@ -34,6 +34,7 @@ import {
 import { AUTO_SUBMIT_EVENT, runStartedByPipeline, type BrowserRun, type PauseRecord } from "@internship-agent/domain";
 import {
   ASHBY_BUSY_DETAIL,
+  ASHBY_NOT_SENT_DETAIL,
   SubmissionCodeNotFound,
   SubmissionNeedsInput,
   SubmissionUnconfirmed,
@@ -1302,6 +1303,8 @@ describe("pnpm pipeline:retry --reopen-unsubmitted with evidence the site never 
     ["a Turnstile challenge on a Greenhouse page", { ...ashby, outcome: "challenged", challenge: TURNSTILE, url: GREENHOUSE_RUN_URL }, /only on an Ashby or Dover application page/],
     ["Ashby's busy detail on a Greenhouse page", { ...ashby, detail: ASHBY_BUSY_DETAIL, url: GREENHOUSE_RUN_URL }, /only on an Ashby or Dover application page/],
     ["Ashby's spam check", { ...ashby, outcome: "challenged", challenge: "Ashby's spam check (reCAPTCHA Enterprise)" }, /a challenge other than Dover's Turnstile/],
+    // Track 27: a click on Ashby's own submit button that sent nothing is held as a site safeguard, never reopened.
+    ["Ashby's not-sent hold", { ...ashby, outcome: "challenged", challenge: ASHBY_NOT_SENT_DETAIL }, /a challenge other than Dover's Turnstile/],
     ["a capture saved only before the approval", { ...ashby, setup: async (database, dataDir, run) => {
       rmSync(join(dataDir, "applications"), { recursive: true, force: true });
       await capture(database, dataDir, run, { outcome: "unknown", url: ASHBY_RUN_URL, bodyText: ASHBY_FORM, now: new Date(Date.parse(run.submissionApprovedAt!) - 30_000) });

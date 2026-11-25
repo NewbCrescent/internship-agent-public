@@ -19,6 +19,7 @@ import {
   capturePostSubmitEvidence,
   captureWorkdayEvidence,
   submitEvidenceRoot,
+  type AshbySubmitDiagnostics,
   type AshbySubmitNetwork,
   type BrowserPage,
   type PostSubmitEvidence,
@@ -47,7 +48,10 @@ import { redactNoticeText } from "./pass-notice";
  * An Ashby submit also keeps its network record (`ashbyNetwork`, Track 22):
  * Ashby's GraphQL operation names and HTTP statuses, the submit's token kind,
  * result type, success, Ashby's error codes and (redacted) messages, and the
- * reCAPTCHA token requests; never a request or response body.
+ * reCAPTCHA token requests; never a request or response body. It also keeps
+ * read-only diagnostics of the click (`ashbyDiagnostics`, Track 27): each click's
+ * target and hit test, request methods, hosts and paths after the first click,
+ * console and page errors, and visible errors, every text redacted again.
  */
 
 export const SUBMIT_EVIDENCE_EVENT = "Post-submit evidence saved";
@@ -98,6 +102,36 @@ export const ashbyNetworkFileSchema = z.object({
   recaptchaTokenStatuses: z.array(z.number().int().min(0).max(999).nullable()).max(5)
 });
 
+/** Ashby's submit diagnostics, as stored (ats/ashby-diagnostics.ts): booleans, tags, hosts, paths, and redacted texts. */
+export const ashbyDiagnosticsFileSchema = z.object({
+  clicks: z.array(z.object({
+    ashbySubmitButton: z.boolean(),
+    hitTarget: z.boolean(),
+    hitElement: z.string().max(120).nullable(),
+    tag: z.string().max(20),
+    typeAttribute: z.string().max(20).nullable(),
+    text: z.string().max(60)
+  })).max(5),
+  requests: z.array(z.object({
+    method: z.string().regex(/^[A-Z]{1,10}$/),
+    host: z.string().max(253),
+    path: z.string().max(160),
+    resourceType: z.string().max(30),
+    clicks: z.number().int().min(0).max(20),
+    count: z.number().int().min(1),
+    lastStatus: z.number().int().min(0).max(999).nullable(),
+    failed: z.boolean()
+  })).max(80),
+  requestsDropped: z.number().int().min(0),
+  console: z.array(z.object({
+    kind: z.enum(["error", "warning", "page-error"]),
+    text: z.string().max(200),
+    clicks: z.number().int().min(0).max(20)
+  })).max(20),
+  consoleDropped: z.number().int().min(0),
+  visibleErrors: z.array(z.string().max(200)).max(10)
+});
+
 export const submitEvidenceFileSchema = z.object({
   version: z.literal(1),
   /** Null for a Workday account-step stop: no run was saved yet. */
@@ -118,11 +152,14 @@ export const submitEvidenceFileSchema = z.object({
   /** What the agent says happened (a Workday hold reason); null on older files. */
   detail: z.string().max(500).nullable().default(null),
   /** Ashby only: what the submit sent and got back (Track 22); null on other sites and older files. */
-  ashbyNetwork: ashbyNetworkFileSchema.nullable().default(null)
+  ashbyNetwork: ashbyNetworkFileSchema.nullable().default(null),
+  /** Ashby only: read-only diagnostics of the submit click (Track 27); null on other sites and older files. */
+  ashbyDiagnostics: ashbyDiagnosticsFileSchema.nullable().default(null)
 });
 
 export type StoredSubmitEvidence = z.infer<typeof submitEvidenceFileSchema>;
 type StoredAshbyNetwork = z.infer<typeof ashbyNetworkFileSchema>;
+type StoredAshbyDiagnostics = z.infer<typeof ashbyDiagnosticsFileSchema>;
 
 const httpStatus = (status: number | null): number | null =>
   status !== null && Number.isInteger(status) && status >= 0 && status <= 999 ? status : null;
@@ -159,6 +196,75 @@ function storedAshbyNetwork(network: AshbySubmitNetwork, scrub: (text: string) =
     recaptchaTokenRequests: Math.max(0, Math.trunc(network.recaptchaTokenRequests)),
     recaptchaTokenStatuses: network.recaptchaTokenStatuses.slice(0, 5).map(httpStatus)
   };
+}
+
+const count = (value: number, min: number, max: number): number =>
+  Number.isFinite(value) ? Math.min(max, Math.max(min, Math.trunc(value))) : min;
+
+/**
+ * The diagnostics as stored: every list cut to its bound, every text redacted
+ * again like the pipeline's notices, hosts and methods kept only in their
+ * expected shape, and numbers clamped.
+ */
+function storedAshbyDiagnostics(diagnostics: AshbySubmitDiagnostics, scrub: (text: string) => string): StoredAshbyDiagnostics {
+  const text = (value: string, max: number) => clip(redactNoticeText(scrub(value)), max);
+  return {
+    clicks: diagnostics.clicks.slice(0, 5).map((check) => ({
+      ashbySubmitButton: check.ashbySubmitButton === true,
+      hitTarget: check.hitTarget === true,
+      hitElement: check.hitElement === null ? null : text(check.hitElement, 120),
+      tag: text(check.tag, 20),
+      typeAttribute: check.typeAttribute === null ? null : text(check.typeAttribute, 20),
+      text: text(check.text, 60)
+    })),
+    requests: diagnostics.requests.slice(0, 80).map((entry) => {
+      const method = entry.method.toUpperCase();
+      return {
+        method: /^[A-Z]{1,10}$/.test(method) ? method : "OTHER",
+        host: /^[a-z0-9.-]{1,253}$/.test(entry.host) ? entry.host : "[host]",
+        path: text(entry.path, 160),
+        resourceType: text(entry.resourceType, 30),
+        clicks: count(entry.clicks, 0, 20),
+        count: count(entry.count, 1, Number.MAX_SAFE_INTEGER),
+        lastStatus: httpStatus(entry.lastStatus),
+        failed: entry.failed === true
+      };
+    }),
+    requestsDropped: count(diagnostics.requestsDropped, 0, Number.MAX_SAFE_INTEGER),
+    console: diagnostics.console.slice(0, 20).map((entry) => ({
+      kind: entry.kind,
+      text: text(entry.text, 200),
+      clicks: count(entry.clicks, 0, 20)
+    })),
+    consoleDropped: count(diagnostics.consoleDropped, 0, Number.MAX_SAFE_INTEGER),
+    visibleErrors: diagnostics.visibleErrors.slice(0, 10).map((value) => text(value, 200))
+  };
+}
+
+/** The lines `pnpm run:evidence` prints for Ashby's submit diagnostics; [] when there are none. */
+export function describeAshbyDiagnostics(diagnostics: StoredSubmitEvidence["ashbyDiagnostics"]): string[] {
+  if (diagnostics === null) return [];
+  const lines = [`Ashby submit click(s): ${diagnostics.clicks.length}`];
+  diagnostics.clicks.forEach((check, index) => {
+    lines.push(
+      `  - click ${index + 1}: on Ashby's submit button: ${check.ashbySubmitButton ? "yes" : "no"}; `
+      + `hit test at its centre: ${check.hitTarget ? "yes" : "no"}${check.hitElement ? `, found ${check.hitElement}` : ""}; `
+      + `${check.tag}${check.typeAttribute === null ? ", no type attribute" : `, type "${check.typeAttribute}"`}; "${check.text}"`
+    );
+  });
+  lines.push(`Requests after the first click: ${diagnostics.requests.length} (${diagnostics.requestsDropped} not kept)`);
+  for (const entry of diagnostics.requests) {
+    const answer = entry.lastStatus !== null ? `HTTP ${entry.lastStatus}` : entry.failed ? "failed" : "no answer";
+    lines.push(`  - ${entry.method} ${entry.host}${entry.path} ×${entry.count} after click ${entry.clicks}: ${answer}`);
+  }
+  lines.push(`Console after the watch started: ${diagnostics.console.length}`);
+  for (const entry of diagnostics.console) lines.push(`  - [${entry.kind}, click ${entry.clicks}] ${entry.text || "(not kept)"}`);
+  if (diagnostics.visibleErrors.length === 0) lines.push("Visible errors: none");
+  else {
+    lines.push("Visible errors:");
+    for (const error of diagnostics.visibleErrors) lines.push(`  - ${error}`);
+  }
+  return lines;
 }
 
 /** The lines `pnpm run:evidence` prints for an Ashby network record. */
@@ -278,7 +384,8 @@ export async function savePostSubmitEvidence(input: SaveSubmitEvidenceInput): Pr
     text: redactEvidenceText(scrub(evidence.bodyText)),
     screenshot: screenshotSaved ? "screenshot.png" : null,
     detail: typeof evidence.detail === "string" ? clip(redactNoticeText(scrub(evidence.detail)), 500) : null,
-    ashbyNetwork: evidence.ashbyNetwork ? storedAshbyNetwork(evidence.ashbyNetwork, scrub) : null
+    ashbyNetwork: evidence.ashbyNetwork ? storedAshbyNetwork(evidence.ashbyNetwork, scrub) : null,
+    ashbyDiagnostics: evidence.ashbyDiagnostics ? storedAshbyDiagnostics(evidence.ashbyDiagnostics, scrub) : null
   } satisfies StoredSubmitEvidence);
   writePrivateAtomic(join(dir, "evidence.json"), JSON.stringify(stored, null, 2) + "\n");
 
@@ -559,6 +666,7 @@ export async function runEvidenceCommand(argv: string[], deps: Partial<RunEviden
       if (entry.alertText) io.log(`Site error text: ${entry.alertText}`);
       if (entry.challenge !== null) io.log(`Challenge: ${entry.challenge}`);
       if (entry.ashbyNetwork !== null) for (const line of describeAshbyNetwork(entry.ashbyNetwork)) io.log(line);
+      if (entry.ashbyDiagnostics !== null) for (const line of describeAshbyDiagnostics(entry.ashbyDiagnostics)) io.log(line);
       io.log(entry.screenshot ? `Screenshot: ${join(entry.dir, entry.screenshot)}` : "Screenshot: not saved");
       io.log("Visible text (redacted):");
       io.log(entry.text);

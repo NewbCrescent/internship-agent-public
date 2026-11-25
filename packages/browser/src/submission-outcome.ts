@@ -1,5 +1,6 @@
 import type { BrowserField, FillDecision, PauseRecord, RecognizedForm } from "@internship-agent/domain";
 
+import type { AshbySubmitDiagnostics } from "./ats/ashby-diagnostics";
 import type { AshbySubmitNetwork } from "./ats/ashby-network";
 import { classifyFieldRole, isSensitiveRole } from "./ats/field-roles";
 import { SubmissionHeld } from "./challenge";
@@ -59,6 +60,13 @@ export type PostSubmitEvidence = {
   securityCodeEntered?: boolean;
   /** Ashby only: the watch's record of Ashby's GraphQL calls and reCAPTCHA token requests (names, statuses, booleans, error codes and messages; never bodies). */
   ashbyNetwork?: AshbySubmitNetwork | null;
+  /**
+   * Ashby only (ats/ashby-diagnostics.ts): the watch's read-only diagnostics of
+   * the submit click (click target and hit test, request hosts and paths,
+   * console and page errors, visible errors), sanitized of the page's own
+   * values; kept in the run's local evidence only, never sent anywhere.
+   */
+  ashbyDiagnostics?: AshbySubmitDiagnostics | null;
 };
 
 const MAX_BODY_TEXT = 20_000;
@@ -312,6 +320,17 @@ export function withoutSecret(evidence: PostSubmitEvidence, secret: string): Pos
       label: scrubSecret(field.label, secret),
       error: scrubSecret(field.error, secret)
     })),
+    ...(evidence.ashbyDiagnostics
+      ? {
+        ashbyDiagnostics: {
+          ...evidence.ashbyDiagnostics,
+          clicks: evidence.ashbyDiagnostics.clicks.map((check) => ({ ...check, text: scrubSecret(check.text, secret) })),
+          requests: evidence.ashbyDiagnostics.requests.map((entry) => ({ ...entry })),
+          console: evidence.ashbyDiagnostics.console.map((entry) => ({ ...entry, text: scrubSecret(entry.text, secret) })),
+          visibleErrors: evidence.ashbyDiagnostics.visibleErrors.map((text) => scrubSecret(text, secret))
+        }
+      }
+      : {}),
     securityCodeEntered: true
   };
 }
@@ -367,7 +386,15 @@ export function postSubmitEvidenceOf(error: unknown): PostSubmitEvidence | null 
 export async function capturePostSubmitEvidence(
   page: BrowserPage,
   outcome: PostSubmitOutcome,
-  known: { bodyText?: string; invalidFields?: InvalidField[]; alertText?: string; challenge?: string | null; detail?: string | null; ashbyNetwork?: AshbySubmitNetwork | null } = {}
+  known: {
+    bodyText?: string;
+    invalidFields?: InvalidField[];
+    alertText?: string;
+    challenge?: string | null;
+    detail?: string | null;
+    ashbyNetwork?: AshbySubmitNetwork | null;
+    ashbyDiagnostics?: AshbySubmitDiagnostics | null;
+  } = {}
 ): Promise<PostSubmitEvidence> {
   let url = "";
   try {
@@ -410,6 +437,14 @@ export async function capturePostSubmitEvidence(
       ashbyNetwork = null;
     }
   }
+  let ashbyDiagnostics = known.ashbyDiagnostics;
+  if (ashbyDiagnostics === undefined) {
+    try {
+      ashbyDiagnostics = page.ashbySubmitDiagnostics ? await page.ashbySubmitDiagnostics() : null;
+    } catch {
+      ashbyDiagnostics = null;
+    }
+  }
   return {
     outcome,
     url,
@@ -418,7 +453,8 @@ export async function capturePostSubmitEvidence(
     alertText,
     challenge: known.challenge ?? null,
     detail: known.detail ?? null,
-    ...(ashbyNetwork ? { ashbyNetwork } : {})
+    ...(ashbyNetwork ? { ashbyNetwork } : {}),
+    ...(ashbyDiagnostics ? { ashbyDiagnostics } : {})
   };
 }
 

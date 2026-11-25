@@ -22,6 +22,15 @@ import {
   readAshbySubmitToken,
   type AshbySubmitCall,
   type AshbySubmitNetwork,
+  ASHBY_NOT_SENT_DETAIL,
+  ashbyClickSentNothing,
+  ashbyNotSentMessage,
+  createAshbyDiagnosticsRecorder,
+  diagnosticRequestTarget,
+  sanitizeDiagnosticText,
+  scrubValuesFrom,
+  type AshbyClickCheck,
+  type AshbySubmitDiagnostics,
   ASHBY_BUSY_DETAIL,
   ASHBY_MAX_SUBMIT_CLICKS,
   ASHBY_RECLICK_SETTLE_MS,
@@ -2030,7 +2039,12 @@ describe("Ashby's submit on the network (Track 22)", () => {
     expect(ashbySubmitSentAfter(network([submit({ clicks: 1 })]), 2)).toBe(false);
   });
 
-  function ashbyPage(options: { network: (clicks: number) => AshbySubmitNetwork | null; busyAtClick?: number; successAtClick?: number }) {
+  function ashbyPage(options: {
+    network: (clicks: number) => AshbySubmitNetwork | null;
+    busyAtClick?: number;
+    successAtClick?: number;
+    diagnostics?: AshbySubmitDiagnostics | null;
+  }) {
     const events: string[] = [];
     let clicks = 0;
     const page: BrowserPage = {
@@ -2058,7 +2072,8 @@ describe("Ashby's submit on the network (Track 22)", () => {
       watchAshbyNetwork: async () => {
         events.push("watch");
       },
-      ashbySubmitNetwork: async () => options.network(clicks)
+      ashbySubmitNetwork: async () => options.network(clicks),
+      ...(options.diagnostics !== undefined ? { ashbySubmitDiagnostics: async () => options.diagnostics ?? null } : {})
     };
     return { page, events, clicks: () => clicks };
   }
@@ -2118,6 +2133,165 @@ describe("Ashby's submit on the network (Track 22)", () => {
     const error = await submitAndConfirm(page, FAST).then(() => null, (caught: unknown) => caught);
     expect(error).toBeInstanceOf(SubmissionUnconfirmed);
     expect((error as SubmissionUnconfirmed).evidence.ashbyNetwork).toEqual(serverError);
+  });
+
+  // Nested here to reuse this block's Ashby page stub and network helpers.
+  describe("Ashby submit diagnostics and the not-sent hold (Track 27)", () => {
+    const APPLICATION = "https://jobs.ashbyhq.com/fixture/1/application";
+    const onButton: AshbyClickCheck = { ashbySubmitButton: true, hitTarget: true, hitElement: null, tag: "button", typeAttribute: null, text: "Submit Application" };
+    const diagnostics = (partial: Partial<AshbySubmitDiagnostics> = {}): AshbySubmitDiagnostics => ({
+      clicks: [onButton], requests: [], requestsDropped: 0, console: [], consoleDropped: 0, visibleErrors: [], ...partial
+    });
+    const saves = (count: number, clicks = 1): AshbySubmitNetwork => ({
+      calls: Array.from({ length: count }, () => ({ operation: "ApiSetFormValue", status: 200, failed: false, clicks })),
+      submits: [],
+      recaptchaTokenRequests: 0,
+      recaptchaTokenStatuses: []
+    });
+    const group = (method: string, host: string, path: string) => ({ method, host, path, resourceType: "fetch", clicks: 1, count: 1, lastStatus: 200, failed: false });
+
+    it("reduces request URLs to host and path, never a query, file name, email, or long number", () => {
+      expect(diagnosticRequestTarget("https://Jobs.AshbyHQ.com/api/non-user-graphql?op=ApiSetFormValue#x")).toEqual({ host: "jobs.ashbyhq.com", path: "/api/non-user-graphql" });
+      expect(diagnosticRequestTarget("https://files.example.test/uploads/123/Jordan-Rivera-resume.pdf")).toEqual({ host: "files.example.test", path: "/uploads/123/[file]" });
+      expect(diagnosticRequestTarget("https://api.example.test/users/jordan%40example.test/profile")).toEqual({ host: "api.example.test", path: "/users/[redacted]/profile" });
+      expect(diagnosticRequestTarget("https://api.example.test/track/order-12345678/a")).toEqual({ host: "api.example.test", path: "/track/order-[number]/a" });
+      expect(diagnosticRequestTarget("data:text/plain,abc")).toEqual({ host: "data", path: "" });
+      expect(diagnosticRequestTarget("not a url")).toBeNull();
+    });
+
+    it("sanitizes page texts of the page's own values, URL queries, emails, and long numbers", () => {
+      const values = scrubValuesFrom(["Jordan Rivera", "jordan.rivera@example.test"]);
+      const text = sanitizeDiagnosticText(
+        `Submit failed for Jordan   Rivera <jordan.rivera@example.test> (rivera) at https://telemetry.fixture.invalid/report?token=secret-1 order 12345678 ${"z".repeat(300)}`,
+        values
+      );
+      expect(text).toContain("telemetry.fixture.invalid/report");
+      expect(text).toContain("[redacted]");
+      expect(text).toContain("[number]");
+      for (const secret of ["Jordan", "Rivera", "rivera", "jordan.rivera@example.test", "token=", "secret-1", "12345678"]) expect(text).not.toContain(secret);
+      expect(text.length).toBeLessThanOrEqual(200);
+      expect(sanitizeDiagnosticText("other.person@example.test called", [])).toBe("[email] called");
+      expect(sanitizeDiagnosticText("Jordan Rivera", null)).toBe("");
+      // A value's words ("https", "example") never break a URL and keep its query.
+      const linked = sanitizeDiagnosticText("see https://report.example.test/r?token=secret-2", scrubValuesFrom(["https://www.linkedin.com/in/jordan-rivera", "jordan@example.test"]));
+      expect(linked).toBe("see report.[redacted].[redacted]/r");
+    });
+
+    it("scrubs whole values and their words, dropping short ones", () => {
+      expect(scrubValuesFrom(["  Jordan Rivera ", "ab", "NY", "jordan.rivera@example.test"])).toEqual([
+        "Jordan Rivera", "jordan.rivera@example.test", "Jordan", "Rivera", "jordan", "rivera", "example", "test"
+      ]);
+      expect(scrubValuesFrom(Array.from({ length: 400 }, (_, index) => `value-${index}`))).toHaveLength(300);
+    });
+
+    it("records clicks, requests after the first click, console errors, and page errors; the snapshot keeps no value", () => {
+      const recorder = createAshbyDiagnosticsRecorder();
+      recorder.request({}, "https://jobs.ashbyhq.com/api/non-user-graphql?op=ApiSetFormValue", "POST", "fetch");
+      recorder.consoleMessage("log", "Jordan Rivera typed");
+      recorder.consoleMessage("info", "info");
+      recorder.consoleMessage("warning", "Slow save for Jordan Rivera");
+      recorder.noteClick({ ...onButton, text: "Submit Application" });
+      const token = {};
+      recorder.request(token, "https://www.recaptcha.net/recaptcha/enterprise/reload?k=fixture-key", "post", "fetch");
+      recorder.response(token, 200);
+      const again = {};
+      recorder.request(again, "https://www.recaptcha.net/recaptcha/enterprise/reload?k=other", "POST", "fetch");
+      const lost = {};
+      recorder.request(lost, "https://fingerprint.example.test/session", "GET", "xhr");
+      recorder.failed(lost);
+      recorder.consoleMessage("error", "Submit failed for jordan.rivera@example.test see https://x.fixture.invalid/r?token=t-1");
+      recorder.pageError("TypeError: Rivera is not defined");
+      const snapshot = recorder.snapshot(scrubValuesFrom(["Jordan Rivera", "jordan.rivera@example.test"]), ["Please check Jordan Rivera", "Please check Jordan Rivera", ""]);
+      expect(snapshot.clicks).toEqual([onButton]);
+      expect(snapshot.requests).toEqual([
+        { method: "POST", host: "www.recaptcha.net", path: "/recaptcha/enterprise/reload", resourceType: "fetch", clicks: 1, count: 2, lastStatus: 200, failed: false },
+        { method: "GET", host: "fingerprint.example.test", path: "/session", resourceType: "xhr", clicks: 1, count: 1, lastStatus: null, failed: true }
+      ]);
+      expect(snapshot.console.map((entry) => [entry.kind, entry.clicks])).toEqual([["warning", 0], ["error", 1], ["page-error", 1]]);
+      expect(snapshot.console[1]!.text).toBe("Submit failed for [redacted] see x.fixture.invalid/r");
+      expect(snapshot.visibleErrors).toEqual(["Please check [redacted]"]);
+      const text = JSON.stringify(snapshot);
+      for (const secret of ["Jordan Rivera", "jordan.rivera@example.test", "Rivera", "token="]) expect(text).not.toContain(secret);
+      // Unreadable values: the texts are not kept at all.
+      const blind = recorder.snapshot(null, ["Please check Jordan Rivera"]);
+      expect(blind.console.every((entry) => entry.text === "")).toBe(true);
+      expect(blind.visibleErrors).toEqual([]);
+      expect(blind.clicks[0]!.text).toBe("");
+    });
+
+    it("drops a cancelled click's check, counts an unknown check as not proven, and caps its lists", () => {
+      const recorder = createAshbyDiagnosticsRecorder();
+      recorder.noteClick(onButton);
+      recorder.cancelClick();
+      expect(recorder.snapshot([], []).clicks).toEqual([]);
+      recorder.request({}, "https://example.test/before", "GET", "fetch");
+      expect(recorder.snapshot([], []).requests).toEqual([]);
+      recorder.noteClick(null);
+      expect(recorder.snapshot([], []).clicks).toEqual([{ ashbySubmitButton: false, hitTarget: false, hitElement: null, tag: "", typeAttribute: null, text: "" }]);
+      for (let index = 0; index < 85; index += 1) recorder.request({}, `https://example.test/path-${index}`, "GET", "fetch");
+      for (let index = 0; index < 25; index += 1) recorder.consoleMessage("error", `error ${index}`);
+      const capped = recorder.snapshot([], []);
+      expect(capped.requests).toHaveLength(80);
+      expect(capped.requestsDropped).toBe(5);
+      expect(capped.console).toHaveLength(20);
+      expect(capped.consoleDropped).toBe(5);
+      expect(() => recorder.response({}, 200)).not.toThrow();
+      expect(() => recorder.failed({})).not.toThrow();
+    });
+
+    it("judges a click that sent nothing only when everything proves it", () => {
+      expect(ashbyClickSentNothing(saves(2), diagnostics())).toBe(true);
+      expect(ashbyClickSentNothing(saves(2, 0), diagnostics({ requests: [group("POST", "www.recaptcha.net", "/recaptcha/enterprise/reload"), group("POST", "jobs.ashbyhq.com", "/api/non-user-graphql")] }))).toBe(true);
+      expect(ashbyClickSentNothing(null, diagnostics())).toBe(false);
+      expect(ashbyClickSentNothing(saves(1), null)).toBe(false);
+      expect(ashbyClickSentNothing(network([submit({ status: null })]), diagnostics())).toBe(false);
+      expect(ashbyClickSentNothing(saves(40, 0), diagnostics())).toBe(false);
+      expect(ashbyClickSentNothing({ ...saves(1), calls: [{ operation: "ApiJobPosting", status: 200, failed: false, clicks: 1 }] }, diagnostics())).toBe(false);
+      expect(ashbyClickSentNothing(saves(1), diagnostics({ clicks: [] }))).toBe(false);
+      expect(ashbyClickSentNothing(saves(1), diagnostics({ clicks: [{ ...onButton, ashbySubmitButton: false }] }))).toBe(false);
+      expect(ashbyClickSentNothing(saves(1), diagnostics({ clicks: [{ ...onButton, hitTarget: false, hitElement: "div.overlay" }] }))).toBe(false);
+      expect(ashbyClickSentNothing(saves(1), diagnostics({ requestsDropped: 1 }))).toBe(false);
+      expect(ashbyClickSentNothing(saves(1), diagnostics({ requests: [group("POST", "jobs.ashbyhq.com", "/api/other")] }))).toBe(false);
+    });
+
+    it("holds a click on Ashby's button that sent nothing as a site safeguard", async () => {
+      const seen = diagnostics({ requests: [group("POST", "www.recaptcha.net", "/recaptcha/enterprise/clr")] });
+      const { page, clicks } = ashbyPage({ network: () => saves(1, 0), diagnostics: seen });
+      const error = await submitAndConfirm(page, FAST).then(() => null, (caught: unknown) => caught);
+      expect(error).toBeInstanceOf(SubmissionChallenged);
+      expect(error).toBeInstanceOf(SubmissionHeld);
+      const message = (error as SubmissionChallenged).message;
+      expect(message.startsWith(`Ashby did not send the application from the agent's browser; submit it yourself at ${APPLICATION}.`)).toBe(true);
+      expect(message).toBe(ashbyNotSentMessage(APPLICATION));
+      const evidence = postSubmitEvidenceOf(error);
+      expect(evidence?.outcome).toBe("challenged");
+      expect(evidence?.challenge).toBe(ASHBY_NOT_SENT_DETAIL);
+      expect(evidence?.ashbyDiagnostics).toEqual(seen);
+      expect(evidence?.ashbyNetwork).toEqual(saves(1, 0));
+      expect(clicks()).toBe(1);
+      expect(ashbyNotSentMessage("")).toContain("submit it yourself at the posting's application page.");
+    });
+
+    it("keeps today's unconfirmed outcome when the click is not proven or Ashby sent something", async () => {
+      const outcome = async (options: Parameters<typeof ashbyPage>[0], busy = false) => {
+        const { page } = ashbyPage(options);
+        // Ashby's busy notice at every click: the existing busy outcome.
+        if (busy) page.ashbySubmitState = async () => ({ busySeen: true, busyShown: false, failureText: "", spamCheck: false });
+        return submitAndConfirm(page, FAST).then(() => null, (caught: unknown) => caught);
+      };
+      const offButton = await outcome({ network: () => saves(1, 0), diagnostics: diagnostics({ clicks: [{ ...onButton, ashbySubmitButton: false }] }) });
+      expect(offButton).toBeInstanceOf(SubmissionUnconfirmed);
+      expect((offButton as SubmissionUnconfirmed).evidence.ashbyDiagnostics?.clicks[0]?.ashbySubmitButton).toBe(false);
+      const noDiagnostics = await outcome({ network: () => saves(1, 0) });
+      expect(noDiagnostics).toBeInstanceOf(SubmissionUnconfirmed);
+      expect((noDiagnostics as SubmissionUnconfirmed).evidence.ashbyDiagnostics).toBeUndefined();
+      const busy = await outcome({ network: () => saves(1, 0), diagnostics: diagnostics() }, true);
+      expect(busy).toBeInstanceOf(SubmissionUnconfirmed);
+      expect((busy as SubmissionUnconfirmed).evidence.detail).toBe(ASHBY_BUSY_DETAIL);
+      const sent = await outcome({ network: (count) => (count > 0 ? network([submit({ status: 500, errorMessages: ["Internal error"] })]) : null), diagnostics: diagnostics() });
+      expect(sent).toBeInstanceOf(SubmissionUnconfirmed);
+      expect(sent).not.toBeInstanceOf(SubmissionHeld);
+    });
   });
 });
 

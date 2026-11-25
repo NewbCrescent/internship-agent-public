@@ -51,6 +51,14 @@
     never finish. ?failure=spam and ?failure=error draw Ashby's failure container (the spam-check
     variant with its "Try these steps" pane, or a generic error) after the click. A refused
     submission's server message here is fictional.
+    DERIVED, not captured (Ashby's public bundle index-DYvFpVME.js, read 2026-11-25, no submission
+    made): Ashby draws every button through one Button component with NO type attribute, so the
+    autofill pane's "Upload file", the file inputs' "Upload File", and "Submit Application" carry
+    none here (a <button> without one reports type "submit"); the location toggle and the Yes/No
+    options keep type="button" as captured. `fixture.autofillClicks` counts clicks on the autofill
+    pane's "Upload file". Query switch ?diagnostics=1 (SYNTHETIC, Track 27): the submit click logs a
+    console error and throws a page error naming the typed Name and Email, POSTs to reCAPTCHA's
+    /recaptcha/enterprise/clr with a query, and draws a toast naming the Name; it sends no submit.
   -->
   <div id="root">
     <h1 class="ashby-job-posting-heading">Robotics Software Intern</h1>
@@ -61,7 +69,7 @@
           <div class="_base"><div class="_content">
             <div class="_header"><h3 class="_title">Autofill from resume</h3></div>
             <p class="_description">Upload your resume here to autofill key application fields.</p>
-            <div class="_cta"><button class="_button _ctaButton" type="button">Upload file</button></div>
+            <div class="_cta"><button class="_button _ctaButton">Upload file</button></div>
           </div></div>
           <div class="_drag" data-state="hidden"><span>Drop your resume here!</span></div>
           <div class="_pending" data-state="hidden"><span aria-label="Loading..." role="progressbar"></span><span>Parsing your resume. Autofilling key fields...</span></div>
@@ -81,7 +89,7 @@
             <label class="_heading _required _label ashby-application-form-question-title" for="_systemfield_resume">Resume</label>
             <div role="presentation" class="_container ashby-application-form-input-file">
               <input accept="application/pdf,.pdf,.doc,.docx" type="file" tabindex="-1" id="_systemfield_resume" required>
-              <div class="_instructions"><button class="_button" type="button"><span><span>Upload File</span></span></button><p class="_dragInstructions">or drag and drop here</p></div>
+              <div class="_instructions"><button class="_button"><span><span>Upload File</span></span></button><p class="_dragInstructions">or drag and drop here</p></div>
             </div>
           </div>
           <div class="_fieldEntry ashby-application-form-field-entry" data-field-path="_systemfield_location">
@@ -97,7 +105,7 @@
             <label class="_heading _label ashby-application-form-question-title" for="29feadea-5d99-43a2-a604-5b95598bceea">Cover Letter&nbsp;</label>
             <div role="presentation" class="_container ashby-application-form-input-file">
               <input accept="application/pdf,.pdf,.doc,.docx" type="file" tabindex="-1" id="29feadea-5d99-43a2-a604-5b95598bceea">
-              <div class="_instructions"><button class="_button" type="button"><span><span>Upload File</span></span></button><p class="_dragInstructions">or drag and drop here</p></div>
+              <div class="_instructions"><button class="_button"><span><span>Upload File</span></span></button><p class="_dragInstructions">or drag and drop here</p></div>
             </div>
           </div>
           <div class="_fieldEntry ashby-application-form-field-entry" data-field-path="1323b323-1e0c-45e7-bcf7-b49e37897e1d">
@@ -123,7 +131,7 @@
             <div class="_option"><input type="radio" id="7d2e3f40-0000-4000-8000-0000000000c3_8e3f4051-0000-4000-8000-0000000000c4-labeled-radio-2" name="7d2e3f40-0000-4000-8000-0000000000c3_8e3f4051-0000-4000-8000-0000000000c4" value="No"><label for="7d2e3f40-0000-4000-8000-0000000000c3_8e3f4051-0000-4000-8000-0000000000c4-labeled-radio-2">No</label></div>
           </fieldset>
         </div>
-        <button class="_button _primary _submitButton ashby-application-form-submit-button" type="button"><span>Submit Application</span></button>
+        <button class="_button _primary _submitButton ashby-application-form-submit-button"><span>Submit Application</span></button>
       </div>
     </div>
     <footer><a href="https://www.ashbyhq.com" aria-label="Learn more about Ashby"><span>Powered by&nbsp;</span></a></footer>
@@ -136,8 +144,10 @@
   <script>
     const params = new URLSearchParams(location.search);
     const SAVING = params.get("saving");
-    const state = { uploads: {}, location: null, typed: [], yesno: {}, radio: null, pendingSaves: 0, busyClicks: 0, submitClicks: 0, submitted: false };
+    const state = { uploads: {}, location: null, typed: [], yesno: {}, radio: null, pendingSaves: 0, busyClicks: 0, submitClicks: 0, autofillClicks: 0, submitted: false };
     window.fixture = state;
+    // The autofill pane's "Upload file" button opens nothing here; its clicks are counted.
+    document.querySelector("._ctaButton").addEventListener("click", () => { state.autofillClicks += 1; });
     // Ashby's toasts: the busy notice goes here.
     const toasts = document.createElement("div");
     toasts.className = "_toasts";
@@ -222,6 +232,19 @@
         return;
       }
       state.submitClicks += 1;
+      // Synthetic noise for the read-only diagnostics (Track 27): nothing here is ever a submit request.
+      if (params.get("diagnostics") === "1") {
+        const name = document.getElementById("_systemfield_name").value;
+        const email = document.getElementById("_systemfield_email").value;
+        console.error("Fixture submit failed for " + name + " <" + email + "> see https://fixture-telemetry.example/report?token=fixture-secret-91");
+        setTimeout(() => { throw new Error("fixture page error for " + email); }, 0);
+        fetch("https://www.recaptcha.net/recaptcha/enterprise/clr?k=fixture-secret-91", { method: "POST", mode: "no-cors", body: "x" }).catch(() => {});
+        const notice = document.createElement("div");
+        notice.className = "_toast";
+        notice.textContent = "Fixture notice for " + name;
+        document.querySelector(".ashby-application-form-container").insertAdjacentElement("beforebegin", notice);
+        return;
+      }
       const failure = FAILURES[params.get("failure")];
       if (failure) {
         setTimeout(() => {

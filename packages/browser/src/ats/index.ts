@@ -11,3 +11,4 @@ export * from "./jobvite-consent";
 export * from "./ashby-submit";
 export * from "./ashby-network";
 export * from "./oracle-apply";
+export * from "./ashby-diagnostics";

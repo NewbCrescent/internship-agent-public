@@ -45,6 +45,10 @@
     answer).
     SYNTHETIC (not observed on Ashby): `?stuck=1` makes the Visa Support question ignore every click,
     a required radio that will not take.
+    SYNTHETIC (Track 27): `?network=frame-token` asks for the token from inside a cross-site
+    reCAPTCHA frame (https://www.recaptcha.net/recaptcha/enterprise/anchor, served by the harness):
+    the page posts the frame a message, the frame makes the token request itself and answers
+    "fixture-token", and only then does the page send the submit (answered like `accepted`).
   -->
   <div id="root">
     <h1 class="ashby-job-posting-heading">Robotics Software Intern</h1>
@@ -132,13 +136,42 @@
       }
       render();
     });
+    let tokenFrame = null;
+    const frameToken = async () => {
+      if (!tokenFrame) {
+        tokenFrame = document.createElement("iframe");
+        tokenFrame.title = "reCAPTCHA";
+        tokenFrame.width = "256";
+        tokenFrame.height = "60";
+        const loaded = new Promise((resolve) => tokenFrame.addEventListener("load", resolve, { once: true }));
+        tokenFrame.src = "https://www.recaptcha.net/recaptcha/enterprise/anchor?k=fixture-site-key&size=invisible";
+        document.body.appendChild(tokenFrame);
+        await loaded;
+      }
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => { window.removeEventListener("message", onMessage); resolve(false); }, 3000);
+        const onMessage = (event) => {
+          if (event.source !== tokenFrame.contentWindow || event.data !== "fixture-token") return;
+          clearTimeout(timer);
+          window.removeEventListener("message", onMessage);
+          resolve(true);
+        };
+        window.addEventListener("message", onMessage);
+        tokenFrame.contentWindow.postMessage("fixture-execute", "*");
+      });
+    };
     document.querySelector(".ashby-application-form-submit-button").addEventListener("click", async () => {
       state.submitClicks += 1;
-      // reCAPTCHA Enterprise's execute(): a token request first.
-      try {
-        await fetch("https://www.recaptcha.net/recaptcha/enterprise/reload?k=fixture-site-key", { method: "POST", mode: "no-cors", body: "fixture" });
-      } catch {
-        // The token request's answer is never read here.
+      if (NETWORK === "frame-token") {
+        // The token request made inside the cross-site reCAPTCHA frame; no answer within 3 s sends nothing.
+        if (!(await frameToken())) return;
+      } else {
+        // reCAPTCHA Enterprise's execute(): a token request first.
+        try {
+          await fetch("https://www.recaptcha.net/recaptcha/enterprise/reload?k=fixture-site-key", { method: "POST", mode: "no-cors", body: "fixture" });
+        } catch {
+          // The token request's answer is never read here.
+        }
       }
       // An execute that never resolves: the submit is never sent.
       if (NETWORK === "hang") return;

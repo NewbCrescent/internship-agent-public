@@ -116,9 +116,19 @@
  * statuses, booleans, codes and messages; never the answers, token, or
  * fingerprint the body holds); FormSubmitSuccess confirms with no success
  * container, RECAPTCHA_SCORE_BELOW_THRESHOLD is held as challenged after one
- * click, FormRender field errors pause the named field, and a token request
- * never followed by a submit or a 500 fails closed with the record in the
- * evidence.
+ * click, FormRender field errors pause the named field, a 500 fails closed
+ * with the record in the evidence, and a token request never followed by a
+ * submit is held as Ashby's not-sent safeguard (Track 27). Ashby's buttons
+ * carry no type attribute, as in production (Track 27): the submit click goes
+ * to Ashby's own Submit Application button, never the autofill pane's "Upload
+ * file" (counted by the fixture). A click on Ashby's button that sends nothing
+ * (the silent page, ?network=hang) is held as challenged with Ashby's
+ * read-only diagnostics in the evidence: the click check (on Ashby's button,
+ * hit test passed, no type attribute), the request groups after the click
+ * (method, host, path; never a query), console and page errors, and visible
+ * errors, with the typed Name and Email, their words, and URL queries removed
+ * (?diagnostics=1). A token request made inside a cross-site reCAPTCHA frame
+ * (?network=frame-token) is seen by the same watch.
  *
  * Usage: pnpm test:browser:greenhouse
  */
@@ -143,6 +153,7 @@ import {
   postSubmitEvidenceOf,
   recognizeCurrentForm,
   ASHBY_ACCEPTED_CONFIRMATION,
+  ASHBY_NOT_SENT_DETAIL,
   ASHBY_SPAM_CHECK_DETAIL,
   invalidFieldPauses,
   type AshbySubmitNetwork,
@@ -182,6 +193,14 @@ const PROFILE = {
   linkedinUrl: "https://www.linkedin.com/in/jordan-fixture", addressCity: "Berkeley", addressRegion: "CA"
 };
 /** The DataDome page the read-only capture browser met on SmartRecruiters' application page, reduced. */
+/** A fictional reCAPTCHA anchor frame: on its parent's message it makes the token request itself, then answers. */
+const RECAPTCHA_ANCHOR_FRAME = `<!doctype html><html><head><meta charset="utf-8"><title>reCAPTCHA</title></head><body><script>
+  window.addEventListener("message", async (event) => {
+    if (event.source !== parent || event.data !== "fixture-execute") return;
+    try { await fetch("/recaptcha/enterprise/reload?k=fixture-site-key", { method: "POST", body: "fixture" }); } catch {}
+    parent.postMessage("fixture-token", "*");
+  });
+</script></body></html>`;
 const DATADOME_PAGE = `<!doctype html><html><head><title>smartrecruiters.com</title></head><body style="margin:0">
   <iframe src="https://geo.captcha-delivery.com/captcha/?initialCid=FIXTURE" title="DataDome CAPTCHA" width="100%" height="600" frameborder="0"></iframe></body></html>`;
 
@@ -228,6 +247,8 @@ async function main(): Promise<void> {
       "jobs.jobvite.com/fixturerobotics/job/oFixture1/apply": fixture("jobvite-consent.html"),
       "jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a2/application": fixture("ashby-texting-consent.html"),
       "jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a3/application": fixture("ashby-value-select.html"),
+      // The cross-site reCAPTCHA frame of fixtures/ashby-value-select.html?network=frame-token (Track 27).
+      "www.recaptcha.net/recaptcha/enterprise/anchor": RECAPTCHA_ANCHOR_FRAME,
       // Post-submit confirmation pages.
       "job-boards.greenhouse.io/fixturerobotics/jobs/1000001/confirmation": fixture("greenhouse-confirmation.html"),
       "jobs.lever.co/fixturerobotics/00000000-0000-4000-8000-0000000000b1/thanks": fixture("lever-thanks.html")
@@ -264,7 +285,7 @@ async function main(): Promise<void> {
           render = "";
         }
         const json = (status: number, payload: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(payload) });
-        if (scenario === "accepted") {
+        if (scenario === "accepted" || scenario === "frame-token") {
           await json(200, { data: { submitApplicationFormAction: { applicationFormResult: { __typename: "FormSubmitSuccess" }, messages: { blockMessageForCandidateHtml: null } } } });
         } else if (scenario === "recaptcha") {
           await json(200, { data: null, errors: [{ message: "fixture refusal", extensions: { ashbyErrorType: "RECAPTCHA_SCORE_BELOW_THRESHOLD", message: "Your application could not be verified." } }] });
@@ -661,16 +682,52 @@ async function main(): Promise<void> {
       const submittedTab = await open(`${ASHBY}?${query}`);
       const outcome = await submitAndConfirm(createPlaywrightPage(submittedTab), { timeoutMs: 3_000, pollMs: 100 }).catch((error: unknown) => `ERROR ${String(error)}`);
       check(outcome.includes(text), `Ashby ?${query}: ${outcome.slice(0, 200)}`);
+      // Track 27: the buttons carry no type attribute, as on Ashby; the click goes to Submit Application, never "Upload file".
+      const clicked = await submittedTab.evaluate(() => (window as unknown as { fixture: { autofillClicks: number; submitClicks: number } }).fixture);
+      check(clicked.autofillClicks === 0 && clicked.submitClicks === 1, `Ashby ?${query} clicks: ${JSON.stringify(clicked)}`);
       await submittedTab.close();
     }
     {
+      // Track 27: a click that reached Ashby's own submit button and sent nothing is held as a site safeguard.
       const silentTab = await open(ASHBY);
       const outcome = await submitAndConfirm(createPlaywrightPage(silentTab), { timeoutMs: 1_500, pollMs: 100 }).then(() => null, (error: unknown) => error);
-      check(outcome instanceof Error && /no (?:new )?confirmation/.test(outcome.message) && outcome.message.includes("not marked submitted"),
-        `Ashby with no success state: ${outcome instanceof Error ? outcome.message : "submitted"}`);
-      check(outcome instanceof SubmissionUnconfirmed && outcome.evidence.outcome === "unknown" && outcome.evidence.url === ASHBY,
-        `Ashby with no success state, evidence: ${outcome instanceof SubmissionUnconfirmed ? JSON.stringify({ outcome: outcome.evidence.outcome, url: outcome.evidence.url }) : "none"}`);
+      check(outcome instanceof SubmissionChallenged && outcome.message.startsWith(`Ashby did not send the application from the agent's browser; submit it yourself at ${ASHBY}`)
+        && outcome.message.includes("not marked submitted"), `Ashby with no success state: ${outcome instanceof Error ? `${outcome.constructor.name}: ${outcome.message}` : "submitted"}`);
+      const silent = postSubmitEvidenceOf(outcome);
+      check(silent?.outcome === "challenged" && silent.challenge === ASHBY_NOT_SENT_DETAIL && silent.url === ASHBY,
+        `Ashby with no success state, evidence: ${JSON.stringify({ outcome: silent?.outcome, challenge: silent?.challenge, url: silent?.url })}`);
+      check(JSON.stringify(silent?.ashbyDiagnostics?.clicks) === JSON.stringify([{ ashbySubmitButton: true, hitTarget: true, hitElement: null, tag: "button", typeAttribute: null, text: "Submit Application" }]),
+        `Ashby with no success state, click check: ${JSON.stringify(silent?.ashbyDiagnostics?.clicks)}`);
+      check(JSON.stringify(silent?.ashbyNetwork?.submits) === "[]", `Ashby with no success state, network: ${JSON.stringify(silent?.ashbyNetwork)}`);
+      const silentClicks = await silentTab.evaluate(() => (window as unknown as { fixture: { autofillClicks: number; submitClicks: number } }).fixture);
+      check(silentClicks.autofillClicks === 0 && silentClicks.submitClicks === 1, `Ashby with no success state, clicks: ${JSON.stringify(silentClicks)}`);
       await silentTab.close();
+    }
+    // Track 27: the diagnostics keep the page's console and page errors, its requests after the click (no query), and its
+    // visible errors, with the typed Name and Email, their words, and URL queries removed.
+    {
+      const tab = await open(`${ASHBY}?diagnostics=1`);
+      const page = createPlaywrightPage(tab);
+      const form = await recognizeCurrentForm(page);
+      const id = (label: string) => form.fields.find((field) => field.label === label)?.id ?? `missing-${label}`;
+      const filled = await applyDecisions(page, form, [
+        { fieldId: id("Name"), action: "fill", value: PROFILE.fullName, basis: null, reason: "fixture", pause: null },
+        { fieldId: id("Email"), action: "fill", value: PROFILE.email, basis: null, reason: "fixture", pause: null }
+      ]);
+      check(filled.unfilled.length === 0, `Ashby ?diagnostics=1 unfilled: ${JSON.stringify(filled.unfilled)}`);
+      const outcome = await submitAndConfirm(page, { timeoutMs: 1_500, pollMs: 100, atsKind: "ashby" }).then(() => null, (error: unknown) => error);
+      check(outcome instanceof SubmissionChallenged, `Ashby ?diagnostics=1: ${outcome instanceof Error ? `${outcome.constructor.name}: ${outcome.message}` : "submitted"}`);
+      const diagnostics = postSubmitEvidenceOf(outcome)?.ashbyDiagnostics;
+      const consoleError = diagnostics?.console.find((entry) => entry.kind === "error");
+      const pageError = diagnostics?.console.find((entry) => entry.kind === "page-error");
+      check(Boolean(consoleError?.text.includes("[redacted]")) && Boolean(pageError?.text.includes("[redacted]")), `Ashby ?diagnostics=1 console: ${JSON.stringify(diagnostics?.console)}`);
+      check(Boolean(diagnostics?.requests.some((entry) => entry.method === "POST" && entry.host === "www.recaptcha.net" && entry.path === "/recaptcha/enterprise/clr")),
+        `Ashby ?diagnostics=1 requests: ${JSON.stringify(diagnostics?.requests)}`);
+      check(Boolean(diagnostics?.visibleErrors.some((text) => text.includes("Fixture notice for [redacted]"))), `Ashby ?diagnostics=1 visible errors: ${JSON.stringify(diagnostics?.visibleErrors)}`);
+      const kept = JSON.stringify(diagnostics ?? null);
+      const secrets = [PROFILE.fullName, PROFILE.email, ...PROFILE.fullName.split(/\s+/).filter((token) => token.length >= 4), "fixture-secret-91", "token="];
+      check(diagnostics !== undefined && secrets.every((secret) => !kept.includes(secret)), `Ashby ?diagnostics=1 kept: ${secrets.filter((secret) => kept.includes(secret)).join(", ")}`);
+      await tab.close();
     }
 
     // Ashby saves each answer as it is set and answers a submit click during a save with "We're updating your
@@ -745,7 +802,7 @@ async function main(): Promise<void> {
         const text = JSON.stringify(network ?? null);
         return [PROFILE.fullName, PROFILE.email, "fixture-token", "UNIVERSAL_ENT", "fixture-fingerprint"].filter((secret) => text.includes(secret));
       };
-      for (const scenario of ["accepted", "recaptcha", "form-errors", "hang", "server-error"] as const) {
+      for (const scenario of ["accepted", "recaptcha", "form-errors", "hang", "server-error", "frame-token"] as const) {
         const { tab, page, form } = await recognizeValueSelect(`?network=${scenario}`);
         const id = (label: string) => form.fields.find((field) => field.label === label)?.id ?? `missing-${label}`;
         const decisions: FillDecision[] = [
@@ -781,8 +838,20 @@ async function main(): Promise<void> {
           const paused = invalidFieldPauses(form, [], [], invalid);
           check(paused.pauses.length === 1 && paused.pauses[0]!.fieldId === id(VISA) && !paused.pauses[0]!.safeguard, `Ashby ?network=form-errors pauses: ${JSON.stringify(paused.pauses)}`);
         } else if (scenario === "hang") {
-          check(outcome instanceof SubmissionUnconfirmed, `Ashby ?network=hang: ${described}`);
+          // Track 27: the click reached Ashby's submit button and Ashby sent nothing after its token request: held.
+          check(outcome instanceof SubmissionChallenged && evidence?.challenge === ASHBY_NOT_SENT_DETAIL, `Ashby ?network=hang: ${described}`);
           check(JSON.stringify(evidence?.ashbyNetwork?.submits) === "[]" && evidence?.ashbyNetwork?.recaptchaTokenRequests === 1, `Ashby ?network=hang record: ${JSON.stringify(evidence?.ashbyNetwork)}`);
+          check(Boolean(evidence?.ashbyDiagnostics?.requests.some((entry) => entry.method === "POST" && entry.host === "www.recaptcha.net" && entry.path === "/recaptcha/enterprise/reload")),
+            `Ashby ?network=hang diagnostics: ${JSON.stringify(evidence?.ashbyDiagnostics?.requests)}`);
+          check(sent.submitClicks === 1, `Ashby ?network=hang clicked again: ${sent.submitClicks}`);
+        } else if (scenario === "frame-token") {
+          // Track 27: the token request made inside the cross-site reCAPTCHA frame is seen by the watch.
+          check(outcome === ASHBY_ACCEPTED_CONFIRMATION, `Ashby ?network=frame-token: ${described}`);
+          const network = await page.ashbySubmitNetwork!();
+          check(network?.recaptchaTokenRequests === 1, `Ashby ?network=frame-token token requests: ${JSON.stringify(network)}`);
+          const diagnostics = await page.ashbySubmitDiagnostics!();
+          check(Boolean(diagnostics?.requests.some((entry) => entry.host === "www.recaptcha.net" && entry.path === "/recaptcha/enterprise/reload")),
+            `Ashby ?network=frame-token diagnostics: ${JSON.stringify(diagnostics?.requests)}`);
         } else {
           check(outcome instanceof SubmissionUnconfirmed, `Ashby ?network=server-error: ${described}`);
           check(evidence?.ashbyNetwork?.submits[0]?.status === 500 && evidence.ashbyNetwork.submits[0].success === false, `Ashby ?network=server-error record: ${JSON.stringify(evidence?.ashbyNetwork)}`);

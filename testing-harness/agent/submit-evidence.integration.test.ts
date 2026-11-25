@@ -11,8 +11,16 @@ import {
   saveBrowserRun, saveVerificationReport, setJobStatus, updateBrowserRun
 } from "@internship-agent/db";
 import type { BrowserRun } from "@internship-agent/domain";
-import { createAshbyNetworkRecorder, submitEvidenceRoot, type BrowserPage, type PostSubmitEvidence } from "@internship-agent/browser";
 import {
+  createAshbyDiagnosticsRecorder,
+  createAshbyNetworkRecorder,
+  scrubValuesFrom,
+  submitEvidenceRoot,
+  type BrowserPage,
+  type PostSubmitEvidence
+} from "@internship-agent/browser";
+import {
+  describeAshbyDiagnostics,
   describeAshbyNetwork,
   readJobEvidence,
   readSubmitEvidence,
@@ -786,6 +794,105 @@ describe("Ashby's network record in the evidence (Track 22)", () => {
       "  - ApiSubmitSingleApplicationFormAction after click 1: request failed; token dummy; result FormSubmitSuccess (accepted); error codes: none; block message shown"
     ]);
     expect(describeAshbyNetwork(null)).toEqual([]);
+    database.close();
+  });
+});
+
+describe("Ashby's submit diagnostics in the evidence (Track 27)", () => {
+  const PERSONAL = ["Jordan Rivera", "Rivera", "jordan.rivera@example.test", "jordan@example.test", "5550100199", "signature=", "fixture-secret"];
+  const URL = "https://jobs.ashbyhq.com/fixturerobotics/1/application";
+
+  /** As the page adapter builds it: the page's values scrubbed at snapshot, plus raw texts the writer must redact again. */
+  function recordedDiagnostics() {
+    const recorder = createAshbyDiagnosticsRecorder();
+    recorder.noteClick({ ashbySubmitButton: true, hitTarget: true, hitElement: null, tag: "button", typeAttribute: null, text: "Submit Application" });
+    const token = {};
+    recorder.request(token, "https://www.recaptcha.net/recaptcha/enterprise/reload?k=fixture-secret", "POST", "fetch");
+    recorder.response(token, 200);
+    const upload = {};
+    recorder.request(upload, "https://files.example.test/uploads/5550100199/Jordan-Rivera-resume.pdf?signature=abc", "PUT", "fetch");
+    recorder.failed(upload);
+    recorder.consoleMessage("error", "Submit failed for Jordan Rivera <jordan.rivera@example.test> see https://telemetry.fixture.invalid/r?token=fixture-secret");
+    recorder.pageError("Error: no session for Jordan Rivera");
+    const snapshot = recorder.snapshot(scrubValuesFrom(["Jordan Rivera", "jordan.rivera@example.test"]), ["Fixture notice for Jordan Rivera"]);
+    return {
+      ...snapshot,
+      // Raw texts (as if a value could not be matched): the writer redacts emails, URL queries, and long numbers again.
+      visibleErrors: [...snapshot.visibleErrors, "Call 5550100199 or mail jordan@example.test about https://help.fixture.invalid/a?signature=abc"]
+    };
+  }
+
+  it("stores the diagnostics redacted again, nothing personal, and reads older files as null", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    const saved = await savePostSubmitEvidence({
+      database, dataDir, run, page: stubPage(), now: new Date("2026-11-25T10:00:00.000Z"),
+      evidence: evidence({ outcome: "challenged", url: URL, invalidFields: [], alertText: "", bodyText: "Submit Application", challenge: "fixture challenge", ashbyDiagnostics: recordedDiagnostics() })
+    });
+    const raw = readFileSync(join(dataDir, saved.relativeDir, "evidence.json"), "utf8");
+    const stored = submitEvidenceFileSchema.parse(JSON.parse(raw));
+    expect(stored.ashbyDiagnostics).toEqual({
+      clicks: [{ ashbySubmitButton: true, hitTarget: true, hitElement: null, tag: "button", typeAttribute: null, text: "Submit Application" }],
+      requests: [
+        { method: "POST", host: "www.recaptcha.net", path: "/recaptcha/enterprise/reload", resourceType: "fetch", clicks: 1, count: 1, lastStatus: 200, failed: false },
+        { method: "PUT", host: "files.example.test", path: "/uploads/[number]/[file]", resourceType: "fetch", clicks: 1, count: 1, lastStatus: null, failed: true }
+      ],
+      requestsDropped: 0,
+      console: [
+        { kind: "error", text: "Submit failed for [redacted] <[redacted]> see telemetry.fixture.invalid/r", clicks: 1 },
+        { kind: "page-error", text: "Error: no session for [redacted]", clicks: 1 }
+      ],
+      consoleDropped: 0,
+      visibleErrors: ["Fixture notice for [redacted]", "Call [number] or mail [email] about https://help.fixture.invalid/a"]
+    });
+    for (const secret of PERSONAL) expect(raw).not.toContain(secret);
+    const old = submitEvidenceFileSchema.parse({
+      version: 1, runId: run.id, jobId: run.jobId, capturedAt: "2026-11-19T10:00:00.000Z", outcome: "unknown", url: "", invalidFields: [],
+      alertText: "", challenge: null, text: "", screenshot: null
+    });
+    expect(old.ashbyDiagnostics).toBeNull();
+    const plain = await savePostSubmitEvidence({ database, dataDir, run, page: stubPage(), evidence: evidence(), now: new Date("2026-11-25T11:00:00.000Z") });
+    expect(JSON.parse(readFileSync(join(dataDir, plain.relativeDir, "evidence.json"), "utf8")).ashbyDiagnostics).toBeNull();
+    database.close();
+  });
+
+  it("prints the diagnostics with pnpm run:evidence, nothing personal", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    await savePostSubmitEvidence({
+      database, dataDir, run, page: stubPage("throw"), now: new Date("2026-11-25T10:00:00.000Z"),
+      evidence: evidence({ outcome: "challenged", url: URL, invalidFields: [], alertText: "", bodyText: "Submit Application", challenge: "fixture challenge", ashbyDiagnostics: recordedDiagnostics() })
+    });
+    const lines: string[] = [];
+    expect(await runEvidenceCommand(["--run", run.id], { open: () => database, close: () => {}, dataDir: () => dataDir, log: (line) => { lines.push(line); } })).toBe(0);
+    expect(lines).toEqual(expect.arrayContaining([
+      "Ashby submit click(s): 1",
+      "  - click 1: on Ashby's submit button: yes; hit test at its centre: yes; button, no type attribute; \"Submit Application\"",
+      "Requests after the first click: 2 (0 not kept)",
+      "  - POST www.recaptcha.net/recaptcha/enterprise/reload ×1 after click 1: HTTP 200",
+      "  - PUT files.example.test/uploads/[number]/[file] ×1 after click 1: failed",
+      "Console after the watch started: 2",
+      "  - [error, click 1] Submit failed for [redacted] <[redacted]> see telemetry.fixture.invalid/r",
+      "  - [page-error, click 1] Error: no session for [redacted]",
+      "Visible errors:",
+      "  - Fixture notice for [redacted]"
+    ]));
+    const text = lines.join("\n");
+    for (const secret of PERSONAL) expect(text).not.toContain(secret);
+    expect(describeAshbyDiagnostics(null)).toEqual([]);
+    expect(describeAshbyDiagnostics({
+      clicks: [{ ashbySubmitButton: false, hitTarget: false, hitElement: "div.overlay", tag: "button", typeAttribute: "button", text: "Upload file" }],
+      requests: [], requestsDropped: 3, console: [{ kind: "warning", text: "", clicks: 0 }], consoleDropped: 0, visibleErrors: []
+    })).toEqual([
+      "Ashby submit click(s): 1",
+      "  - click 1: on Ashby's submit button: no; hit test at its centre: no, found div.overlay; button, type \"button\"; \"Upload file\"",
+      "Requests after the first click: 0 (3 not kept)",
+      "Console after the watch started: 1",
+      "  - [warning, click 0] (not kept)",
+      "Visible errors: none"
+    ]);
     database.close();
   });
 });

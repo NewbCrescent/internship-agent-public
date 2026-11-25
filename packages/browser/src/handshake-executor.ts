@@ -16,6 +16,18 @@ import {
   type AshbySubmitNetwork
 } from "./ats/ashby-network";
 import {
+  ASHBY_NOT_SENT_DETAIL,
+  ashbyClickSentNothing,
+  ashbyNotSentMessage,
+  createAshbyDiagnosticsRecorder,
+  describeSubmitTargetIn,
+  readAshbyVisibleErrorsIn,
+  readFormValuesIn,
+  scrubValuesFrom,
+  type AshbyDiagnosticsRecorder,
+  type AshbySubmitDiagnostics
+} from "./ats/ashby-diagnostics";
+import {
   ASHBY_BUSY_DETAIL,
   ASHBY_RECLICK_SETTLE_MS,
   ASHBY_SAVE_SETTLE_MS,
@@ -125,6 +137,13 @@ export type BrowserPage = {
    * answers still being read; null when no watch was started.
    */
   ashbySubmitNetwork?(waitMs?: number): Promise<AshbySubmitNetwork | null>;
+  /**
+   * Ashby only (ats/ashby-diagnostics.ts): read-only diagnostics kept by the
+   * same watch (each submit click's target and hit test, request hosts and
+   * paths after the first click, console and page errors, visible errors),
+   * sanitized of the page's own values; null when no watch was started.
+   */
+  ashbySubmitDiagnostics?(): Promise<AshbySubmitDiagnostics | null>;
   /**
    * Follows the posting's Apply entry once (chooseApplyEntry) and returns the
    * URL it reached, or null when the page has none.
@@ -368,7 +387,10 @@ export async function applyDecisions(
  *   server's FormSubmitSuccess confirms, a FormRender naming fields pauses
  *   them (approval withdrawn), a `RECAPTCHA_SCORE_BELOW_THRESHOLD` error is
  *   held as challenged, and the block message is refused; once a submit
- *   request went out after a click, the agent never clicks again.
+ *   request went out after a click, the agent never clicks again. When the
+ *   read-only diagnostics (ats/ashby-diagnostics.ts) prove the click reached
+ *   Ashby's own submit button and Ashby sent no submit request, the run is
+ *   held as a site safeguard (`SubmissionChallenged`), never retried.
  *
  * Every error after the click carries the page's evidence; the agent writes it
  * to the run's local folder.
@@ -545,6 +567,23 @@ export async function submitAndConfirm(
     const refusal = page.alertText ? (await page.alertText()).trim() : "";
     const kind = classifyUnconfirmed({ invalidBefore, invalidAfter, submitShown, alertText: refusal });
     const ashbyBusy = ashby && page.ashbySubmitState ? (await page.ashbySubmitState().catch(() => EMPTY_ASHBY_SUBMIT_STATE)).busySeen : false;
+    // Ashby's click reached its Submit Application button and Ashby sent nothing (Track 27): held as a site safeguard.
+    if (ashby && kind === "unknown" && !ashbyBusy && page.ashbySubmitDiagnostics) {
+      const network = page.ashbySubmitNetwork ? await page.ashbySubmitNetwork().catch(() => null) : null;
+      const diagnostics = await page.ashbySubmitDiagnostics().catch(() => null);
+      if (ashbyClickSentNothing(network, diagnostics)) {
+        throw new SubmissionChallenged(
+          ashbyNotSentMessage(stripUrlQuery(page.url())),
+          scrubbed(await capturePostSubmitEvidence(page, "challenged", {
+            invalidFields: invalidAfter,
+            alertText: refusal,
+            challenge: ASHBY_NOT_SENT_DETAIL,
+            ashbyNetwork: network,
+            ashbyDiagnostics: diagnostics
+          }))
+        );
+      }
+    }
     const evidence = scrubbed(await capturePostSubmitEvidence(page, kind, {
       invalidFields: invalidAfter,
       alertText: refusal,
@@ -608,6 +647,8 @@ export function createPlaywrightPage(page: Page): BrowserPage {
   const within = () => scope ?? page;
   // Ashby's network record, once watchAshbyNetwork started it (ats/ashby-network.ts).
   let ashbyNetwork: AshbyNetworkRecorder | null = null;
+  // Ashby's read-only submit diagnostics, started with the network record (ats/ashby-diagnostics.ts).
+  let ashbyDiagnostics: AshbyDiagnosticsRecorder | null = null;
   // The field's own element by id, so two fields with one label ("Attach")
   // never hit the same control; the label is the fallback.
   const locateField = async (field: BrowserField): Promise<Locator> => {
@@ -759,11 +800,19 @@ export function createPlaywrightPage(page: Page): BrowserPage {
       await ensureNameShim(page);
       const index = await root().evaluate(findSubmitIndex);
       if (index < 0) throw new Error("No submit control was found.");
+      const target = root().locator(SUBMIT_SELECTOR).nth(index);
+      if (ashbyDiagnostics) {
+        // Read-only: what the click will hit, read just before it.
+        await target.scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => undefined);
+        const check = await target.evaluate(describeSubmitTargetIn).catch(() => null);
+        ashbyDiagnostics.noteClick(check);
+      }
       ashbyNetwork?.noteClick();
       try {
-        await root().locator(SUBMIT_SELECTOR).nth(index).click();
+        await target.click();
       } catch (error) {
         ashbyNetwork?.cancelClick();
+        ashbyDiagnostics?.cancelClick();
         throw error;
       }
     },
@@ -870,9 +919,17 @@ export function createPlaywrightPage(page: Page): BrowserPage {
       if (ashbyNetwork) return;
       const recorder = createAshbyNetworkRecorder();
       ashbyNetwork = recorder;
+      // Playwright's own event listeners only: nothing is injected into the page and no launch flag changes.
+      const diagnostics = createAshbyDiagnosticsRecorder();
+      ashbyDiagnostics = diagnostics;
       page.on("request", (request) => {
         try {
           recorder.request(request, request.url(), () => request.postData());
+        } catch {
+          // The record never breaks the page.
+        }
+        try {
+          diagnostics.request(request, request.url(), request.method(), request.resourceType());
         } catch {
           // The record never breaks the page.
         }
@@ -883,6 +940,11 @@ export function createPlaywrightPage(page: Page): BrowserPage {
         } catch {
           // The record never breaks the page.
         }
+        try {
+          diagnostics.response(response.request(), response.status());
+        } catch {
+          // The record never breaks the page.
+        }
       });
       page.on("requestfailed", (request) => {
         try {
@@ -890,9 +952,40 @@ export function createPlaywrightPage(page: Page): BrowserPage {
         } catch {
           // The record never breaks the page.
         }
+        try {
+          diagnostics.failed(request);
+        } catch {
+          // The record never breaks the page.
+        }
+      });
+      page.on("console", (message) => {
+        try {
+          diagnostics.consoleMessage(message.type(), message.text());
+        } catch {
+          // The record never breaks the page.
+        }
+      });
+      page.on("pageerror", (error) => {
+        try {
+          diagnostics.pageError(`${error.name}: ${error.message}`);
+        } catch {
+          // The record never breaks the page.
+        }
       });
     },
     ashbySubmitNetwork: async (waitMs) => (ashbyNetwork ? ashbyNetwork.snapshot(waitMs) : null),
+    ashbySubmitDiagnostics: async () => {
+      if (!ashbyDiagnostics) return null;
+      try {
+        await ensureNameShim(page);
+      } catch {
+        // The reads below fail closed without it.
+      }
+      // The page's values are read only to scrub them from the texts; null drops the texts.
+      const values = await page.evaluate(readFormValuesIn).then(scrubValuesFrom, () => null);
+      const errors = await page.evaluate(readAshbyVisibleErrorsIn).catch(() => [] as string[]);
+      return ashbyDiagnostics.snapshot(values, errors);
+    },
     followApplyEntry: async () => {
       // The whole page, not a dialog scope: the main frame plus same-host frames
       // (iCIMS draws the job inside a same-host iframe). One entry, at most.
@@ -1896,20 +1989,36 @@ const FORM_CONTROLS = 'input:not([type="hidden"]), textarea, select';
 
 /**
  * Index (among `button, input[type="submit"]` under `root`) of the terminal
- * submit control, or -1. A control that says submit wins over one that only
- * says apply; a "Quick apply" opener, a cancel control, and hidden or
- * disabled controls never count.
+ * submit control, or -1. On Ashby its own submit button
+ * (`.ashby-application-form-submit-button`) always wins, chosen while visible
+ * even when disabled (Ashby disables it while loading; the click then waits
+ * for it), and no other button on that page ever counts. Elsewhere a control
+ * whose text (or an input's value) says submit wins over one that only says
+ * apply, and the first submit-typed control is the last resort; a "Quick
+ * apply" opener, a cancel control, and hidden or disabled controls never
+ * count. A button's default type is never read as saying submit: a
+ * `<button>` with no type attribute reports "submit", Ashby draws every
+ * button that way, and before Track 27 every Ashby click went to the
+ * autofill pane's "Upload file" button. Runs in the page.
  */
 function findSubmitIndex(root: Element): number {
-  const candidates = [...root.querySelectorAll('button, input[type="submit"]')].map((element, index) => ({
-    index,
-    element: element as HTMLElement,
-    text: `${element.textContent ?? ""} ${(element as HTMLInputElement).value ?? ""} ${(element as HTMLInputElement).type ?? ""}`
-  })).filter((candidate) => !/\b(quick apply|cancel)\b/i.test(candidate.text)
+  const all = [...root.querySelectorAll('button, input[type="submit"]')];
+  const ashbySubmits = all.filter((element) => element.matches(".ashby-application-form-submit-button"));
+  if (ashbySubmits.length > 0) {
+    const shown = ashbySubmits.find((element) => element.getClientRects().length > 0);
+    return shown ? all.indexOf(shown) : -1;
+  }
+  const candidates = all.map((element, index) => {
+    const value = element instanceof HTMLInputElement
+      ? (element.value || ((element.type ?? "").toLowerCase() === "submit" ? "Submit" : ""))
+      : ((element as HTMLButtonElement).value ?? "");
+    return { index, element: element as HTMLElement, text: `${element.textContent ?? ""} ${value}` };
+  }).filter((candidate) => !/\b(quick apply|cancel)\b/i.test(candidate.text)
     && candidate.element.getClientRects().length > 0
     && !(candidate.element as HTMLButtonElement).disabled);
   const submit = candidates.find((candidate) => /\b(submit|send application|complete application)\b/i.test(candidate.text))
-    ?? candidates.find((candidate) => /\bapply\b/i.test(candidate.text));
+    ?? candidates.find((candidate) => /\bapply\b/i.test(candidate.text))
+    ?? candidates.find((candidate) => ((candidate.element as HTMLButtonElement | HTMLInputElement).type ?? "").toLowerCase() === "submit");
   return submit ? submit.index : -1;
 }
 
@@ -1984,4 +2093,4 @@ function findSecurityCodeSubmitIndex(root: Element): number {
   return -1;
 }
 
-export { isSubmitControl };
+export { findSubmitIndex, isSubmitControl };
