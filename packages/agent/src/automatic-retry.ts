@@ -5,6 +5,7 @@ import {
   applicationReceiptConfirmed,
   closeProfileDatabase,
   findBrowserRunIds,
+  findJobIds,
   getApplicationHold,
   getBrowserRun,
   getJobPosting,
@@ -13,6 +14,7 @@ import {
   listBrowserRuns,
   listJobSummaries,
   listOutcomeEvents,
+  logApplicationEvent,
   readApplicationReceiptCheck,
   recordApplicationHoldReopen,
   recordApplicationHoldRetry,
@@ -33,6 +35,7 @@ import {
   workspaceProfileSchema,
   type BrowserRun,
   type BrowserRunStatus,
+  type JobPosting,
   type WorkspaceProfile
 } from "@internship-agent/domain";
 
@@ -41,7 +44,7 @@ import { cancelBrowserRun } from "./browser-orchestrator";
 import { greenhouseMailSender } from "./greenhouse-security-code";
 import { acquirePipelineLock } from "./pipeline-lock";
 import { AUTOMATIC_RETRY_PREFIX, pipelineSettings, REOPENED_UNSUBMITTED_PREFIX } from "./pipeline-orchestrator";
-import { readSubmitEvidence, type StoredSubmitEvidence } from "./submit-evidence";
+import { readJobEvidence, readSubmitEvidence, type StoredSubmitEvidence } from "./submit-evidence";
 import { judgeSubmitCapture, showsClosedPosting, type CaptureVerdict, type NeverTakenKind } from "./unsubmitted-evidence";
 import { resolveWorkdayAccounts, workdayAccountSettings } from "./workday-account-service";
 import { putWorkdayAccount, readWorkdayAccounts, WorkdayAccountsFileError, type WorkdayAccountEntry } from "./workday-account-store";
@@ -522,6 +525,90 @@ export function requeueVerifiedHold(
   });
 }
 
+/** Evidence outcomes saved before any submit click (account steps, Workday entry or step errors, iCIMS stops); any other outcome is post-submit. */
+const PRE_SUBMIT_OUTCOMES: ReadonlySet<string> = new Set(["workday-account", "workday-errors", "workday-entry", "icims-account", "icims-application"]);
+/** Timeline notes that show a submit was approved, attempted, reopened, or recorded for the job. */
+const SUBMIT_ATTEMPT_NOTES = [AUTO_SUBMIT_EVENT, APPROVAL_EVENT_PREFIX, "Automatic submission failed: ", REOPENED_UNSUBMITTED_PREFIX];
+
+/** Why the job's record shows a submit may have been attempted, or null when nothing does. */
+function jobSubmitAttempt(database: DatabaseSync, dataDir: string, jobId: string): string | null {
+  for (const run of listBrowserRuns(database, jobId)) {
+    if (run.submissionApprovedAt || (run.confirmationText ?? "").trim() || run.status === "submitted" || run.status === "submitting") {
+      return `its run ${run.id.slice(0, 8)} had a submit approval or confirmation, so a submit may have been attempted.`;
+    }
+    if (readApplicationReceiptCheck(database, run.id) || applicationReceiptConfirmed(database, run.id)) {
+      return `its run ${run.id.slice(0, 8)} has a receipt check, so a submit may have been attempted.`;
+    }
+  }
+  const events = listApplicationEvents(database, jobId);
+  if (events.some((event) => event.toStatus === "SUBMITTED" || SUBMIT_ATTEMPT_NOTES.some((note) => (event.detail ?? "").startsWith(note)))) {
+    return "its timeline records a submit approval, attempt, or submission, so a submit may have been attempted.";
+  }
+  const evidence = readJobEvidence(dataDir, jobId).find((entry) => !PRE_SUBMIT_OUTCOMES.has(entry.outcome));
+  if (evidence) return `its evidence of ${evidence.capturedAt} records ${evidence.outcome} after a submit click, so a submit may have been attempted.`;
+  if (listOutcomeEvents(database, jobId).length > 0) return "an employer outcome is recorded for it.";
+  return null;
+}
+
+/**
+ * The job-level hold a verified requeue may release (a manager-owned
+ * automation fault on a job with no run that is not cancelled, the stop
+ * logged before any run was saved), or why not: the job is ready for review,
+ * no submit was ever attempted (no approval or submit note, no submit
+ * approval, confirmation, or receipt check on any run, no post-submit
+ * evidence, no employer outcome), the hold is at the given revision, the
+ * current observation still matches it, and the recheck was not used for it.
+ */
+function verifiedJobHold(database: DatabaseSync, dataDir: string, jobId: string, fix: VerifiedHoldFix): ApplicationHold | string {
+  const posting = getJobPosting(database, jobId);
+  if (!posting) return "its posting is unknown.";
+  if (posting.status !== "READY_FOR_REVIEW") return `its application is ${statusWords(posting.status)}, not ready for review.`;
+  const live = listBrowserRuns(database, jobId).find((run) => run.status !== "cancelled");
+  if (live) return `it has a browser run that is not cancelled (${live.id.slice(0, 8)}, ${live.status}); use --run with --verified-hold instead.`;
+  const attempted = jobSubmitAttempt(database, dataDir, jobId);
+  if (attempted) return attempted;
+  const hold = getApplicationHold(database, jobId, null);
+  if (!hold?.active || hold.owner !== "manager" || hold.reason !== "automation-fault") return "there is no active manager-owned job-level automation fault.";
+  if (hold.revision !== fix.revision) return "the hold revision changed.";
+  const current = observeApplicationHolds(database, dataDir).observations.find((item) => item.jobId === jobId && item.runId === null);
+  if (!current || current.owner !== hold.owner || current.reason !== hold.reason || current.identity !== hold.identity) {
+    return "the hold evidence or reason changed; refresh and review the trace.";
+  }
+  if (applicationHoldFixUsed(database, hold, fix.recheck)) return "that recheck was already used for this job and evidence.";
+  return hold;
+}
+
+/** Why a job-level verified requeue is refused, or null when it may run (verifiedJobHold). */
+export function verifiedJobHoldBlocker(database: DatabaseSync, dataDir: string, jobId: string, fix: VerifiedHoldFix): string | null {
+  const hold = verifiedJobHold(database, dataDir, jobId, fix);
+  return typeof hold === "string" ? hold : null;
+}
+
+/**
+ * Releases one verified job-level automation fault (no run was saved: the
+ * stop came before one), in one transaction: logs "Automatic run retried
+ * after a fix: <reason>" on the job (it stays READY_FOR_REVIEW; the note ends
+ * the stop for the next pass and for the hold observation), records the
+ * recheck reference, and resolves the hold. The next pass may then start the
+ * job under its normal fit, cap, target, and approval checks. Throws
+ * AutomaticRetryRefused (with the reason) otherwise.
+ */
+export function requeueVerifiedJobHold(
+  database: DatabaseSync, dataDir: string, jobId: string, fix: VerifiedHoldFix, reason: string, now = new Date()
+): ApplicationHold {
+  const text = reason.replace(/\s+/g, " ").trim();
+  if (!Number.isSafeInteger(fix.revision) || fix.revision < 1 || !/^[a-f0-9]{7,64}$/i.test(fix.recheck) || !text) {
+    throw new AutomaticRetryRefused("a revision, passing recheck reference, and reason are required.");
+  }
+  return withApplicationHoldTransaction(database, () => {
+    const hold = verifiedJobHold(database, dataDir, jobId, fix);
+    if (typeof hold === "string") throw new AutomaticRetryRefused(hold);
+    logApplicationEvent(database, { jobId, fromStatus: "READY_FOR_REVIEW", toStatus: "READY_FOR_REVIEW", detail: (AUTOMATIC_RETRY_PREFIX + text).slice(0, 1_000) });
+    recordApplicationHoldRetry(database, hold, fix.recheck, now.toISOString());
+    return hold;
+  });
+}
+
 /** Every held run (paused or awaiting approval) on an applying job, newest first per job. */
 export function listHeldRuns(database: DatabaseSync): BrowserRun[] {
   return listJobSummaries(database)
@@ -561,16 +648,18 @@ export type RetryCommandDeps = {
   env: Record<string, string | undefined>;
 };
 
-const RETRY_USAGE = "Usage: pnpm pipeline:retry [--profile real|demo] (--run <id or 8-character prefix> ... | --held) [--dry-run] [--start] [--reason \"<text>\"] | --run <id or 8-character prefix> ... --reopen-unsubmitted --reason \"<text>\" [--dry-run] [--start] | --run <ref> --verified-hold --revision <n> --recheck <hex ref> --reason \"<text>\" [--dry-run] | --run <ref> ... --close-unsubmitted --reason \"<text>\" [--dry-run] | --run <ref> ... --correct-submitted --reason \"<text>\" (--dry-run | --confirm)";
+const RETRY_USAGE = "Usage: pnpm pipeline:retry [--profile real|demo] (--run <id or 8-character prefix> ... | --held) [--dry-run] [--start] [--reason \"<text>\"] | --run <id or 8-character prefix> ... --reopen-unsubmitted --reason \"<text>\" [--dry-run] [--start] | (--run <ref> | --job <id or 8-character prefix>) --verified-hold --revision <n> --recheck <hex ref> --reason \"<text>\" [--dry-run] | --run <ref> ... --close-unsubmitted --reason \"<text>\" [--dry-run] | --run <ref> ... --correct-submitted --reason \"<text>\" (--dry-run | --confirm)";
 const DEFAULT_REASON = "the bug that held it is fixed.";
 const FULL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type RetryArgs = {
   profile: WorkspaceProfile; runs: string[]; held: boolean; dryRun: boolean; start: boolean; reason: string; reopen: boolean;
   close: boolean; correct: boolean; confirm: boolean; verified: VerifiedHoldFix | null;
+  /** `--job <ref>`: one job-level verified hold (only with --verified-hold). */
+  job: string | null;
 };
 
-/** `--run` takes one or more references (repeated flags or several values); null on anything unknown, missing, or contradictory. */
+/** `--run` takes one or more references (repeated flags or several values), `--job` exactly one; null on anything unknown, missing, or contradictory. */
 function parseRetryArgs(argv: string[]): RetryArgs | null {
   let profileText: string | undefined;
   let reason: string | undefined;
@@ -585,6 +674,7 @@ function parseRetryArgs(argv: string[]): RetryArgs | null {
   let verified = false;
   let revision: string | undefined;
   let recheck: string | undefined;
+  let job: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
     if (arg === "--held" || arg === "--dry-run" || arg === "--start" || arg === "--reopen-unsubmitted" || arg === "--verified-hold"
@@ -607,11 +697,12 @@ function parseRetryArgs(argv: string[]): RetryArgs | null {
         index += 1;
       }
       if (runs.length === before) return null;
-    } else if (arg === "--revision" || arg === "--recheck") {
+    } else if (arg === "--revision" || arg === "--recheck" || arg === "--job") {
       const value = argv[index + 1];
       if (!value || value.startsWith("--")) return null;
       if (arg === "--revision" && revision === undefined) revision = value;
       else if (arg === "--recheck" && recheck === undefined) recheck = value;
+      else if (arg === "--job" && job === undefined) job = value.trim();
       else return null;
       index += 1;
     } else if (arg === "--profile" || arg === "--reason") {
@@ -626,14 +717,16 @@ function parseRetryArgs(argv: string[]): RetryArgs | null {
   }
   const profile = workspaceProfileSchema.safeParse(profileText ?? "real");
   if (!profile.success) return null;
-  if (held === (runs.length > 0)) return null; // exactly one of --run / --held
+  // A job reference names one job-level verified hold: never with --run or --held, only with --verified-hold.
+  if (job !== undefined && (job === "" || !verified || held || runs.length > 0)) return null;
+  if (job === undefined && held === (runs.length > 0)) return null; // exactly one of --run / --held
   if (runs.some((ref) => ref === "")) return null;
   if (dryRun && start) return null; // a dry run writes nothing, so it cannot start a pass
   const trimmed = reason?.replace(/\s+/g, " ").trim();
   if (reason !== undefined && !trimmed) return null;
   // A reopen names its runs and says why; the default reason never applies.
   if (reopen && (held || reason === undefined)) return null;
-  if (verified && (held || start || reopen || runs.length !== 1 || !trimmed || !revision || !recheck
+  if (verified && (held || start || reopen || runs.length + (job === undefined ? 0 : 1) !== 1 || !trimmed || !revision || !recheck
     || !/^[1-9]\d*$/.test(revision) || !Number.isSafeInteger(Number(revision)) || !/^[a-f0-9]{7,64}$/i.test(recheck))) return null;
   if (!verified && (revision !== undefined || recheck !== undefined)) return null;
   // One explicit mode at a time; a close or a correction names its runs, says why, and starts no pass.
@@ -641,7 +734,7 @@ function parseRetryArgs(argv: string[]): RetryArgs | null {
   if ((close || correct) && (held || start || reason === undefined)) return null;
   if (confirm && !correct) return null;
   return { profile: profile.data, runs, held, dryRun, start, reason: trimmed ?? DEFAULT_REASON, reopen, close, correct, confirm,
-    verified: verified ? { revision: Number(revision), recheck: recheck!.toLowerCase() } : null };
+    verified: verified ? { revision: Number(revision), recheck: recheck!.toLowerCase() } : null, job: job ?? null };
 
 }
 
@@ -653,6 +746,48 @@ function describeRun(database: DatabaseSync, run: BrowserRun): string {
   const posting = getJobPosting(database, run.jobId);
   const name = posting ? `${clip(posting.companyName, 120)} — ${clip(posting.title, 120)}` : "Unknown posting";
   return `${run.id.slice(0, 8)} ${name} (${run.status})`;
+}
+
+/** The job a typed reference (full id or 8+ character prefix) names, or why none is chosen. */
+function resolveJobRef(database: DatabaseSync, typed: string): JobPosting | string {
+  const shown = clip(typed, 40);
+  if (FULL_ID.test(typed)) return getJobPosting(database, typed.toLowerCase()) ?? `no job matches "${shown}".`;
+  const ids = findJobIds(database, typed);
+  if (ids.length === 0) return `no job matches "${shown}".`;
+  if (ids.length > 1) return `several jobs match "${shown}"; give more characters.`;
+  return getJobPosting(database, ids[0]!) ?? `no job matches "${shown}".`;
+}
+
+function describeJob(posting: JobPosting): string {
+  return `job ${posting.id.slice(0, 8)} ${clip(posting.companyName, 120)} — ${clip(posting.title, 120)} (${statusWords(posting.status)})`;
+}
+
+/** `--job <ref> --verified-hold`: requeues (or, in a dry run, checks) one job-level verified hold; counts as one retry or skip. */
+function requeueJobTarget(io: RetryCommandDeps, database: DatabaseSync, args: RetryArgs & { job: string; verified: VerifiedHoldFix }): { retried: number; failed: boolean } {
+  const posting = resolveJobRef(database, args.job);
+  if (typeof posting === "string") {
+    io.log(`skipped ${clip(args.job, 40)} (${posting})`);
+    return { retried: 0, failed: false };
+  }
+  const label = describeJob(posting);
+  const dataDir = io.dataDir(args.profile);
+  const blocker = verifiedJobHoldBlocker(database, dataDir, posting.id, args.verified);
+  if (blocker) {
+    io.log(`skipped ${label} (${blocker})`);
+    return { retried: 0, failed: false };
+  }
+  if (args.dryRun) {
+    io.log(`would requeue ${label} after verified pre-submit fix (its job-level hold; no run was saved).`);
+    return { retried: 1, failed: false };
+  }
+  try {
+    requeueVerifiedJobHold(database, dataDir, posting.id, args.verified, args.reason);
+    io.log(`requeued ${label} after verified pre-submit fix: its job-level hold is released; the next pass may start it under the usual checks.`);
+    return { retried: 1, failed: false };
+  } catch (error) {
+    io.log(`skipped ${label} (${clip(error instanceof Error ? error.message : String(error), 300)})`);
+    return { retried: 0, failed: true };
+  }
 }
 
 /** The run a typed reference names, or why none is chosen. */
@@ -681,6 +816,11 @@ function resolveRef(database: DatabaseSync, typed: string): BrowserRun | string 
  * or `skipped`; it refuses to write without `--confirm` (`--dry-run` checks).
  * With Workday account automation on, `--held` also releases the account
  * holds left as "unexpected" (releasableWorkdayHolds), one line per host.
+ * `--run <ref> --verified-hold` requeues one run's manager-owned pre-submit
+ * fault (requeueVerifiedHold); `--job <ref> --verified-hold` releases one
+ * job-level automation fault for a job with no run that is not cancelled and
+ * no submit ever attempted (requeueVerifiedJobHold). Both print `requeued`
+ * (`would requeue` in a dry run) or `skipped`.
  * Returns 0, 1 (lock, retry, accounts file, or pass failure), or 2 (usage).
  */
 export async function runRetryCommand(argv: string[], deps: Partial<RetryCommandDeps> = {}): Promise<number> {
@@ -722,6 +862,12 @@ export async function runRetryCommand(argv: string[], deps: Partial<RetryCommand
     let released = 0;
     const database = io.open(args.profile);
     try {
+      if (args.job !== null && args.verified) {
+        const outcome = requeueJobTarget(io, database, { ...args, job: args.job, verified: args.verified });
+        retried += outcome.retried;
+        skipped += 1 - outcome.retried;
+        if (outcome.failed) exit = 1;
+      }
       const seen = new Set<string>();
       const targets: Array<BrowserRun | { ref: string; reason: string }> = args.held
         ? listHeldRuns(database)

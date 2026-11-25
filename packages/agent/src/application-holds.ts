@@ -63,6 +63,11 @@ const AUTOMATION_STOP = /^Automatic browser run (?:failed|needs you|stopped):/i;
 const TARGET_SKIP = /^Not pursued for your target: /;
 const TERMINAL = new Set(["NOT_QUALIFIED", "SUBMITTED", "INTERVIEW", "OFFER", "REJECTED", "WITHDRAWN"]);
 const INTERNAL_FAILURE = /^Application hold: (analysis|preparation) failed\.$/;
+/**
+ * AUTOMATIC_RETRY_PREFIX (pipeline-orchestrator.ts; not imported, to avoid a cycle). A job-level verified
+ * requeue (automatic-retry.ts) logs it without a status change, and it must outrank the stop it requeued.
+ */
+const RETRIED_AFTER_FIX = /^Automatic run retried after a fix: /;
 const PIPELINE_ERROR = /^(Analysis|Preparation) failed for ([a-f0-9-]{36}):/i;
 
 export function recordApplicationHoldFailures(database: DatabaseSync, errors: ReadonlyArray<string>): void {
@@ -141,7 +146,7 @@ export function observeApplicationHolds(database: DatabaseSync, dataDir: string)
     const timeline = listApplicationEvents(database, jobId);
     const source = timeline.slice().reverse().find((event) =>
       event.fromStatus !== event.toStatus || event.detail?.startsWith("Automatic browser run ")
-        || TARGET_SKIP.test(event.detail ?? "") || INTERNAL_FAILURE.test(event.detail ?? "")
+        || TARGET_SKIP.test(event.detail ?? "") || INTERNAL_FAILURE.test(event.detail ?? "") || RETRIED_AFTER_FIX.test(event.detail ?? "")
     );
     const prior = byJob.get(jobId) ?? [];
     if (TERMINAL.has(posting.status)) {

@@ -68,6 +68,7 @@ import {
   readSubmitEvidence,
   reopenUnsubmittedBlocker,
   requeueVerifiedHold,
+  requeueVerifiedJobHold,
   releasableWorkdayHolds,
   reopenUnsubmittedRun,
   resolveWorkdayAccounts,
@@ -79,6 +80,7 @@ import {
   UnavailableModelProvider,
   unsubmittedEvidence,
   unsubmittedEvidenceRefusal,
+  verifiedJobHoldBlocker,
   workdayAccountSettings,
   workdayAccountWait,
   type PageFactory,
@@ -829,6 +831,139 @@ describe("verified pre-submit hold retry", () => {
   });
 });
 
+/**
+ * Track 31: a job-level hold (the automatic stop came before any run was
+ * saved, as Workday's "No Workday application opened" did) is requeued with
+ * `--job <ref> --verified-hold`, never by `--run` or `--held`.
+ */
+describe("verified job-level hold requeue (--job)", () => {
+  const RECHECK = "abc123def";
+  const REASON = "Workday entry fixed and rechecked";
+  const NO_FORM: RawControl[] = [{ tag: "button", label: "Apply" }];
+
+  /** The seeded posting, stopped by the pipeline before a run was saved, with its manager-owned job-level hold. */
+  async function jobStoppedBeforeRun(database: DatabaseSync, dataDir: string) {
+    const jobId = seededJob(database);
+    const stopped = await pass(database, dataDir, async () => fakePage({ controls: NO_FORM }));
+    expect(stopped.stopped).toHaveLength(1);
+    expect(listBrowserRuns(database, jobId)).toEqual([]);
+    expect(details(database, jobId).at(-1)).toMatch(/^Automatic browser run needs you: /);
+    const hold = refreshApplicationHolds(database, dataDir).find((item) => item.jobId === jobId)!;
+    expect(hold).toMatchObject({ key: `job:${jobId}`, runId: null, owner: "manager", reason: "automation-fault", revision: 1 });
+    return { jobId, hold };
+  }
+
+  const jobArgs = (jobId: string, revision: number, extra: string[] = []) =>
+    ["--job", jobId.slice(0, 8), "--verified-hold", "--revision", String(revision), "--recheck", RECHECK, "--reason", REASON, ...extra];
+
+  it("requeues the job with a dry run first, releases the hold for good, and the next pass starts a fresh automatic run", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-job-hold-");
+    const { jobId, hold } = await jobStoppedBeforeRun(database, dataDir);
+    // Without the requeue the stop blocks every later pass, and the run-level modes find nothing.
+    expect((await pass(database, dataDir, neverOpen)).started).toEqual([]);
+    const byRun = commandDeps(database, { dataDir: () => dataDir });
+    expect(await runRetryCommand(["--run", jobId.slice(0, 8), "--verified-hold", "--revision", "1", "--recheck", RECHECK, "--reason", REASON], byRun.deps)).toBe(0);
+    expect(byRun.lines).toContainEqual(expect.stringContaining("no browser run matches"));
+
+    const before = snapshot(database);
+    const dry = commandDeps(database, { dataDir: () => dataDir, acquireLock: () => { throw new Error("a dry run must not take the lock"); } });
+    expect(await runRetryCommand(jobArgs(jobId, hold.revision, ["--dry-run"]), dry.deps)).toBe(0);
+    expect(dry.lines[0]).toMatch(new RegExp(`^would requeue job ${jobId.slice(0, 8)} Northstar Systems — .+ \\(ready for review\\) after verified pre-submit fix`));
+    expect(dry.lines.at(-1)).toBe("Dry run: would retry 1; skipped 0; nothing written.");
+    expect(snapshot(database)).toEqual(before);
+
+    const { deps, lines, lock } = commandDeps(database, { dataDir: () => dataDir });
+    expect(await runRetryCommand(jobArgs(jobId, hold.revision), deps)).toBe(0);
+    expect(lock).toEqual({ taken: 1, released: 1, held: false });
+    expect(lines[0]).toMatch(/^requeued job .+ its job-level hold is released; the next pass may start it under the usual checks\.$/);
+    expect(lines).toContain("Retried 1; skipped 0.");
+    expect(statusOf(database, jobId)).toBe("READY_FOR_REVIEW");
+    expect(details(database, jobId).at(-1)).toBe(`Automatic run retried after a fix: ${REASON}`);
+    expect(holdTrace(database, jobId)).toEqual(["opened", "verified-retry", "resolved"]);
+    expect(applicationHoldTrace(database, jobId).find((event) => event.event === "verified-retry")).toMatchObject({ revision: 1, actionRef: RECHECK });
+    // A later refresh does not reopen it: the requeue note is newer than the stop.
+    expect(refreshApplicationHolds(database, dataDir).filter((item) => item.jobId === jobId)).toEqual([]);
+    expect(storedActiveHolds(database, jobId)).toEqual([]);
+    // Nothing is left to requeue: the released hold is no longer active.
+    expect(() => requeueVerifiedJobHold(database, dataDir, jobId, { revision: 2, recheck: RECHECK }, REASON)).toThrow(AutomaticRetryRefused);
+
+    const next = await pass(database, dataDir, async () => fakePage());
+    expect(next.started).toEqual([{ jobId, runStatus: "awaiting-approval" }]);
+    expect(details(database, jobId).at(-1)).toBe(AUTO_START);
+    database.close();
+  });
+
+  type Refusal = [string, (database: DatabaseSync, dataDir: string, jobId: string) => Promise<number | void> | number | void, RegExp];
+  const liveRun = (database: DatabaseSync, jobId: string, status: BrowserRun["status"], extra: Partial<BrowserRun> = {}): BrowserRun => {
+    const packageId = (database.prepare("SELECT id FROM application_packages WHERE job_id = ? AND superseded_at IS NULL").get(jobId) as { id: string }).id;
+    const now = new Date().toISOString();
+    return saveBrowserRun(database, {
+      id: randomUUID(), jobId, applicationUrl: "https://boards.greenhouse.io/example/jobs/2", status, packageId, variantId: null,
+      baseResumeId: null, applicationProfile: "default", atsKind: "greenhouse", atsConfidence: 1, suggestedAtsKind: null, atsConfirmed: true,
+      decisions: [], pauses: [], submittedAnswers: null, confirmationText: null, submissionApprovedAt: null, createdAt: now, updatedAt: now, ...extra
+    });
+  };
+  const REFUSED: Refusal[] = [
+    ["a run that is not cancelled exists", (database, _dataDir, jobId) => { liveRun(database, jobId, "paused-needs-input"); }, /has a browser run that is not cancelled .*use --run/],
+    ["the revision is not the current one", () => 2, /the hold revision changed/],
+    ["an approval was logged on the timeline", (database, _dataDir, jobId) => {
+      logApplicationEvent(database, { jobId, fromStatus: "READY_FOR_REVIEW", toStatus: "READY_FOR_REVIEW", detail: `${AUTO_SUBMIT_EVENT}.` });
+    }, /timeline records a submit approval, attempt, or submission/],
+    ["a cancelled run had a submit approval", (database, _dataDir, jobId) => {
+      liveRun(database, jobId, "cancelled", { submissionApprovedAt: new Date(Date.now() - 60_000).toISOString() });
+    }, /had a submit approval or confirmation/],
+    ["post-submit evidence was saved for a cancelled run", async (database, dataDir, jobId) => {
+      const run = liveRun(database, jobId, "cancelled");
+      await savePostSubmitEvidence({
+        database, dataDir, run, page: fakePage(),
+        evidence: { outcome: "unknown", url: "https://boards.greenhouse.io/example/jobs/2", bodyText: "", invalidFields: [], alertText: "", challenge: null }
+      });
+    }, /records unknown after a submit click/],
+    ["a cancelled run has a receipt", (database, _dataDir, jobId) => {
+      const run = liveRun(database, jobId, "cancelled");
+      recordApplicationReceipt(database, { jobId, runId: run.id }, "confirmed", "a".repeat(32), run.createdAt, new Date().toISOString());
+    }, /has a receipt check/],
+    ["the hold is not manager-owned", (database, _dataDir, jobId) => {
+      database.prepare("UPDATE application_holds SET owner = 'candidate' WHERE hold_key = ?").run(`job:${jobId}`);
+    }, /no active manager-owned job-level automation fault/]
+  ];
+
+  it.each(REFUSED)("refuses when %s and writes nothing", async (_name, setup, reason) => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-job-hold-");
+    const { jobId, hold } = await jobStoppedBeforeRun(database, dataDir);
+    const revision = (await setup(database, dataDir, jobId)) ?? hold.revision;
+    expect(verifiedJobHoldBlocker(database, dataDir, jobId, { revision, recheck: RECHECK })).toMatch(reason);
+    const before = snapshot(database);
+    expect(() => requeueVerifiedJobHold(database, dataDir, jobId, { revision, recheck: RECHECK }, REASON)).toThrow(AutomaticRetryRefused);
+    const { deps, lines } = commandDeps(database, { dataDir: () => dataDir });
+    expect(await runRetryCommand(jobArgs(jobId, revision), deps)).toBe(0);
+    expect(lines[0]).toMatch(/^skipped job /);
+    expect(lines[0]).toMatch(reason);
+    expect(lines.at(-1)).toBe("Retried 0; skipped 1.");
+    expect(snapshot(database)).toEqual(before);
+    expect(details(database, jobId).some((detail) => detail.startsWith("Automatic run retried after a fix: "))).toBe(false);
+    database.close();
+  });
+
+  it("takes --job only with --verified-hold, one job, and no --run, --held, or --start", async () => {
+    const database = disposableDatabase();
+    const { deps, lines } = commandDeps(database);
+    const fix = ["--verified-hold", "--revision", "1", "--recheck", RECHECK, "--reason", REASON];
+    for (const argv of [
+      ["--job", "0907ae2c", "--reason", REASON],
+      ["--job", "0907ae2c", "--held", ...fix],
+      ["--job", "0907ae2c", "--run", "5aa7e33e", ...fix],
+      ["--job", "0907ae2c", "--job", "5aa7e33e", ...fix],
+      ["--job", "0907ae2c", "--start", ...fix],
+      ["--job", ...fix]
+    ]) expect(await runRetryCommand(argv, deps)).toBe(2);
+    expect(lines.every((line) => line.startsWith("Usage: pnpm pipeline:retry"))).toBe(true);
+    database.close();
+  });
+});
+
 describe("pnpm pipeline:retry --reopen-unsubmitted", () => {
   const submitWait = { timeoutMs: 50, pollMs: 5 };
   const REASON = "Greenhouse security code step handled.";
@@ -1343,6 +1478,55 @@ describe("pnpm pipeline:retry --reopen-unsubmitted with evidence the site never 
     }
     const before = snapshot(database);
     expect(() => reopenUnsubmittedRun(database, dataDir, run.id, { reason: REASON })).toThrow(AutomaticRetryRefused);
+    const { deps, lines } = commandDeps(database, { dataDir: () => dataDir });
+    expect(await runRetryCommand(["--run", run.id, "--reopen-unsubmitted", "--reason", REASON], deps)).toBe(0);
+    expect(lines.at(-1)).toBe("Reopened 0; skipped 1.");
+    expect(snapshot(database)).toEqual(before);
+    expect(current(database, run).status).toBe("failed");
+    database.close();
+  });
+
+  /**
+   * Track 31: Ashby's autofill banner and legal boilerplate read as correction
+   * text. A network record that shows no submit request was sent decides;
+   * without a record, or with a submit sent, the text heuristic still applies.
+   */
+  const BOILERPLATE_FORM = ASHBY_FORM.replace("\nName", "\nAutofill completed!\nPlease review the information we filled in for you below.\nName")
+    .replace("\nSubmit Application", "\nEqual Opportunity Employer\nPlease review the statement below and confirm.\nI Acknowledge/Accept this Statement\nSubmit Application");
+  const boilerplate: Case = { site: "ashby", outcome: "unknown", text: BOILERPLATE_FORM, kind: "intact-form-evidence" };
+
+  it("reopens an intact Ashby capture with review boilerplate when its network record shows no submit request", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-never-taken-");
+    const run = await failedWith(database, dataDir, { ...boilerplate, ashbyNetwork: ashbyNetwork([]) });
+    expect(unsubmittedEvidence(database, dataDir, run)).toEqual({ kind: "intact-form-evidence", text: expect.stringMatching(/^its post-submit evidence shows /) });
+    // The fresh receipt-check gate still applies.
+    expect(reopenUnsubmittedBlocker(database, dataDir, run)).toContain("completed receipt check");
+    receiptCheck(database, run);
+    const { deps, lines } = commandDeps(database, { dataDir: () => dataDir });
+    expect(await runRetryCommand(["--run", run.id, "--reopen-unsubmitted", "--reason", REASON], deps)).toBe(0);
+    expect(lines).toContain("Reopened 1; skipped 0.");
+    expect(current(database, run).status).toBe("cancelled");
+    expect(statusOf(database, run.jobId)).toBe("READY_FOR_REVIEW");
+    expect(storedActiveHolds(database, run.jobId)).toEqual([]);
+    database.close();
+  });
+
+  it.each<[string, Partial<Case>, "absent" | "confirmed", RegExp | string]>([
+    ["no network record", {}, "absent", /shows failure or correction text/],
+    ["a network record with a submit Ashby refused with field errors",
+      { ashbyNetwork: ashbyNetwork([{ resultType: "FormRender", fieldErrors: [{ fieldEntryId: "q1", message: "Required" }] }]) }, "absent", /shows failure or correction text/],
+    ["a network record with an unanswered submit request", { ashbyNetwork: ashbyNetwork([{ status: null }]) }, "absent", /does not show that Ashby refused it/],
+    ["a confirmed receipt", { ashbyNetwork: ashbyNetwork([]) }, "confirmed", "a trusted application receipt was found, so it stays as it is."]
+  ])("still refuses review boilerplate with %s", async (_name, extra, receipt, reason) => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-never-taken-");
+    const run = await failedWith(database, dataDir, { ...boilerplate, ...extra });
+    receiptCheck(database, run, receipt);
+    const blocker = reopenUnsubmittedBlocker(database, dataDir, run);
+    if (typeof reason === "string") expect(blocker).toBe(reason);
+    else expect(blocker).toMatch(reason);
+    const before = snapshot(database);
     const { deps, lines } = commandDeps(database, { dataDir: () => dataDir });
     expect(await runRetryCommand(["--run", run.id, "--reopen-unsubmitted", "--reason", REASON], deps)).toBe(0);
     expect(lines.at(-1)).toBe("Reopened 0; skipped 1.");

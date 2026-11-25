@@ -33,7 +33,12 @@ import type { StoredSubmitEvidence } from "./submit-evidence";
  * server accepting the submission, its application-limit block message, or
  * any submit request whose answer does not show that Ashby refused it; a
  * record with no submit request, or only submits Ashby answered with field
- * errors, goes on to the checks above.
+ * errors, goes on to the checks above. A record with no submit request at
+ * all proves nothing reached Ashby after the click (the record starts before
+ * the first click), so the page-text heuristic for failure or correction
+ * text does not apply to it (Track 31: Ashby's autofill banner "Please
+ * review the information we filled in" and legal boilerplate read as
+ * correction text); every other check still does.
  */
 
 /** The challenge detail challenge.ts and handshake-executor.ts record for a shown Turnstile frame (greenhouse-fixture-run.ts asserts it). */
@@ -112,6 +117,8 @@ export function judgeSubmitCapture(run: Pick<BrowserRun, "applicationUrl">, capt
 
   // Ashby's network record (Track 22): what its server answered outranks what the page showed.
   const network = capture.ashbyNetwork ?? null;
+  // Only an Ashby page's record counts; site is "ashby" or "dover" here.
+  const noSubmitSent = site === "ashby" && network !== null && network.submits.length === 0;
   if (network !== null) {
     const submits = network.submits;
     if (submits.some((submit) => submit.errorCodes.includes(ASHBY_RECAPTCHA_REJECTED))) {
@@ -150,7 +157,8 @@ export function judgeSubmitCapture(run: Pick<BrowserRun, "applicationUrl">, capt
   const confirmation = readConfirmationFromText(capture.text);
   if (confirmation !== null) return { refusal: `shows confirmation text ("${clip(confirmation, 60)}")` };
   const withoutBusyNotice = capture.text.replace(new RegExp(ASHBY_BUSY_NOTICE.source, "gi"), "");
-  if (FAILURE_TEXT.test(withoutBusyNotice) || isAshbySpamCheck(capture.text)) return { refusal: "shows failure or correction text" };
+  // The page-text heuristic never outranks a network record that shows no submit request was sent.
+  if ((!noSubmitSent && FAILURE_TEXT.test(withoutBusyNotice)) || isAshbySpamCheck(capture.text)) return { refusal: "shows failure or correction text" };
 
   const lines = capture.text.split("\n").map((line) => line.trim());
   const submitLine = site === "ashby" ? ASHBY_SUBMIT_LINE : DOVER_SUBMIT_LINE;

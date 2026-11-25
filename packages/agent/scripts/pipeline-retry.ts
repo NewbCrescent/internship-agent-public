@@ -27,12 +27,17 @@
  * writes only with --confirm (--dry-run checks), leaves the run failed and
  * held as a possible submission, and deletes no history.
  * --verified-hold --revision <n> --recheck <hex ref> --reason "<text>" names
- * one verified pre-submit repair and requeues only its manager-owned hold.
+ * one verified pre-submit repair and requeues only its manager-owned hold:
+ * with --run, one run's hold; with --job, a job-level automation fault on a
+ * job with no run that is not cancelled (the stop came before a run was
+ * saved) and no submit ever attempted. The job stays ready for review, the
+ * hold is released, and the next pass may start it under the usual checks.
  *
  * Usage: pnpm pipeline:retry [--profile real|demo] (--run <id or 8-character prefix> ... | --held) [--dry-run] [--start] [--reason "<text>"]
  *        pnpm pipeline:retry [--profile real|demo] --run <id or 8-character prefix> ... --reopen-unsubmitted --reason "<text>" [--dry-run] [--start]
  *        pnpm pipeline:retry [--profile real|demo] --run <id or 8-character prefix> ... --close-unsubmitted --reason "<text>" [--dry-run]
  *        pnpm pipeline:retry [--profile real|demo] --run <id or 8-character prefix> ... --correct-submitted --reason "<text>" (--dry-run | --confirm)
+ *        pnpm pipeline:retry [--profile real|demo] (--run <ref> | --job <id or 8-character prefix>) --verified-hold --revision <n> --recheck <hex ref> --reason "<text>" [--dry-run]
  */
 import { runRetryCommand } from "../src/automatic-retry";
 import { runPipelinePass } from "./pipeline-pass";
