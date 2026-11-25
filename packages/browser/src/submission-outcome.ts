@@ -321,10 +321,14 @@ export const SECURITY_CODE_FIELD_ID = "site-security-code";
 /**
  * The safeguard pause for a security code the agent could not enter. The
  * candidate never answers it (an answer would store the code) and the run is
- * never re-approved: it is retried or finished on the site by hand.
+ * never re-approved: it is reopened or retried, or finished on the site by hand.
  */
 export function securityCodePause(message: string, runRef: string): { decision: FillDecision; pause: PauseRecord } {
-  const question = clip(`${message} Retry it with pnpm pipeline:retry --run ${runRef}, or finish the application on the site yourself.`, 500);
+  // Greenhouse's hold is reopened as not submitted (its answered pauses block a plain retry); another site's is retried.
+  const command = message === securityCodeHoldMessage("unsupported")
+    ? `Retry it with pnpm pipeline:retry --run ${runRef}`
+    : `Reopen it with pnpm pipeline:retry --run ${runRef} --reopen-unsubmitted --reason "<why>"`;
+  const question = clip(`${message} ${command}, or finish the application on the site yourself.`, 500);
   return {
     decision: {
       fieldId: SECURITY_CODE_FIELD_ID,

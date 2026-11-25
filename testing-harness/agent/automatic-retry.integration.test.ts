@@ -17,6 +17,7 @@ import {
   LOCAL_CANDIDATE_ID,
   logApplicationEvent,
   persistNormalizedPosting,
+  readApplicationReceiptCheck,
   reconcileProjectEvidence,
   recordApplicationReceipt,
   registerGitHubRepository,
@@ -977,7 +978,7 @@ describe("pnpm pipeline:retry --reopen-unsubmitted", () => {
     const pausedData = disposableDirectory("internship-agent-retry-data-");
     const held = await heldAutomaticRun(paused, pausedData);
     securityCodeEvent(paused, held.jobId, "Northstar Systems");
-    expect(reopenUnsubmittedBlocker(paused, pausedData, held.run)).toBe("it is paused-needs-input; --reopen-unsubmitted reopens only a failed submit.");
+    expect(reopenUnsubmittedBlocker(paused, pausedData, held.run)).toBe("it is paused-needs-input; --reopen-unsubmitted reopens only a failed submit or a run held on Greenhouse's emailed security code.");
     paused.close();
 
     const submitted = disposableDatabase();
@@ -989,7 +990,7 @@ describe("pnpm pipeline:retry --reopen-unsubmitted", () => {
     const before = snapshot(submitted);
     const command = commandDeps(submitted, { dataDir: () => submittedData });
     expect(await runRetryCommand(["--run", sent.run.id, "--reopen-unsubmitted", "--reason", REASON], command.deps)).toBe(0);
-    expect(command.lines).toContainEqual(expect.stringMatching(/\(it is submitted; --reopen-unsubmitted reopens only a failed submit\.\)$/));
+    expect(command.lines).toContainEqual(expect.stringMatching(/\(it is submitted; --reopen-unsubmitted reopens only a failed submit or a run held on Greenhouse's emailed security code\.\)$/));
     expect(snapshot(submitted)).toEqual(before);
     submitted.close();
 
@@ -1741,6 +1742,145 @@ describe("daily auto-submit cap", () => {
       expect(snapshot(refused)).toEqual(before);
       expect(feedback(refused, run.jobId)).toEqual([]);
       refused.close();
+    });
+  });
+
+  /**
+   * `--reopen-unsubmitted` on a run held on Greenhouse's emailed security code
+   * (the Artefact case, Track 24): the policy approved it and clicked submit,
+   * Greenhouse asked for the emailed code, the code was not found in time, and
+   * the run went back to paused-needs-input with the approval withdrawn and the
+   * `site-security-code` safeguard its only open pause. Greenhouse completes
+   * nothing until the code is entered, so that shape is the proof: no receipt
+   * check is needed. The approval time comes from the timeline's approval event.
+   */
+  describe("pnpm pipeline:retry --reopen-unsubmitted on a run held on Greenhouse's security code", () => {
+    const REASON = "Greenhouse security codes are read since Track 19.";
+    const HOLD_TEXT = "it is held on Greenhouse's emailed security code, which was never entered, and its post-submit evidence shows that step";
+    const emptyMailbox: VerificationMailboxFactory = async () => ({ messagesSince: async () => [], close: async () => undefined });
+
+    /** The real auto-submit path to the hold, plus an answered single-use pause as on the real run (so a plain retry refuses). */
+    async function securityCodeHeld(database: DatabaseSync, dataDir: string): Promise<{ jobId: string; run: BrowserRun }> {
+      const jobId = qualifiedForAutoSubmit(database);
+      const flag = { clicked: false };
+      const codeStep: BrowserPage = {
+        ...fakePage({ submitted: flag }),
+        bodyText: async () => (flag.clicked ? "We sent a security code to your email address. Enter it below, then submit your application again." : "Please fix the errors below."),
+        invalidFields: async () => [],
+        submitControlShown: async () => true,
+        securityCodeInputs: async () => (flag.clicked ? 8 : 0),
+        submitSecurityCode: async () => { throw new Error("must not type a code"); }
+      };
+      const first = await autoPass(database, dataDir, async () => codeStep, { securityCodeMailbox: emptyMailbox });
+      expect(first.submitted).toEqual([]);
+      expect(flag.clicked).toBe(true);
+      const held = listBrowserRuns(database, jobId)[0]!;
+      const run = updateBrowserRun(database, held.id, { pauses: [answeredPause(), ...held.pauses] });
+      expect(run).toMatchObject({ status: "paused-needs-input", submissionApprovedAt: null, confirmationText: null });
+      expect(run.pauses.filter((pause) => pause.status === "open"))
+        .toEqual([expect.objectContaining({ fieldId: "site-security-code", safeguard: true })]);
+      expect(readSubmitEvidence(dataDir, run).map(({ outcome }) => outcome)).toEqual(["verification-code"]);
+      expect(details(database, jobId).filter((detail) => detail.startsWith(AUTO_SUBMIT_EVENT))).toHaveLength(1);
+      return { jobId, run };
+    }
+
+    const approvalAt = (database: DatabaseSync, jobId: string) =>
+      listApplicationEvents(database, jobId).find((event) => (event.detail ?? "").startsWith(AUTO_SUBMIT_EVENT))!.createdAt;
+
+    it("reopens it with no receipt check, and the next pass submits a fresh run under the same policy", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDirectory("internship-agent-code-hold-");
+      const { jobId, run } = await securityCodeHeld(database, dataDir);
+      expect(automaticRetryBlocker(database, run)).toMatch(/already answered one of its questions/);
+      expect(readApplicationReceiptCheck(database, run.id)).toBeNull();
+      expect(reopenUnsubmittedBlocker(database, dataDir, run)).toBeNull();
+      expect(automaticSubmissionsSince(database, startOfToday())).toBe(0);
+
+      const before = snapshot(database);
+      const dry = commandDeps(database, { dataDir: () => dataDir });
+      expect(await runRetryCommand(["--run", run.id.slice(0, 8), "--reopen-unsubmitted", "--reason", REASON, "--dry-run"], dry.deps)).toBe(0);
+      expect(dry.lines[0]).toMatch(new RegExp(`^would reopen ${run.id.slice(0, 8)} `));
+      expect(dry.lines[0]!.endsWith(`(paused-needs-input) (${HOLD_TEXT})`)).toBe(true);
+      expect(dry.lines.at(-1)).toBe("Dry run: would reopen 1; skipped 0; nothing written.");
+      expect(dry.lock.taken).toBe(0);
+      expect(snapshot(database)).toEqual(before);
+
+      const { deps, lines, lock } = commandDeps(database, { dataDir: () => dataDir });
+      expect(await runRetryCommand(["--run", run.id.slice(0, 8), "--reopen-unsubmitted", "--reason", REASON], deps)).toBe(0);
+      expect(lines[0]!.endsWith(`: cancelled as not submitted (${HOLD_TEXT}); the application is back to ready for review.`)).toBe(true);
+      expect(lines.at(-1)).toBe("Reopened 1; skipped 0.");
+      expect(lock).toMatchObject({ taken: 1, released: 1, held: false });
+      expect(current(database, run).status).toBe("cancelled");
+      expect(statusOf(database, jobId)).toBe("READY_FOR_REVIEW");
+      expect(details(database, jobId).at(-1)).toBe(`${REOPENED}${HOLD_TEXT}): ${REASON}`);
+      expect(readApplicationReceiptCheck(database, run.id)).toBeNull();
+      expect(automaticSubmissionsSince(database, startOfToday())).toBe(0);
+
+      const second = await autoPass(database, dataDir, async () => fakePage());
+      expect(second.held).toEqual([]);
+      expect(second.submitted).toEqual([{ jobId, confirmation: expect.stringContaining("application was received") }]);
+      const fresh = listBrowserRuns(database, jobId).find((entry) => entry.id !== run.id)!;
+      expect(fresh.status).toBe("submitted");
+      expect(fresh.pauses.some((pause) => pause.status === "answered")).toBe(false);
+      expect(activeHolds(database, dataDir, jobId)).toEqual([]);
+      database.close();
+    });
+
+    it.each([
+      ["another open pause", /^it has open pauses besides Greenhouse's emailed security code, so it stays as it is\.$/],
+      ["a CAPTCHA safeguard instead of the code pause",
+        /^it is paused-needs-input; --reopen-unsubmitted reopens only a failed submit or a run held on Greenhouse's emailed security code\.$/],
+      ["newer evidence that is not verification-code", /^its post-submit evidence of \S+ records unknown, not Greenhouse's security-code step\.$/],
+      ["no evidence", /^no post-submit evidence was saved after its approval of \S+, so nothing shows Greenhouse's security-code step\.$/],
+      ["newer code-step evidence on another site", /^its post-submit evidence is not on a Greenhouse board, so it stays as it is\.$/],
+      ["a confirmed receipt", /^a trusted application receipt was found, so it stays as it is\.$/],
+      ["a capture taken before the approval event", /^no post-submit evidence was saved after its approval of \S+, so nothing shows Greenhouse's security-code step\.$/],
+      ["an approval that was not withdrawn", /^its submit approval was not withdrawn, so it may have reached the site\.$/],
+      ["no approval on the timeline", /^no submit approval is logged for it, so nothing shows its submit was clicked\.$/]
+    ] as const)("refuses a security-code hold with %s", async (variant, refusal) => {
+      const database = disposableDatabase();
+      const dataDir = disposableDirectory("internship-agent-code-hold-");
+      const { jobId, run } = await securityCodeHeld(database, dataDir);
+      const later = new Date(Date.now() + 60_000);
+      if (variant === "another open pause") {
+        updateBrowserRun(database, run.id, { pauses: [...run.pauses, {
+          fieldId: "q7", label: "Portfolio URL?", question: "Portfolio URL?", suggestedKey: null, suggestedScope: null, safeguard: false,
+          sensitive: false, upload: false, status: "open", answer: null, draft: null
+        }] });
+      } else if (variant === "a CAPTCHA safeguard instead of the code pause") {
+        updateBrowserRun(database, run.id, { pauses: run.pauses.map((pause) => pause.fieldId === "site-security-code"
+          ? { ...pause, fieldId: "captcha-1", label: "CAPTCHA", question: "The page shows a CAPTCHA; complete it on the site." }
+          : pause) });
+      } else if (variant === "newer evidence that is not verification-code") {
+        await capture(database, dataDir, run, { outcome: "unknown", url: "https://boards.greenhouse.io/example/jobs/2", bodyText: "Please fix the errors below.", now: later });
+      } else if (variant === "no evidence") {
+        rmSync(readSubmitEvidence(dataDir, run)[0]!.dir, { recursive: true, force: true });
+      } else if (variant === "newer code-step evidence on another site") {
+        await capture(database, dataDir, run, { outcome: "verification-code", url: ASHBY_RUN_URL, bodyText: "We emailed you a code.", now: later });
+      } else if (variant === "a confirmed receipt") {
+        recordApplicationReceipt(database, { jobId, runId: run.id }, "confirmed", "a".repeat(32), approvalAt(database, jobId), new Date().toISOString());
+      } else if (variant === "a capture taken before the approval event") {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        try {
+          vi.setSystemTime(later);
+          logApplicationEvent(database, { jobId, fromStatus: "APPLYING", toStatus: "APPLYING", detail: `${AUTO_SUBMIT_EVENT}: a later approval.` });
+        } finally { vi.useRealTimers(); }
+      } else if (variant === "an approval that was not withdrawn") {
+        updateBrowserRun(database, run.id, { submissionApprovedAt: new Date().toISOString() });
+      } else {
+        database.prepare("DELETE FROM application_events WHERE job_id = ? AND detail LIKE ?").run(jobId, `${AUTO_SUBMIT_EVENT}%`);
+      }
+      const held = current(database, run);
+      expect(reopenUnsubmittedBlocker(database, dataDir, held)).toMatch(refusal);
+      const before = snapshot(database);
+      expect(() => reopenUnsubmittedRun(database, dataDir, run.id, { reason: REASON })).toThrow(AutomaticRetryRefused);
+      const { deps, lines } = commandDeps(database, { dataDir: () => dataDir });
+      expect(await runRetryCommand(["--run", run.id, "--reopen-unsubmitted", "--reason", REASON], deps)).toBe(0);
+      expect(lines[0]).toMatch(/^skipped /);
+      expect(lines.at(-1)).toBe("Reopened 0; skipped 1.");
+      expect(snapshot(database)).toEqual(before);
+      expect(statusOf(database, jobId)).toBe("APPLYING");
+      database.close();
     });
   });
 });

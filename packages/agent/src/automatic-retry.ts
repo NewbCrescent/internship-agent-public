@@ -23,7 +23,9 @@ import {
   withApplicationHoldTransaction,
   type ApplicationHold
 } from "@internship-agent/db";
+import { isGreenhouseBoardUrl, SECURITY_CODE_FIELD_ID } from "@internship-agent/browser";
 import {
+  AUTO_SUBMIT_EVENT,
   manualOnly,
   mentionsCompany,
   QUICK_SKIP_REASONS,
@@ -60,6 +62,11 @@ import { putWorkdayAccount, readWorkdayAccounts, WorkdayAccountsFileError, type 
  * site never took the click: Ashby's busy notice, Dover's Turnstile, or an
  * older capture of the intact form judged by unsubmitted-evidence.ts), never
  * one with a confirmation, and only after a fresh absent receipt check.
+ * It also reopens a run held on Greenhouse's emailed security code (paused,
+ * the approval withdrawn, that safeguard its only open pause, and only
+ * verification-code evidence on a Greenhouse board since the timeline's
+ * newest approval): Greenhouse completes nothing until the code is entered,
+ * so that shape is the proof and no receipt check is needed.
  *
  * Two more explicit modes never retry anything. `--close-unsubmitted` closes
  * a failed submit that was never clicked ("No submit control was found") on
@@ -130,10 +137,15 @@ export function retryAutomaticRun(database: DatabaseSync, runId: string, options
 }
 
 /** Why a failed submit is known not to have completed on the site (shown in output and the event). */
-export type UnsubmittedEvidence = { kind: "security-code-email" | "verification-code-evidence" | NeverTakenKind; text: string };
+export type UnsubmittedEvidence = {
+  kind: "security-code-email" | "verification-code-evidence" | "security-code-hold" | NeverTakenKind; text: string;
+};
 
 const SECURITY_CODE_EMAIL_TEXT = "Greenhouse emailed a security code after the submit click";
 const VERIFICATION_EVIDENCE_TEXT = "its post-submit evidence shows the site's emailed security-code step";
+const SECURITY_CODE_HOLD_TEXT = "it is held on Greenhouse's emailed security code, which was never entered, and its post-submit evidence shows that step";
+/** The timeline note of a submit approval: the auto-submit policy's (AUTO_SUBMIT_EVENT) or any other "Submission approved…" note. */
+const APPROVAL_EVENT_PREFIX = "Submission approved";
 /** The Gmail watcher's timeline note (mailEventDetail): `Email received: <label> from <domain>: "<subject>"`. */
 const MAIL_EVENT = /^Email received: [^"]*? from ([a-z0-9.-]+): "([^"]*)"/i;
 /** Mail this long after the approval no longer counts as this submit's. */
@@ -192,10 +204,73 @@ export function unsubmittedEvidenceRefusal(_database: DatabaseSync, dataDir: str
   return `no security-code email after the submit click, and its post-submit evidence of ${failing.entry.capturedAt} ${refusal}`;
 }
 
-/** Why a failed submit may not be reopened as not submitted, or null when it may. */
+/**
+ * The time of the run's newest submit approval on the timeline (an event
+ * starting with AUTO_SUBMIT_EVENT or "Submission approved", logged since the
+ * run began), or null when none is logged. Used once the approval itself was
+ * withdrawn, as it is for a run held on the emailed security code.
+ */
+function approvalEventAt(database: DatabaseSync, run: BrowserRun): number | null {
+  const createdAt = Date.parse(run.createdAt);
+  const times = listApplicationEvents(database, run.jobId)
+    .filter((event) => (event.detail ?? "").startsWith(AUTO_SUBMIT_EVENT) || (event.detail ?? "").startsWith(APPROVAL_EVENT_PREFIX))
+    .map((event) => Date.parse(event.createdAt))
+    .filter((at) => !Number.isNaN(at) && at >= createdAt);
+  return times.length > 0 ? Math.max(...times) : null;
+}
+
+/**
+ * Why a paused run is not held only on Greenhouse's emailed security code
+ * after a clicked submit, or null when it is: the approval withdrawn, the
+ * `site-security-code` safeguard its only open pause, an approval on the
+ * timeline, and every capture saved since that approval a verification-code
+ * capture, the newest on a Greenhouse board. Greenhouse completes nothing
+ * until the code is entered, so no receipt check is needed for this shape.
+ */
+function securityCodeHoldBlocker(database: DatabaseSync, dataDir: string, run: BrowserRun): string | null {
+  const open = run.pauses.filter((pause) => pause.status === "open");
+  if (!open.some((pause) => pause.fieldId === SECURITY_CODE_FIELD_ID && pause.safeguard)) {
+    return "it is paused-needs-input; --reopen-unsubmitted reopens only a failed submit or a run held on Greenhouse's emailed security code.";
+  }
+  if (open.length > 1) return "it has open pauses besides Greenhouse's emailed security code, so it stays as it is.";
+  if (run.submissionApprovedAt) return "its submit approval was not withdrawn, so it may have reached the site.";
+  const approvedAt = approvalEventAt(database, run);
+  if (approvedAt === null) return "no submit approval is logged for it, so nothing shows its submit was clicked.";
+  const captures = readSubmitEvidence(dataDir, run).filter((entry) => Date.parse(entry.capturedAt) >= approvedAt);
+  const since = new Date(approvedAt).toISOString();
+  if (captures.length === 0) return `no post-submit evidence was saved after its approval of ${since}, so nothing shows Greenhouse's security-code step.`;
+  // Newest first, so this is the newest capture that records anything else.
+  const other = captures.find((entry) => entry.outcome !== "verification-code");
+  if (other) return `its post-submit evidence of ${other.capturedAt} records ${other.outcome}, not Greenhouse's security-code step.`;
+  if (!isGreenhouseBoardUrl(captures[0]!.url)) return "its post-submit evidence is not on a Greenhouse board, so it stays as it is.";
+  return null;
+}
+
+/** The evidence a reopen names: the security-code hold for a paused run, else unsubmittedEvidence. */
+function reopenEvidence(database: DatabaseSync, dataDir: string, run: BrowserRun): UnsubmittedEvidence | null {
+  if (run.status === "paused-needs-input") {
+    return securityCodeHoldBlocker(database, dataDir, run) === null ? { kind: "security-code-hold", text: SECURITY_CODE_HOLD_TEXT } : null;
+  }
+  return unsubmittedEvidence(database, dataDir, run);
+}
+
+/**
+ * Why a run may not be reopened as not submitted, or null when it may: a
+ * failed submit with positive noncompletion evidence and a fresh absent
+ * receipt check, or a run held only on Greenhouse's emailed security code
+ * (securityCodeHoldBlocker; no receipt check needed).
+ */
 export function reopenUnsubmittedBlocker(database: DatabaseSync, dataDir: string, run: BrowserRun): string | null {
-  if (run.status !== "failed") return `it is ${run.status}; --reopen-unsubmitted reopens only a failed submit.`;
-  if (!run.submissionApprovedAt) return "its submission was never approved, so its submit was never clicked; retry it without --reopen-unsubmitted.";
+  const held = run.status === "paused-needs-input";
+  if (run.status !== "failed" && !held) {
+    return `it is ${run.status}; --reopen-unsubmitted reopens only a failed submit or a run held on Greenhouse's emailed security code.`;
+  }
+  if (held) {
+    const blocker = securityCodeHoldBlocker(database, dataDir, run);
+    if (blocker) return blocker;
+  } else if (!run.submissionApprovedAt) {
+    return "its submission was never approved, so its submit was never clicked; retry it without --reopen-unsubmitted.";
+  }
   if (run.confirmationText && run.confirmationText.trim()) return "a confirmation was recognized, so it stays as it is.";
   if (applicationReceiptConfirmed(database, run.id)) return "a trusted application receipt was found, so it stays as it is.";
   const posting = getJobPosting(database, run.jobId);
@@ -208,6 +283,10 @@ export function reopenUnsubmittedBlocker(database: DatabaseSync, dataDir: string
   const others = listBrowserRuns(database, run.jobId).filter((other) => other.id !== run.id);
   if (others.some((other) => other.status === "submitted" || other.status === "submitting")) return "the application already has a submitted run.";
   if (others.some((other) => other.status !== "cancelled")) return "another run of this application is open or failed.";
+  // The security-code hold is its own proof: Greenhouse's unfinished code step.
+  if (held) return null;
+  // Checked above for a failed run; repeated so the type narrows.
+  if (!run.submissionApprovedAt) return "its submission was never approved, so its submit was never clicked; retry it without --reopen-unsubmitted.";
   if (unsubmittedEvidence(database, dataDir, run) === null) {
     return `there is no evidence the site did not complete it (${unsubmittedEvidenceRefusal(database, dataDir, run)}); check the application on the site.`;
   }
@@ -224,7 +303,8 @@ export function reopenUnsubmittedBlocker(database: DatabaseSync, dataDir: string
 }
 
 /**
- * Cancels a failed submit the site is known not to have completed, moves its
+ * Cancels a failed submit the site is known not to have completed (or a run
+ * held on Greenhouse's emailed security code), moves its
  * job from APPLYING back to READY_FOR_REVIEW, and logs "Automatic run retried
  * after a fix: reopened as not submitted (<evidence>): <reason>". The
  * AUTOMATIC_RETRY_PREFIX keeps the pipeline's retry semantics (stops before
@@ -243,7 +323,7 @@ export function reopenUnsubmittedRun(
     if (!run) throw new Error("The browser run is unknown.");
     const blocker = reopenUnsubmittedBlocker(database, dataDir, run);
     if (blocker) throw new AutomaticRetryRefused(blocker);
-    const evidence = unsubmittedEvidence(database, dataDir, run)!;
+    const evidence = reopenEvidence(database, dataDir, run)!;
     const cancelled = cancelBrowserRun(run.id, database);
     setJobStatus(database, run.jobId, "APPLYING", "READY_FOR_REVIEW",
       (REOPENED_UNSUBMITTED_PREFIX + `${evidence.text}): ${reason}`).slice(0, 1_000));
@@ -592,7 +672,8 @@ function resolveRef(database: DatabaseSync, typed: string): BrowserRun | string 
  * lock. `--start` then runs one pass with no discovery while still holding
  * the lock. `--reopen-unsubmitted --reason "<text>"` (with `--run` only)
  * reopens failed submits instead, each only with evidence the site did not
- * complete it (reopenUnsubmittedBlocker), printing `reopened` or `skipped`.
+ * complete it, and runs held on Greenhouse's emailed security code
+ * (reopenUnsubmittedBlocker), printing `reopened` or `skipped`.
  * `--close-unsubmitted --reason` closes never-clicked failed submits on
  * closed postings (closeUnsubmittedBlocker), printing `closed` or `skipped`.
  * `--correct-submitted --reason` corrects SUBMITTED records that rest only on
@@ -735,7 +816,7 @@ export async function runRetryCommand(argv: string[], deps: Partial<RetryCommand
           }
           if (args.dryRun) {
             retried += 1;
-            io.log(`would reopen ${label} (${unsubmittedEvidence(database, dataDir, target)!.text})`);
+            io.log(`would reopen ${label} (${reopenEvidence(database, dataDir, target)!.text})`);
             continue;
           }
           try {
