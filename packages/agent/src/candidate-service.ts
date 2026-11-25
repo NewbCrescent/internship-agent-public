@@ -32,7 +32,7 @@ import {
 
 import { courseworkAnswerFact } from "./coursework";
 import { DeterministicQuestionMapper, type SemanticQuestionMapper } from "./question-mapper";
-import { resolveStandardAnswer } from "./standard-answers";
+import { formerEmployerNamed, resolveStandardAnswer } from "./standard-answers";
 
 export function getCandidateWorkspace(database: DatabaseSync = getDatabase()) {
   return {
@@ -108,6 +108,10 @@ export async function resolveCandidateQuestion(
       mapping,
       reason: `No remembered ${factDefinitions[mapping.key].label.toLocaleLowerCase("en-US")} fact exists for this scope.`
     };
+  }
+  // A No never answers a previous-employment question that names a company the candidate has a saved Yes for.
+  if (mapping.key === "previously_worked_here" && fact.value === false && formerEmployerNamed(database, LOCAL_CANDIDATE_ID, question)) {
+    return { status: "NEEDS_INPUT", question, mapping, reason: "The question names a company you worked for; answer it yourself." };
   }
   if (fact.reusePolicy === "never" || fact.reusePolicy === "confirm") {
     return {

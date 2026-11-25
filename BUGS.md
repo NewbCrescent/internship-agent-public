@@ -379,6 +379,121 @@ matching still need the posting's company in the subject. Regression: the
 job-wrapping cases in `testing-harness/agent/greenhouse-security-code.test.ts`
 (`pnpm test:agent:security-code`).
 
+### Workday's "How Did You Hear About Us?" list was read before it loaded
+
+Found 2026-11-25 on the real workspace. In the pass from about 04:05 to
+04:22Z, runs <run id> and <run id> (rockwellautomation.wd1) and <run id>
+(highmarkhealth.wd1, an enGen posting) paused on My Information's
+`formField-source` with no options, although the candidate has a saved
+`how_heard` answer and the how-heard rule; micron.wd1 and littelfuse.wd1
+chose it in the same pass. Cause: `openPromptOptions` waited for the first
+visible `promptOption`, which the Country Phone Code field's picked chip
+satisfied at once, then gave the list 300 ms and read only options that
+were not on screen before the click; a category's sub-list was given a
+fixed 700 ms. A list that took longer was read as empty. The adapter now
+closes any open list first, waits up to 5 s for prompt options outside
+picked items that were not on screen before the click, reads them once two
+reads 150 ms apart agree, and polls a category's sub-list the same way
+(`packages/browser/src/ats/workday-lists.ts`). Regression: the
+`?widgets=real` scenario of `testing-harness/browser/fixture-run.ts`
+(`xvfb-run -a pnpm test:browser:fixture`), whose prompt list shows 600 ms
+after the click and whose sub-list 900 ms after the category; the old code
+paused on the field with no options. Not verified live: whether those
+tenants' lists only load slowly, as the fixture models, or need another
+gesture to open; the live proof is the next pass on those hosts.
+
+### Workday dropdowns were read from the previous field's closing list
+
+Found 2026-11-25 on the real workspace, in the same pass. "Phone Device
+Type" paused on rockwellautomation.wd1 (<run id>, <run id>),
+highmarkhealth.wd1 (<run id>) and micron.wd1 (<run id>) with options that
+were the Country Phone Code field's picked item followed by the Country or
+State list, so the profile's saved phone type (the basis all along) was
+"not one of its options"; littelfuse.wd1 chose it. Cause: after clicking a
+dropdown, `collectControls` waited for any visible `role="option"` inside a
+`role="listbox"`, which the picked chip (drawn as an option in a listbox)
+satisfied at once, and read every visible option on the page: the chip and
+the list of the dropdown read just before, still on screen while it closed.
+The adapter now closes an open list and waits for it to go, reads only the
+list the button names in `aria-controls` (else the open
+`activeListContainer`, else a visible listbox outside other fields and
+picked items), waits until its options stop changing, and picks the option
+inside that list; history dropdowns (degree) use the same reader.
+Regression: the `?widgets=real` scenario of
+`testing-harness/browser/fixture-run.ts` (`xvfb-run -a pnpm
+test:browser:fixture`): portal lists 400 ms after the click, closed lists
+lingering 300 ms, chips with option roles; the old code paused on Phone
+Device Type and State. Not verified live: the real tenants' list markup
+(no form-step DOM was captured); a tenant that names the phone type other
+than "Mobile" still pauses.
+
+### Previous-employment questions naming the employer's group or using "did you work here" were not answered
+
+Found 2026-11-25 on the real workspace. "Have you previously been employed
+by any Micron company?" (micron.wd1, <run id>, a "Micron Technology"
+posting), "Did you work here before?" (littelfuse.wd1, <run id>) and "Have
+you ever been employed by Highmark Health, Allegheny Health Network, or …
+affiliates…" (highmarkhealth.wd1, <run id>, an enGen posting) paused
+unmapped, although the candidate's saved previous-employment answers
+settle them. Cause: the mapper accepted a previous-employment question only
+when it said "here" or "this company" or named the posting's company as
+whole words, and its pattern had no "did you work" form; Micron's label
+names only part of the posting's company and enGen's names its parent,
+which runs the Workday site. The mapper now also reads "did you (ever)
+work or intern", and on a Workday application the site's tenant spelled by
+consecutive whole words (micron, highmarkhealth) names this employer; the
+posting company's scope applies. A saved No never answers such a question
+when it names a company the candidate has a saved Yes for: it asks the
+candidate. Regressions: the previous-employment cases in
+`testing-harness/agent/question-mapper.test.ts` (`pnpm test:agent`), the
+saved-company cases in `testing-harness/agent/memory-service.integration.test.ts`
+(`pnpm --filter @internship-agent/agent test:memory`) and the
+`mentionsSiteTenant` cases in `testing-harness/domain/candidate-facts.test.ts`
+(`pnpm test:domain`). Not changed: an answer typed for such a pause is
+mapped without the site's tenant.
+
+### A value Workday already showed held automatic submission as a kept attachment
+
+Found 2026-11-25 on the real workspace: every Workday run with a shown
+Country or Country Phone Code (ZOLL's pass log among them) was held with
+"The site kept an attachment you need to confirm." Cause:
+`autoSubmitBlockers` counted every `keep` decision as a kept attachment,
+and the planner records a field's shown value as a keep. The planner now
+gives a shown value one of two reasons: `SITE_VALUE_KEPT_REASON` when no
+saved answer of the candidate's applies to the question, which no longer
+holds the run, and `UNCONFIRMED_SITE_VALUE_REASON` when the catalog
+recognized the question but nothing saved settles it (no saved fact, needs
+confirmation, ambiguous, or a saved answer that is not one of the
+options), which holds it as "The site already shows an answer that none of
+your saved answers confirms". Runs planned before this change keep the old
+reason and stay held; any other keep (Handshake's attached resume) holds as
+an attachment as before. Regressions:
+`testing-harness/domain/submission-mode.test.ts` (`pnpm test:domain`) and
+the keep-reason cases in `testing-harness/browser-worker/self-identification.test.ts`
+(`pnpm test:browser-worker:fast`). Runs already waiting with the old
+reason need a fresh run to benefit.
+
+### Workday's work-history dates were clicked under their date display
+
+Found on the real workspace: Sierra Space (<run id>), ZOLL (<run id>) and
+Neogen (<run id>) on 2026-11-25 and Aerospace (<run id>) on 2026-11-24
+stopped on My Experience with "locator.click: Timeout 30000ms exceeded"
+on the first Work Experience row's From month spinbutton
+(`dateSectionMonth-input`). The section, the row, and the field were all
+found, so it was not a missing Add button, a collapsed panel, or an empty
+history. Cause: the history filler clicked each date input before typing,
+and Workday draws a `dateSection…-display` element over it, so the click
+never became actionable. The recorded detail is cut off before
+Playwright's reason, so the overlay is inferred from Workday's markup and
+public notes. Each date section input is now focused and typed into,
+never clicked, and other history inputs fall back to focusing when a click
+is not taken within 5 s. Regression: the `?widgets=real` scenario of
+`testing-harness/browser/fixture-run.ts` (`xvfb-run -a pnpm
+test:browser:fixture`), whose date displays cover their inputs; the old
+code's walk threw on the covered month. Not verified live: the history
+widgets after the dates (school prompt, degree, field of study) have not
+run on a real tenant yet.
+
 ### Ashby submit clicks were refused while Ashby was still saving answers
 
 Every Ashby submit the agent made ended without a confirmation: Lumora

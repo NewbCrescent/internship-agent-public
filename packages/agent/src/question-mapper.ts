@@ -1,5 +1,5 @@
 import { isHearAboutQuestion } from "@internship-agent/browser";
-import { mentionsCompany, normalizeCompanyName, type CandidateFactKey, type FactScope, type QuestionContext, type QuestionMapping } from "@internship-agent/domain";
+import { mentionsCompany, mentionsSiteTenant, normalizeCompanyName, type CandidateFactKey, type FactScope, type QuestionContext, type QuestionMapping } from "@internship-agent/domain";
 import { readPlace } from "@internship-agent/jobs";
 
 import { mapStandardQuestion } from "./standard-question-mapper";
@@ -11,7 +11,7 @@ export interface SemanticQuestionMapper {
 const protectedPattern = /\b(race|ethnicity|ethnic|gender|sex|sexual orientation|transgender|disability|disabled|veteran|religion|marital status)\b/i;
 const attestationPattern = /\b(certify|attest|under penalty|declare that|signature confirms|information (?:is|provided is) true)\b/i;
 const END_DATE = /\blatest\s+(?:possible\s+)?(?:end|finish|available)\b|\bavailable\s+until\b|\bavailability\s+end\b|\blast\s+day\s+of\s+(?:availability|the internship)\b|\b(?:end|finish)\s+date\b.{0,40}\b(?:internship|availability|available)\b|\b(?:internship|availability|available)\b.{0,40}\b(?:end|finish)\s+date\b|\bwhen\s+(?:can|could|would)\s+you\s+(?:end|finish)\b/i;
-const PREVIOUS_EMPLOYMENT = /\b(?:(?:have|had)\s+you\s+(?:ever\s+)?(?:previously\s+|formerly\s+)?(?:been\s+)?(?:work(?:ed)?|employed|intern(?:ed)?)|(?:previously|formerly|ever|before)\s+(?:been\s+)?(?:work(?:ed)?|employed|intern(?:ed)?)|(?:current\s+or\s+)?former\s+(?:employee|intern|worker|contractor)|previous(?:ly)?\s+(?:employee|worker|intern))\b/i;
+const PREVIOUS_EMPLOYMENT = /\b(?:(?:have|had)\s+you\s+(?:ever\s+)?(?:previously\s+|formerly\s+)?(?:been\s+)?(?:work(?:ed)?|employed|intern(?:ed)?)|(?:previously|formerly|ever|before)\s+(?:been\s+)?(?:work(?:ed)?|employed|intern(?:ed)?)|(?:current\s+or\s+)?former\s+(?:employee|intern|worker|contractor)|previous(?:ly)?\s+(?:employee|worker|intern)|did\s+you\s+(?:ever\s+|previously\s+)?(?:work(?:ed)?|intern(?:ed)?))\b/i;
 const COURSEWORK = /\b(?:relevant|related|completed|applicable)\s+(?:course\s*work|courses|classes)\b|\bcourse\s*work\b|\b(?:courses|classes)\s+(?:that\s+)?(?:you(?:'ve|\s+have)?\s+)?(?:taken|completed)\b|\b(?:which|what|list(?:\s+any)?)\s+(?:relevant\s+)?(?:courses|classes)\b/i;
 // Grades, GPA, transcripts, credit counts, and non-academic courses are never answered with the course list.
 const NOT_COURSEWORK = /\b(?:gpa|grade|grades|graded|grading|grade\s+point|marks?|scores?|transcripts?|credits?|units|honou?rs|online|certifications?|certificates?|bootcamps?|training)\b/i;
@@ -187,10 +187,14 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
       };
     }
 
-    // Previous employment only for this employer: "here", "this company", or
-    // the posting's company by name. Another company's name stays unmapped.
+    // Previous employment only for this employer: "here", "this company", the
+    // posting's company by name, or the employer that runs the Workday site
+    // (its tenant, e.g. Highmark Health for an enGen posting on
+    // highmarkhealth.wd1). Another company's name stays unmapped.
     if (PREVIOUS_EMPLOYMENT.test(normalized) &&
-      (EMPLOYER_REFERENCE.test(normalized) || (context.companyName && mentionsCompany(trimmed, context.companyName)))) {
+      (EMPLOYER_REFERENCE.test(normalized) ||
+        (context.companyName && mentionsCompany(trimmed, context.companyName)) ||
+        (context.employerSite && mentionsSiteTenant(trimmed, context.employerSite)))) {
       return {
         status: "MAPPED",
         key: "previously_worked_here",

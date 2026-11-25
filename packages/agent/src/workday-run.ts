@@ -34,8 +34,11 @@ import { applyVoiceDrafts, draftSourcesFor } from "./voice-drafting";
 
 /** Orchestrator helpers the Workday run reuses, passed in to keep one source of truth. */
 export type WorkdayRunDeps = {
-  /** `transcript`: the form asked for a transcript, so answers come from the alternate (2029) profile. */
-  resolveFields(form: RecognizedForm, transcript: boolean): Promise<Map<string, FieldResolution>>;
+  /**
+   * `transcript`: the form asked for a transcript, so answers come from the alternate (2029) profile.
+   * `employerSite`: the Workday tenant of the application address (the employer that runs the form), for previous-employment questions.
+   */
+  resolveFields(form: RecognizedForm, transcript: boolean, employerSite: string | null): Promise<Map<string, FieldResolution>>;
   uploadsFor(decisions: FillDecision[], transcript: boolean): Promise<(decision: FillDecision) => string | null>;
   /** Points resume uploads at the candidate's uploaded resume for the profile, when the run sends one. */
   chooseResume(decisions: FillDecision[], transcript: boolean): FillDecision[];
@@ -110,7 +113,7 @@ export async function walkWorkday(
   if (entered === "sign-in" || await page.signInRequired()) entered = await signIn();
   // A missing Apply button usually means the posting closed: a real stop.
   if (entered === "missing") throw new AutomaticRunStopped(`No Workday application opened at ${applicationUrl}; the posting may be closed.`);
-  const walk = () => walkWorkdayApplication(page, (step, form, state) => planWorkdayStep(step, form, context, state.transcript), {
+  const walk = () => walkWorkdayApplication(page, (step, form, state) => planWorkdayStep(step, form, context, state.transcript, location?.tenant ?? null), {
     mode, confirm, history: context.history ?? undefined, transcript: context.transcript
   });
   try {
@@ -129,7 +132,13 @@ export async function walkWorkday(
   }
 }
 
-async function planWorkdayStep(step: WorkdayStep, form: RecognizedForm, context: WorkdayRunContext, transcript: boolean): Promise<WorkdayStepPlan> {
+async function planWorkdayStep(
+  step: WorkdayStep,
+  form: RecognizedForm,
+  context: WorkdayRunContext,
+  transcript: boolean,
+  employerSite: string | null
+): Promise<WorkdayStepPlan> {
   const candidate = context.candidate;
   if (context.profileLock === "default" && hasTranscriptField(form.fields)) {
     throw new AutomaticRunStopped(yearHoldMessage(context.database, context.candidateId, context.posting.companyName));
@@ -148,7 +157,7 @@ async function planWorkdayStep(step: WorkdayStep, form: RecognizedForm, context:
       addressRegion: candidate?.addressRegion, addressPostalCode: candidate?.addressPostalCode, addressCountry: candidate?.addressCountry,
       phoneType: candidate?.phoneType, fieldOfStudy: candidate?.fieldOfStudy, gpa: candidate?.gpa
     },
-    resolutions: await context.deps.resolveFields(form, transcript),
+    resolutions: await context.deps.resolveFields(form, transcript, employerSite),
     packageAnswers: context.packageAnswers,
     variantId: context.variantId,
     transcriptDocumentId,

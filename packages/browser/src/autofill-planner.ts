@@ -4,7 +4,7 @@ import type {
   PauseRecord,
   RecognizedForm
 } from "@internship-agent/domain";
-import { factOption, FACT_OPTION_KEYS, samePlace } from "@internship-agent/domain";
+import { factOption, FACT_OPTION_KEYS, samePlace, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
 import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, isStandardAnswerKey, matchOfferedOption, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption } from "@internship-agent/domain";
 
 import { classifyFieldRole, classifyUploadRole, isSensitiveRole } from "./ats/field-roles";
@@ -16,7 +16,11 @@ import { standingFieldDecision, textMessageConsentDecision, type StandingInputs 
 export type FieldResolution =
   | { status: "RESOLVED"; key: string; scope: string; display: string; value: boolean | string }
   | { status: "NEEDS_INPUT"; key: string | null; scope: string | null }
-  | { status: "UNAVAILABLE" }
+  | {
+      status: "UNAVAILABLE";
+      /** The catalog recognized the question, but no saved answer settles it (it needs confirmation, is ambiguous, or has no saved fact). */
+      held?: true;
+    }
   /** A saved voluntary self-identification answer matched exactly one offered option (ats/self-identification.ts). */
   | { status: "SELF_IDENTIFIED"; key: string; option: string }
   /** A candidate-supplied answer from question memory, read only for questions the catalog does not map. */
@@ -186,7 +190,7 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
       }
     } else if (field.currentValue && !field.options?.length) {
       // A Workday prompt that already shows a pick is read without its options: keep it.
-      return { fieldId: field.id, action: "keep", value: field.currentValue, basis: null, reason: "The site already shows this value.", pause: null };
+      return keepShown(field, resolution);
     }
   }
 
@@ -339,7 +343,7 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
       });
     }
     if (field.currentValue) {
-      return { fieldId: field.id, action: "keep", value: field.currentValue, basis: null, reason: "The site already shows this value.", pause: null };
+      return keepShown(field, resolution);
     }
     if (!field.required) return skip(field, "Optional choice with no known answer stays untouched.");
     return pauseDecision(field, {
@@ -454,7 +458,7 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
   if (field.currentValue) {
     // Nothing known says otherwise: leave what the site shows (a default or a
     // saved draft) exactly as it is; the candidate sees it at review.
-    return { fieldId: field.id, action: "keep", value: field.currentValue, basis: null, reason: "The site already shows this value.", pause: null };
+    return keepShown(field, resolution);
   }
   if (!field.required) {
     return skip(field, "Optional field with no known answer stays empty.");
@@ -721,6 +725,27 @@ function fill(
     });
   }
   return { fieldId: field.id, action: "fill", value, basis, reason, pause: null };
+}
+
+/**
+ * Leaves the value a field already shows. Only a field no saved answer of the
+ * candidate's applies to (or "How did you hear about us?", answered by its own
+ * rule) is marked as the site's shown value, which does not hold an automatic
+ * submission; a recognized question that nothing saved settles, or one whose
+ * saved answer did not fit, is marked unconfirmed (submission-mode.ts).
+ */
+function keepShown(field: BrowserField, resolution: FieldResolution | undefined): FillDecision {
+  const settledByNothing = resolution === undefined ||
+    (resolution.status === "UNAVAILABLE" && !resolution.held) ||
+    (resolution.status === "RESOLVED" && resolution.key === "how_heard");
+  return {
+    fieldId: field.id,
+    action: "keep",
+    value: field.currentValue ?? null,
+    basis: null,
+    reason: settledByNothing ? SITE_VALUE_KEPT_REASON : UNCONFIRMED_SITE_VALUE_REASON,
+    pause: null
+  };
 }
 
 function skip(field: BrowserField, reason: string): FillDecision {

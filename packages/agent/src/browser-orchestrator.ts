@@ -630,7 +630,8 @@ async function resolveFields(
         ? { status: "REMEMBERED_ANSWER", answerId: saved.id, answer: saved.answer, answerKey: saved.answerKey, answerKind: saved.answerKind }
         : { status: "UNAVAILABLE" });
     } else {
-      resolutions.set(field.id, { status: "UNAVAILABLE" });
+      // The catalog recognized the question, but nothing saved answers it (needs confirmation, ambiguous, no saved fact for the mapping).
+      resolutions.set(field.id, { status: "UNAVAILABLE", held: true });
     }
   }
   return resolutions;
@@ -1648,7 +1649,11 @@ function workdayContext(
     standing: standingPlannerInputs(candidate, standing),
     transcriptDocumentId: () => currentCandidateDocument("transcript", database, input.candidateId)?.id ?? null,
     deps: {
-      resolveFields: (form, usesTranscript) => resolveFields(form, database, { ...questionContextFor(usesTranscript ? "handshake_internal" : null), ...postingQuestionContext(input.posting) }),
+      resolveFields: (form, usesTranscript, employerSite) => resolveFields(form, database, {
+        ...questionContextFor(usesTranscript ? "handshake_internal" : null),
+        ...postingQuestionContext(input.posting),
+        ...(employerSite ? { employerSite } : {})
+      }),
       uploadsFor: (decisions, usesTranscript) => prepareUploads(database, dataDir, {
         jobId: input.jobId, variantId: input.variantId, channel: null,
         graduationDate: usesTranscript ? transcriptGraduation : null

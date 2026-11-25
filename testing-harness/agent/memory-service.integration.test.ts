@@ -131,6 +131,14 @@ describe("company-, country-, and protected-scoped answers", () => {
     }
     expect(() => save(database, "previously_worked_here", { kind: "global" }, true)).toThrow();
 
+    // The employer that runs the Workday site, named as a group, is this employer: the saved No answers it.
+    const site = { companyName: "fixGen", employerSite: "fixturehealth" };
+    const group = "Have you ever been employed by Fixture Health, Example Health Network, or by one of its subsidiaries or affiliates?";
+    expect(await resolveCandidateQuestion(group, site, { database })).toMatchObject({ status: "RESOLVED", displayAnswer: "No" });
+    // A No never answers a question that also names the company the candidate has a saved Yes for.
+    expect(await resolveCandidateQuestion("Have you ever been employed by Fixture Health or Vandelay?", site, { database })).toMatchObject({ status: "NEEDS_INPUT" });
+    expect(await resolveCandidateQuestion("Did you work here before?", { companyName: "Vandelay Inc." }, { database })).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
+
     // A remembered Yes with no company named is used once, never saved globally.
     const before = factCount(database);
     expect(await answerCandidateQuestion({ question, answer: "yes", remember: true, context: {} }, { database })).toMatchObject({ status: "ANSWERED_ONCE" });

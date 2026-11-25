@@ -44,6 +44,14 @@
     // errorMessage for missing items that have no container (history rows, Resume/CV).
     // ?hidden=<ms> (synthetic, the cause was not seen on a live page): the first time My Information
     // is drawn, its field containers stay display:none for that many milliseconds, then show.
+    // ?widgets=real (synthetic, modeled on the 2026-11-25 real pauses and public notes on Workday's markup):
+    // picked prompt items sit in a role="listbox" list with role="option" items (the Country Phone Code
+    // chip was read into Phone Device Type's options on rockwellautomation.wd1, highmarkhealth.wd1 and
+    // micron.wd1); a dropdown's list opens in an activeListContainer portal named by the button's
+    // aria-controls, 400 ms after the click; a list closed with Escape stays on screen 300 ms; a prompt's
+    // list shows 600 ms after its input is clicked and a category's sub-list 900 ms after the category is
+    // clicked; each date section draws its dateSection…-display over the spinbutton input, which takes no click.
+    const realWidgets = params.get("widgets") === "real";
     const ACCOUNTS_KEY = "fixture-workday-accounts";
     const SESSION_KEY = "fixture-workday-session";
     const readAccounts = () => JSON.parse(localStorage.getItem(ACCOUNTS_KEY) || "{}");
@@ -80,18 +88,27 @@
     const degrees = ["High School Diploma", "Associate's Degree", "Bachelor of Science (BS)", "Bachelor of Arts (BA)", "Bachelor's Degree", "Master's Degree"];
     window.fixture = state;
 
+    /** Closes every open list: the popup and, with ?widgets=real, the list portals. */
+    function clearLists() {
+      document.getElementById("popup").innerHTML = "";
+      for (const portal of document.querySelectorAll("[data-fixture-list]")) portal.remove();
+    }
     const listbox = (id, label, options, selected) => `
       <div data-automation-id="${id}">
         <label for="${id}-button">${label}</label>
-        <button type="button" id="${id}-button" aria-haspopup="listbox" data-listbox="${id}" data-options="${options.join("|")}">${selected || "Select One"}</button>
+        <button type="button" id="${id}-button" aria-haspopup="listbox"${realWidgets ? ` aria-controls="${id}-list"` : ""} data-listbox="${id}" data-options="${options.join("|")}">${selected || "Select One"}</button>
       </div>`;
+    // A picked chip; with ?widgets=real it also carries role="option".
+    const chip = (text) => realWidgets
+      ? `<li data-automation-id="selectedItem" role="option"><span data-automation-id="promptOption">${text}</span></li>`
+      : `<li data-automation-id="selectedItem"><span data-automation-id="promptOption">${text}</span></li>`;
     // Search-and-pick prompt: a chip list plus an input; selected chips also carry promptOption, as on Workday.
     const prompt = (id, label, selected) => `
       <div data-automation-id="${id}">
         <label for="${id}-input">${label}</label>
         <div data-automation-id="multiSelectContainer">
           <div data-automation-id="multiselectInputContainer"><input id="${id}-input" data-prompt="${id}"></div>
-          <ul data-automation-id="selectedItemList">${selected ? `<li data-automation-id="selectedItem"><span data-automation-id="promptOption">${selected}</span></li>` : ""}</ul>
+          <ul data-automation-id="selectedItemList"${realWidgets ? ` role="listbox"` : ""}>${selected ? chip(selected) : ""}</ul>
         </div>
       </div>`;
     const sourceTree = {
@@ -143,6 +160,10 @@
 
     // Repeating My Experience rows, marked like Workday's panels.
     const historyInput = (kind, index, key) => `data-h="${kind}" data-i="${index}" data-k="${key}"`;
+    // A month or year section; with ?widgets=real its display is drawn over the spinbutton input, which takes no click.
+    const dateInput = (part, attrs, value) => realWidgets
+      ? `<span style="position:relative;display:inline-block"><input data-automation-id="dateSection${part}-input" role="spinbutton" aria-label="${part}" ${attrs} value="${value}"><span data-automation-id="dateSection${part}-display" style="position:absolute;inset:0;background:#fff">${value || (part === "Month" ? "MM" : "YYYY")}</span></span>`
+      : `<input data-automation-id="dateSection${part}-input" ${attrs} value="${value}">`;
     const workPanel = (row, index) => `
       <div role="group" data-automation-id="workExperience-${index + 1}">
         <h4>Work Experience ${index + 1}</h4>
@@ -152,11 +173,11 @@
         <div data-automation-id="formField-location"><label for="w${index}l">Location</label><input id="w${index}l" ${historyInput("work", index, "location")} value="${row.location || ""}"></div>
         <div data-automation-id="formField-currentlyWorkHere"><label for="w${index}n">I currently work here</label><input type="checkbox" id="w${index}n" ${historyInput("work", index, "current")} ${row.current ? "checked" : ""}></div>
         <div data-automation-id="formField-startDate"><label>From*</label>
-          <input data-automation-id="dateSectionMonth-input" ${historyInput("work", index, "fromM")} value="${row.fromM || ""}">
-          <input data-automation-id="dateSectionYear-input" ${historyInput("work", index, "fromY")} value="${row.fromY || ""}"></div>
+          ${dateInput("Month", historyInput("work", index, "fromM"), row.fromM || "")}
+          ${dateInput("Year", historyInput("work", index, "fromY"), row.fromY || "")}</div>
         <div data-automation-id="formField-endDate"><label>To*</label>
-          <input data-automation-id="dateSectionMonth-input" ${historyInput("work", index, "toM")} value="${row.toM || ""}">
-          <input data-automation-id="dateSectionYear-input" ${historyInput("work", index, "toY")} value="${row.toY || ""}"></div>
+          ${dateInput("Month", historyInput("work", index, "toM"), row.toM || "")}
+          ${dateInput("Year", historyInput("work", index, "toY"), row.toY || "")}</div>
         <div data-automation-id="formField-roleDescription"><label for="w${index}d">Role Description</label><textarea id="w${index}d" ${historyInput("work", index, "description")}>${row.description || ""}</textarea></div>
       </div>`;
     const educationPanel = (row, index) => `
@@ -172,8 +193,8 @@
           <div data-automation-id="multiselectInputContainer"><input id="e${index}f" data-prompt="history:education:${index}:field"></div>
           <ul data-automation-id="selectedItemList">${row.field ? `<li data-automation-id="selectedItem">${row.field}</li>` : ""}</ul></div>
         <div data-automation-id="formField-gradeAverage"><label for="e${index}a">Overall Result (GPA)</label><input id="e${index}a" ${historyInput("education", index, "gpa")} value="${row.gpa || ""}"></div>
-        <div data-automation-id="formField-firstYearAttended"><label>From</label><input data-automation-id="dateSectionYear-input" ${historyInput("education", index, "fromY")} value="${row.fromY || ""}"></div>
-        <div data-automation-id="formField-lastYearAttended"><label>To (Actual or Expected)*</label><input data-automation-id="dateSectionYear-input" ${historyInput("education", index, "toY")} value="${row.toY || ""}"></div>
+        <div data-automation-id="formField-firstYearAttended"><label>From</label>${dateInput("Year", historyInput("education", index, "fromY"), row.fromY || "")}</div>
+        <div data-automation-id="formField-lastYearAttended"><label>To (Actual or Expected)*</label>${dateInput("Year", historyInput("education", index, "toY"), row.toY || "")}</div>
       </div>`;
     const resumeStatus = () => `<div id="resume-status">${state.resumes.map((name, index) =>
       `<div data-automation-id="file-upload-item">${name} <button type="button" data-automation-id="delete-file" data-file="${index}">Delete</button></div>`).join("") || "No file"}</div>`;
@@ -498,7 +519,13 @@
       } else if (target.matches("input[data-prompt]")) {
         const id = target.dataset.prompt;
         const options = id === "formField-source" ? Object.keys(sourceTree) : ["United States of America (+1)", "Canada (+1)"];
-        document.getElementById("popup").innerHTML = `<div data-prompt-popup="${id}">${options.map((option) => `<div data-automation-id="promptOption" data-level="top">${option}</div>`).join("")}</div>`;
+        const html = `<div data-prompt-popup="${id}">${options.map((option) => `<div data-automation-id="promptOption" data-level="top">${option}</div>`).join("")}</div>`;
+        if (realWidgets) {
+          clearLists();
+          setTimeout(() => { document.getElementById("popup").innerHTML = html; }, 600);
+        } else {
+          document.getElementById("popup").innerHTML = html;
+        }
       } else if (target.matches('#popup [data-automation-id="promptOption"]')) {
         const popup = target.closest("[data-prompt-popup]");
         const id = popup.dataset.promptPopup;
@@ -512,19 +539,34 @@
         }
         const children = id === "formField-source" && target.dataset.level === "top" ? sourceTree[target.textContent] : null;
         if (children) {
-          popup.innerHTML = children.map((option) => `<div data-automation-id="promptOption" data-level="sub">${option}</div>`).join("");
+          const html = children.map((option) => `<div data-automation-id="promptOption" data-level="sub">${option}</div>`).join("");
+          if (realWidgets) {
+            popup.innerHTML = "";
+            setTimeout(() => { popup.innerHTML = html; }, 900);
+          } else {
+            popup.innerHTML = html;
+          }
           return;
         }
         state.values[id] = target.textContent;
-        document.getElementById("popup").innerHTML = "";
+        clearLists();
         // Update the chip in place, as Workday does, so typed fields keep their values.
-        document.querySelector(`[data-automation-id="${id}"] [data-automation-id="selectedItemList"]`).innerHTML =
-          `<li data-automation-id="selectedItem"><span data-automation-id="promptOption">${target.textContent}</span></li>`;
+        document.querySelector(`[data-automation-id="${id}"] [data-automation-id="selectedItemList"]`).innerHTML = chip(target.textContent);
       } else if (target.matches("button[aria-haspopup=listbox]")) {
         const id = target.dataset.listbox;
         const options = target.dataset.options.split("|").map((option) => `<li role="option">${option}</li>`).join("");
-        document.getElementById("popup").innerHTML = `<ul role="listbox" data-for="${id}">${options}</ul>`;
-      } else if (target.matches('[role="option"]')) {
+        if (realWidgets) {
+          // A portal of its own, filled a moment later; a list still closing stays on screen.
+          const portal = document.createElement("div");
+          portal.setAttribute("data-automation-id", "activeListContainer");
+          portal.setAttribute("data-fixture-list", "1");
+          document.body.appendChild(portal);
+          setTimeout(() => { portal.innerHTML = `<ul role="listbox" id="${id}-list" data-for="${id}">${options}</ul>`; }, 400);
+        } else {
+          document.getElementById("popup").innerHTML = `<ul role="listbox" data-for="${id}">${options}</ul>`;
+        }
+      } else if (target.matches('[role="option"]') && target.parentElement?.dataset.for) {
+        // Picked chips (role="option" with ?widgets=real) never act as options.
         const id = target.parentElement.dataset.for;
         state.values[id] = target.textContent;
         if (id.startsWith("history:")) {
@@ -532,7 +574,7 @@
           state[kind][Number(index)][key] = target.textContent;
         }
         document.querySelector(`[data-listbox="${id}"]`).textContent = target.textContent;
-        document.getElementById("popup").innerHTML = "";
+        clearLists();
       } else if (target.matches('[data-automation-id="pageFooterNextButton"]')) {
         if (state.step === steps.length - 1) { state.submitted = true; render(); return; }
         for (const input of document.querySelectorAll("#fields input[type=text], #fields input[type=number]")) {
@@ -561,7 +603,16 @@
         render();
       }
     });
-    document.addEventListener("keydown", (event) => { if (event.key === "Escape") document.getElementById("popup").innerHTML = ""; });
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      // With ?widgets=real the lists open at the keypress stay on screen 300 ms, then go; a list opened later stays.
+      if (realWidgets) {
+        const closing = [...document.querySelectorAll("[data-fixture-list]"), ...document.getElementById("popup").children];
+        setTimeout(() => { for (const element of closing) element.remove(); }, 300);
+      } else {
+        clearLists();
+      }
+    });
   </script>
 </body>
 </html>

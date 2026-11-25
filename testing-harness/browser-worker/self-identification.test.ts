@@ -6,7 +6,7 @@ import {
   selfIdentificationCategory,
   type FieldResolution
 } from "@internship-agent/browser";
-import type { BrowserField, SelfIdentificationAnswers } from "@internship-agent/domain";
+import { SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON, type BrowserField, type SelfIdentificationAnswers } from "@internship-agent/domain";
 
 // Each case saves one answer at a time: these are option-table checks, not a candidate.
 function field(label: string, options: string[] | undefined, kind: BrowserField["kind"] = "select"): BrowserField {
@@ -183,7 +183,20 @@ describe("planning saved self-identification and saved answers", () => {
     const text = field("How did you hear about this job?", undefined, "text");
     expect(plan([text], [[text.id, heard("Online job board")]]).decisions[0]).toMatchObject({ action: "fill", value: "Online job board" });
     const shown: BrowserField = { ...field("How Did You Hear About Us?", undefined), currentValue: "Job Board" };
-    expect(plan([shown], [[shown.id, heard("Online job board")]]).decisions[0]).toMatchObject({ action: "keep", value: "Job Board" });
+    expect(plan([shown], [[shown.id, heard("Online job board")]]).decisions[0]).toMatchObject({ action: "keep", value: "Job Board", reason: SITE_VALUE_KEPT_REASON });
+  });
+
+  it("marks a value the site already shows as unconfirmed only when a recognized question has no saved answer that settles it", () => {
+    const country: BrowserField = { ...field("Country Phone Code", undefined), currentValue: "Fixtureland (+1)" };
+    expect(plan([country], []).decisions[0]).toMatchObject({ action: "keep", value: "Fixtureland (+1)", reason: SITE_VALUE_KEPT_REASON });
+    expect(plan([country], [[country.id, { status: "UNAVAILABLE" }]]).decisions[0]).toMatchObject({ action: "keep", reason: SITE_VALUE_KEPT_REASON });
+    expect(plan([country], [[country.id, { status: "UNAVAILABLE", held: true }]]).decisions[0]).toMatchObject({ action: "keep", reason: UNCONFIRMED_SITE_VALUE_REASON });
+    const group: BrowserField = { ...field("Which shifts can you work?", ["Days", "Nights"], "checkbox"), currentValue: "Days" };
+    expect(plan([group], [[group.id, { status: "NEEDS_INPUT", key: "x", scope: "global" }]]).decisions[0])
+      .toMatchObject({ action: "keep", reason: UNCONFIRMED_SITE_VALUE_REASON });
+    // A saved answer that matches none of the options never lets the shown one through as settled.
+    expect(plan([group], [[group.id, { status: "RESOLVED", key: "x", scope: "global", display: "Weekends", value: "Weekends" }]]).decisions[0])
+      .toMatchObject({ action: "keep", reason: UNCONFIRMED_SITE_VALUE_REASON });
   });
 
   it("matches saved pronouns to a longer option and fills free text", () => {

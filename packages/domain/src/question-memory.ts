@@ -16,7 +16,9 @@ export const questionContextSchema = z.object({
   /** The form field's kind, when the question comes from a browser run's field. */
   fieldKind: browserFieldKindSchema.optional(),
   /** The posting's stated pay; only the salary rule reads it. */
-  postingPay: postingPaySchema.optional()
+  postingPay: postingPaySchema.optional(),
+  /** The Workday tenant of the application site (micron for micron.wd1.myworkdayjobs.com): the employer that runs the form, for previous-employment questions. */
+  employerSite: z.string().trim().min(1).max(100).optional()
 });
 
 export const mappedQuestionSchema = z.object({

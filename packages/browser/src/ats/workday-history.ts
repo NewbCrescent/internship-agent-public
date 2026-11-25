@@ -14,6 +14,14 @@ import {
 } from "@internship-agent/domain";
 
 import { ensureNameShim } from "../handshake-executor";
+import {
+  closeWorkdayLists,
+  openWorkdayListbox,
+  pickWorkdayListboxOption,
+  pickWorkdayPromptOption,
+  settleWorkdayOptions,
+  workdayPromptOptions
+} from "./workday-lists";
 
 /**
  * Fills Workday's repeating My Experience sections (Work Experience and
@@ -128,9 +136,24 @@ async function addPanel(page: Page, kind: Kind): Promise<number | null> {
 }
 
 async function typeInto(page: Page, input: Locator, value: string): Promise<void> {
-  await input.click();
+  // A covered input is focused instead.
+  await input.click({ timeout: 5_000 }).catch(() => input.focus());
   await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Backspace");
+  await page.keyboard.type(value);
+}
+
+/**
+ * Workday draws each date section's `dateSection…-display` over its spinbutton
+ * input, so a click never reaches it (Sierra Space, ZOLL, Neogen, Aerospace,
+ * 2026-11-24/25): focus it and type.
+ */
+async function typeIntoDateSection(page: Page, input: Locator, value: string): Promise<void> {
+  await input.focus();
+  if ((await input.inputValue()) !== "") {
+    await page.keyboard.press("ControlOrMeta+A");
+    await page.keyboard.press("Backspace");
+  }
   await page.keyboard.type(value);
 }
 
@@ -167,10 +190,10 @@ async function setDate(page: Page, scope: Locator, label: RegExp, value: MonthYe
       record.ask(id, id, `Workday asks for a month here, and only the year ${value} is recorded; enter the month yourself.`);
       return;
     }
-    await typeInto(page, month, String(value.month).padStart(2, "0"));
+    await typeIntoDateSection(page, month, String(value.month).padStart(2, "0"));
   }
   if (await year.count()) {
-    await typeInto(page, year, String(yearValue));
+    await typeIntoDateSection(page, year, String(yearValue));
   } else {
     const plain = container.locator('input:not([type="hidden"])').first();
     if (!(await plain.count())) return;
@@ -198,18 +221,22 @@ async function setChoice(
   const listbox = container.locator('button[aria-haspopup="listbox"]').first();
   if (await listbox.count()) {
     const shown = (await listbox.innerText()).trim();
-    await listbox.click();
-    const options = page.locator('[role="listbox"]:visible [role="option"]');
-    await options.first().waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
-    const texts = (await options.allInnerTexts()).map((text) => text.trim()).filter(Boolean);
+    // Read only the list this button opened, once it stops changing (workday-lists.ts).
+    const texts = await openWorkdayListbox(page, listbox);
     const option = pick(texts);
+    const noFit = `No ${id.split(":").at(-1)} option on this Workday site fits "${wanted}". Options: ${texts.slice(0, 12).join("; ")}. Answer with one of them.`;
     if (!option) {
-      await page.keyboard.press("Escape");
-      record.ask(id, id, `No ${id.split(":").at(-1)} option on this Workday site fits "${wanted}". Options: ${texts.slice(0, 12).join("; ")}. Answer with one of them.`);
+      await closeWorkdayLists(page, true);
+      record.ask(id, id, noFit);
       return;
     }
-    if (shown !== option) await page.locator('[role="listbox"]:visible').getByRole("option", { name: option, exact: true }).first().click();
-    else await page.keyboard.press("Escape");
+    if (shown !== option) {
+      if (!(await pickWorkdayListboxOption(page, listbox, option))) {
+        await closeWorkdayLists(page, true);
+        record.ask(id, id, noFit);
+        return;
+      }
+    } else await closeWorkdayLists(page, true);
     // A pick can re-render the rows; tag them again so the row stays addressable.
     await tagSections(page);
     record.fill(id, option, basis, `Chose "${option}" for "${wanted}".`);
@@ -234,20 +261,18 @@ async function setChoice(
   for (const term of answer ? [answer] : promptSearchTerms(wanted)) {
     await typeInto(page, input, term);
     await page.keyboard.press("Enter");
-    const options = page.locator('[data-automation-id="promptOption"]:visible');
-    await options.first().waitFor({ state: "visible", timeout: 3_000 }).catch(() => undefined);
-    const texts = (await options.allInnerTexts()).map((text) => text.trim()).filter(Boolean);
+    // Picked items (chips) never count as offered options.
+    const texts = await settleWorkdayOptions(page, () => workdayPromptOptions(page), 3_000);
     seen.push(...texts);
     const option = pick(texts);
-    if (option) {
-      await options.filter({ hasText: option }).first().click();
+    if (option && await pickWorkdayPromptOption(page, option)) {
       await page.waitForTimeout(300);
       await tagSections(page);
       record.fill(id, option, basis, `Picked "${option}" for "${wanted}".`);
       return;
     }
   }
-  await page.keyboard.press("Escape");
+  await closeWorkdayLists(page, true);
   record.ask(id, id, `Workday's list has no match for "${wanted}"${seen.length ? ` (it offered: ${[...new Set(seen)].slice(0, 10).join("; ")})` : ""}. Answer with the option to pick.`);
 }
 

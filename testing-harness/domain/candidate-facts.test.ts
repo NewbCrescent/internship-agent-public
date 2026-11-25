@@ -6,6 +6,7 @@ import {
   candidateFactSchema,
   factDefinitions,
   mentionsCompany,
+  mentionsSiteTenant,
   normalizeCompanyName,
   parseFactAnswer,
   scopeKey,
@@ -118,6 +119,14 @@ describe("company scope, text facts, and saved self-identification keys", () => 
     expect(mentionsCompany("Have you worked for Vandelayly before?", "Vandelay")).toBe(false);
     expect(mentionsCompany("Have you worked here?", "")).toBe(false);
     expect(mentionsCompany("Have you worked at The Trade Desk?", "The Trade Desk")).toBe(true);
+  });
+
+  it("finds a Workday tenant spelled by consecutive whole words, never part of a word", () => {
+    expect(mentionsSiteTenant("Have you ever been employed by Fixture Health, Example Network?", "fixturehealth")).toBe(true);
+    expect(mentionsSiteTenant("Have you previously been employed by any Fixturetron company?", "fixturetron")).toBe(true);
+    expect(mentionsSiteTenant("Have you ever been employed by Fixture Healthcare?", "fixturehealth")).toBe(false);
+    expect(mentionsSiteTenant("Have you ever been employed by ab?", "ab")).toBe(false);
+    expect(mentionsSiteTenant("Fixture Health", "FIXTUREHEALTH")).toBe(true);
   });
 
   it("allows a Yes for previous employment or relatives only for a named company", () => {

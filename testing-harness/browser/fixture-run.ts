@@ -318,6 +318,35 @@ async function main(): Promise<void> {
   const hiddenFirstName = hiddenWalk.decisions.find((decision) => decision.fieldId === "My Information::formField-legalName--firstName");
   if (hiddenFirstName?.action !== "fill" || hiddenFirstName.value !== "Jordan") failures.push("workday hidden: first name not filled once the fields showed");
 
+  // Synthetic, modeled on the 2026-11-25 real runs on rockwellautomation.wd1, highmarkhealth.wd1
+  // and micron.wd1 and the Sierra Space / ZOLL / Neogen / Aerospace stops: lists open in portals a
+  // moment after the click, a closed list lingers, picked chips carry option roles, the "How did you
+  // hear" tree loads slowly, and each date section's display covers its input. The walk still
+  // reads only the list each button opened, picks the hear-about option, and types the dates.
+  const realTab = await launched.newPage();
+  realTab.setDefaultTimeout(10_000);
+  await realTab.goto(`${workdayUrl}?widgets=real`);
+  const realWorkday = createWorkdayPage(realTab);
+  await realWorkday.enterApplication();
+  const realWalk = await walkWorkdayApplication(realWorkday, planWorkday, { mode: "fill", history: historyOptions })
+    .catch((error: unknown) => {
+      failures.push(`workday real widgets: the walk threw: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
+      return null;
+    });
+  if (realWalk && realWalk.outcome !== "review") {
+    failures.push(`workday real widgets: expected to stop at Review, got ${realWalk.outcome} (${realWalk.errors.join(" ")} ${realWalk.pauses
+      .filter((pause) => pause.status === "open").map((pause) => `${pause.fieldId}: ${pause.question}`).join(" | ")})`);
+  }
+  const realState = await realTab.evaluate(() => (window as unknown as { fixture: FixtureState & { values: Record<string, string> } }).fixture);
+  if (realState.values["formField-phoneType"] !== "Mobile") failures.push(`workday real widgets: Phone Device Type is ${JSON.stringify(realState.values["formField-phoneType"])}, not Mobile`);
+  if (realState.values["formField-source"] !== "LinkedIn") failures.push(`workday real widgets: "How did you hear" is ${JSON.stringify(realState.values["formField-source"])}, not LinkedIn`);
+  if (realState.values["formField-countryRegion"] !== "Washington") failures.push(`workday real widgets: State is ${JSON.stringify(realState.values["formField-countryRegion"])}, not Washington`);
+  const [realTutor] = realState.work;
+  if (realState.work.length !== 2 || realTutor?.fromM !== "02" || realTutor.fromY !== "2026" || realTutor.toM !== "05" || realTutor.toY !== "2026") {
+    failures.push(`workday real widgets: work dates were not typed behind their displays: ${JSON.stringify(realState.work)}`);
+  }
+  if (realState.education[0]?.toY !== "2028") failures.push(`workday real widgets: Berkeley's end year is ${JSON.stringify(realState.education[0]?.toY)}, not 2028`);
+
   const blockedTab = await launched.newPage();
   await blockedTab.goto(workdayUrl);
   const blockedWorkday = createWorkdayPage(blockedTab);

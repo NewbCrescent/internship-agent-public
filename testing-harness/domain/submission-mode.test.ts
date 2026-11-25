@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { autoSubmitBlockers, autoSubmitSettings, manualOnly } from "@internship-agent/domain";
+import { autoSubmitBlockers, autoSubmitSettings, manualOnly, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
 
 describe("manual checklist mode", () => {
   it("leaves AI submission visible unless explicitly enabled", () => {
@@ -57,6 +57,23 @@ describe("auto-submit policy", () => {
     expect(autoSubmitBlockers({ ...clean, atsConfirmed: false })).toEqual(["The application site type was not recognized automatically."]);
     expect(autoSubmitBlockers({ ...clean, decisions: [{ action: "fill", basis: { kind: "voice_draft" } }] })).toHaveLength(1);
     expect(autoSubmitBlockers({ ...clean, decisions: [{ action: "keep", basis: null }] })).toHaveLength(1);
+  });
+
+  it("holds only kept attachments and unconfirmed shown answers", () => {
+    const clean = { status: "awaiting-approval", atsConfirmed: true, pauses: [], decisions: [{ action: "fill", basis: { kind: "fact" } }] };
+    const keep = (reason?: string) => ({ ...clean, decisions: [...clean.decisions, { action: "keep", basis: null, ...(reason === undefined ? {} : { reason }) }] });
+    const unconfirmed = "The site already shows an answer that none of your saved answers confirms; you review those.";
+    // A value a Workday field already showed (its default Country, the Country Phone Code chip) with nothing saved against it.
+    expect(autoSubmitBlockers(keep(SITE_VALUE_KEPT_REASON))).toEqual([]);
+    expect(autoSubmitBlockers(keep(UNCONFIRMED_SITE_VALUE_REASON))).toEqual([unconfirmed]);
+    // Runs planned before 2026-11-25 recorded every shown value this way; they stay held.
+    expect(autoSubmitBlockers(keep("The site already shows this value."))).toEqual([unconfirmed]);
+    expect(autoSubmitBlockers(keep('Keeps the resume Handshake attached from your Handshake account ("r.pdf") once you confirm it is current.')))
+      .toEqual(["The site kept an attachment you need to confirm."]);
+    expect(autoSubmitBlockers(keep())).toEqual(["The site kept an attachment you need to confirm."]);
+    expect(autoSubmitBlockers({ ...keep(SITE_VALUE_KEPT_REASON), pauses: [{ safeguard: false, status: "open" }] })).toEqual([
+      "The form has unanswered questions waiting for you."
+    ]);
   });
 
   it("says when a recognized site has no adapter and the candidate approves each run", () => {

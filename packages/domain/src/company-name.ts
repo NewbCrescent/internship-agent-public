@@ -34,3 +34,22 @@ export function mentionsCompany(text: string, companyName: string): boolean {
   const company = normalizeCompanyName(companyName);
   return company.length > 0 && ` ${nameWords(text).join(" ")} `.includes(` ${company} `);
 }
+
+/**
+ * True when consecutive whole words of the text, joined without spaces, spell
+ * the site's tenant name ("Highmark Health" for highmarkhealth, "Micron" for
+ * micron); tenants shorter than 3 letters never match. Exact, never fuzzy.
+ */
+export function mentionsSiteTenant(text: string, tenant: string): boolean {
+  const target = tenant.toLocaleLowerCase("en-US").replace(/[^a-z0-9]/g, "");
+  if (target.length < 3) return false;
+  const words = nameWords(text);
+  for (let start = 0; start < words.length; start += 1) {
+    let joined = "";
+    for (let index = start; index < words.length && joined.length < target.length; index += 1) {
+      joined += words[index]!;
+      if (joined === target) return true;
+    }
+  }
+  return false;
+}

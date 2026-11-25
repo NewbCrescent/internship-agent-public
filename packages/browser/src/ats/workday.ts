@@ -18,6 +18,14 @@ import {
   type WorkdaySettleOptions
 } from "./workday-account";
 import { fillWorkdayHistory, type HistoryFillResult } from "./workday-history";
+import {
+  closeWorkdayLists,
+  openWorkdayListbox,
+  pickWorkdayListboxOption,
+  pickWorkdayPromptOption,
+  settleWorkdayOptions,
+  workdayPromptOptions
+} from "./workday-lists";
 
 /**
  * Workday career-site application flow. Markers are Workday's own
@@ -329,7 +337,9 @@ export function createWorkdayPage(page: Page): WorkdayPage {
     collectControls: async () => {
       await ensureNameShim(page);
       const controls = await root().evaluate(collectWorkdayControlsIn);
-      // Listbox options only exist once opened; opening one saves nothing.
+      // Listbox options only exist once opened; opening one saves nothing. They are
+      // read from the list this button opened, after the previous list closed,
+      // once they stop changing (workday-lists.ts).
       for (const control of controls) {
         if (control.tag !== "select" || !control.id) continue;
         const button = page.locator(`[data-automation-id="${control.id}"] button[aria-haspopup="listbox"]`).first();
@@ -338,15 +348,12 @@ export function createWorkdayPage(page: Page): WorkdayPage {
           // about us?"; others (country lists, phone codes) stay closed.
           if (!control.value && isHearAboutQuestion(control.label ?? "")) {
             control.options = await openPromptOptions(page, control.id);
-            await page.keyboard.press("Escape");
+            await closeWorkdayLists(page, true);
           }
           continue;
         }
-        await button.click();
-        const options = page.locator('[role="listbox"]:visible [role="option"]');
-        await options.first().waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
-        control.options = (await options.allInnerTexts()).map((text) => text.trim()).filter(Boolean).slice(0, 500);
-        await page.keyboard.press("Escape");
+        control.options = (await openWorkdayListbox(page, button)).slice(0, 500);
+        await closeWorkdayLists(page, true);
       }
       return controls;
     },
@@ -368,8 +375,13 @@ export function createWorkdayPage(page: Page): WorkdayPage {
         await choosePromptOption(page, field, option);
         return;
       }
-      await box.locator('button[aria-haspopup="listbox"]').first().click();
-      await page.locator('[role="listbox"]:visible').getByRole("option", { name: option, exact: true }).first().click();
+      const button = box.locator('button[aria-haspopup="listbox"]').first();
+      await openWorkdayListbox(page, button);
+      if (!(await pickWorkdayListboxOption(page, button, option))) {
+        await closeWorkdayLists(page, true);
+        // The option is never echoed: it may be a legal answer.
+        throw new Error(`Workday's list for "${field.label}" did not offer the planned option.`);
+      }
     },
     setChecked: async (field, checked) => {
       await container(field).locator('input[type="checkbox"]').first().setChecked(checked);
@@ -476,25 +488,28 @@ export function createWorkdayPage(page: Page): WorkdayPage {
   };
 }
 
-const PROMPT_OPTION = '[data-automation-id="promptOption"]:visible';
-
-async function visiblePromptOptions(page: Page): Promise<string[]> {
-  return (await page.locator(PROMPT_OPTION).allInnerTexts()).map((text) => text.trim()).filter(Boolean);
-}
-
-/** Opens a prompt and returns only the options it revealed (other widgets' chips stay out). */
+/**
+ * Opens a prompt and returns only the options it revealed: Workday draws the
+ * list a moment after the click, so it waits up to 5 s for options that were
+ * not on screen before the click, outside picked items (other widgets' chips
+ * stay out), and reads them once they stop changing.
+ */
 async function openPromptOptions(page: Page, fieldId: string): Promise<string[]> {
-  const before = new Set(await visiblePromptOptions(page));
+  await closeWorkdayLists(page);
+  const before = new Set(await workdayPromptOptions(page));
   await page.locator(`[data-automation-id="${fieldId}"] input`).first().click();
-  await page.locator(PROMPT_OPTION).first().waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
-  await page.waitForTimeout(300);
-  return (await visiblePromptOptions(page)).filter((text) => !before.has(text)).slice(0, 500);
+  return (await settleWorkdayOptions(page, async () => (await workdayPromptOptions(page)).filter((text) => !before.has(text)))).slice(0, 500);
 }
+
+const SUB_LIST_WAIT_MS = 5_000;
+const SUB_LIST_POLL_MS = 150;
 
 /**
  * Picks an option in a search-and-pick prompt. Workday prompts can be
- * hierarchical (a category opens a sub-list); a sub-list is answered with the
- * same "How did you hear about us?" rule, which is the only prompt opened.
+ * hierarchical (a category opens a sub-list, drawn a moment after the click);
+ * a sub-list is answered with the same "How did you hear about us?" rule,
+ * which is the only prompt opened, among the options not on screen before the
+ * click, outside picked items.
  */
 async function choosePromptOption(page: Page, field: BrowserField, option: string): Promise<void> {
   const selected = page.locator(`[data-automation-id="${field.id}"] [data-automation-id="selectedItem"]`);
@@ -502,19 +517,27 @@ async function choosePromptOption(page: Page, field: BrowserField, option: strin
   let target: string | null = option;
   for (let level = 0; level < 3 && target; level += 1) {
     if (!choices.includes(target)) break;
-    const before = new Set(await visiblePromptOptions(page));
-    await page.locator(PROMPT_OPTION).filter({ hasText: target }).first().click();
-    await page.waitForTimeout(700);
-    if (await selected.count()) {
-      await page.keyboard.press("Escape");
-      return;
+    const before = new Set(await workdayPromptOptions(page));
+    if (!(await pickWorkdayPromptOption(page, target))) break;
+    // A category opens a sub-list: answer it with the same rule, among the
+    // options the click revealed only, once they stop changing.
+    let next: string[] = [];
+    let previous: string[] = [];
+    const deadline = Date.now() + SUB_LIST_WAIT_MS;
+    while (Date.now() < deadline) {
+      await page.waitForTimeout(SUB_LIST_POLL_MS);
+      if ((await selected.count()) > 0) {
+        await closeWorkdayLists(page, true);
+        return;
+      }
+      next = (await workdayPromptOptions(page)).filter((text) => !before.has(text));
+      if (next.length > 0 && next.join("\n") === previous.join("\n")) break;
+      previous = next;
     }
-    // A category opened a sub-list: answer it with the same rule, among the
-    // options the click revealed only.
-    choices = (await visiblePromptOptions(page)).filter((text) => !before.has(text));
+    choices = next;
     target = pickHearAboutOption(choices, `${field.id}|${option}|${level}`);
   }
-  await page.keyboard.press("Escape");
+  await closeWorkdayLists(page, true);
   throw new Error(`"${field.label}" did not accept an option.`);
 }
 

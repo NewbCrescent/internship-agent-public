@@ -144,6 +144,27 @@ describe("saved answer mappings", () => {
     expect(await key("Do you have previous work experience?")).not.toBe("previously_worked_here");
   });
 
+  it("maps previous employment asked as \"did you\" or naming the employer that runs the Workday site", async () => {
+    expect(await mapper.map("Did you work here before?", { companyName: "Fixture Fuse" })).toMatchObject({
+      status: "MAPPED",
+      key: "previously_worked_here",
+      scope: { kind: "company", name: "fixture fuse" }
+    });
+    expect(await mapper.map("Have you previously been employed by any Fixturetron company?", { companyName: "Fixturetron Technology", employerSite: "fixturetron" }))
+      .toMatchObject({ status: "MAPPED", key: "previously_worked_here", scope: { kind: "company", name: "fixturetron technology" } });
+    const group = "Have you ever been employed by Fixture Health, Example Health Network, or by one of its subsidiaries or affiliates as a full-time employee, " +
+      "temporary employee, contractor, intern or student? For a full list of subsidiary and affiliate companies please visit Fixturehealth.org";
+    expect(await mapper.map(group, { companyName: "fixGen", employerSite: "fixturehealth" })).toMatchObject({
+      status: "MAPPED",
+      key: "previously_worked_here",
+      scope: { kind: "company", name: "fixgen" }
+    });
+    // Without the site, the named group is another company.
+    expect(await mapper.map(group, { companyName: "fixGen" })).toMatchObject({ status: "UNMAPPED" });
+    expect(await mapper.map("Have you previously worked at Plaid?", { companyName: "Vandelay", employerSite: "vandelay" })).toMatchObject({ status: "UNMAPPED" });
+    expect(await key("Did you work on a team project?")).not.toBe("previously_worked_here");
+  });
+
   it("maps age, pronouns, and relatives questions", async () => {
     expect(await key("Are you at least 18 years of age?")).toBe("age_18_or_older");
     expect(await key("Are you 18 or older?")).toBe("age_18_or_older");
