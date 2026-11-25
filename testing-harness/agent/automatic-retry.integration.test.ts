@@ -23,6 +23,7 @@ import {
   resolveProfileDataDirectory,
   reviewEvidenceClaim,
   saveBrowserRun,
+  saveOutcomeEvent,
   saveBrowserSession,
   saveCandidateFact,
   saveSemanticFit,
@@ -31,6 +32,7 @@ import {
 } from "@internship-agent/db";
 import { AUTO_SUBMIT_EVENT, runStartedByPipeline, type BrowserRun, type PauseRecord } from "@internship-agent/domain";
 import {
+  ASHBY_BUSY_DETAIL,
   SubmissionCodeNotFound,
   SubmissionNeedsInput,
   SubmissionUnconfirmed,
@@ -48,7 +50,11 @@ import {
   AutomaticRetryRefused,
   automaticRetryBlocker,
   automaticSubmissionsSince,
+  closeUnsubmittedBlocker,
+  closeUnsubmittedRun,
   continueBrowserRun,
+  correctSubmittedBlocker,
+  correctSubmittedRun,
   evaluateAndPersistMatch,
   getWorkdayAccount,
   listHeldRuns,
@@ -68,6 +74,7 @@ import {
   submitBrowserRun,
   UnavailableModelProvider,
   unsubmittedEvidence,
+  unsubmittedEvidenceRefusal,
   workdayAccountSettings,
   workdayAccountWait,
   type PageFactory,
@@ -90,7 +97,17 @@ import { runPipelinePass } from "../../packages/agent/scripts/pipeline-pass";
  * evidence the site did not complete it (Greenhouse's security-code email
  * after the click, or a verification-code evidence capture); it is refused
  * without evidence, before the click, for another company or sender, with a
- * confirmation, and for paused, submitted, or candidate-started runs. A run
+ * confirmation, and for paused, submitted, or candidate-started runs. It also
+ * accepts synthetic captures that show the site never took the click (Ashby's
+ * busy notice, Dover's Turnstile, older captures of the intact Ashby form or
+ * of a Dover form with a Turnstile marker) and refuses each capture missing a
+ * signal (another page, no submit control, no filled form, no Turnstile
+ * marker, confirmation, failure or error text, invalid fields, another
+ * challenge, a trusted receipt, no fresh receipt check, an older confirming
+ * capture). `--close-unsubmitted` closes a never-clicked failed submit on a
+ * closed posting (real auto-submit path) as skipped "Posting closed", and
+ * `--correct-submitted` corrects a closed-dialog SUBMITTED relabel only with
+ * `--confirm`, leaving a failed run held as a possible submission. A run
  * held for a missing security code is paused with the approval withdrawn and
  * retryable as any held run. Workday: a run paused by Workday's page errors is
  * retried with --held, and --held releases Workday account holds of kind
@@ -212,7 +229,9 @@ function snapshot(database: DatabaseSync) {
   return {
     runs: database.prepare("SELECT id, status, updated_at FROM browser_runs ORDER BY id").all(),
     jobs: database.prepare("SELECT id, status, updated_at FROM jobs ORDER BY id").all(),
-    events: database.prepare("SELECT COUNT(*) AS count FROM application_events").get()
+    events: database.prepare("SELECT COUNT(*) AS count FROM application_events").get(),
+    feedback: database.prepare("SELECT COUNT(*) AS count FROM discovery_feedback").get(),
+    holdEvents: database.prepare("SELECT COUNT(*) AS count FROM application_hold_events").get()
   };
 }
 
@@ -230,6 +249,7 @@ const CANDIDATE_START = "Browser run started from the approved package.";
 /** A synthetic applying posting with a held run started by the pipeline or the candidate (for the command's selection). */
 function syntheticHeldRun(database: DatabaseSync, input: {
   company: string; by: "pipeline" | "candidate"; status?: BrowserRun["status"]; pauses?: PauseRecord[];
+  applicationUrl?: string; atsKind?: BrowserRun["atsKind"];
 }): BrowserRun {
   const title = "Software Engineering Intern";
   const sourceUrl = `https://example.test/internships/${input.company.toLowerCase().replace(/\W+/g, "-")}`;
@@ -246,8 +266,8 @@ function syntheticHeldRun(database: DatabaseSync, input: {
     .run(packageId, jobId, new Date().toISOString(), "{}");
   const now = new Date().toISOString();
   return saveBrowserRun(database, {
-    id: randomUUID(), jobId, applicationUrl: sourceUrl, status: input.status ?? "paused-needs-input", packageId, variantId: null,
-    baseResumeId: null, applicationProfile: "default", atsKind: "greenhouse", atsConfidence: 1, suggestedAtsKind: null, atsConfirmed: true,
+    id: randomUUID(), jobId, applicationUrl: input.applicationUrl ?? sourceUrl, status: input.status ?? "paused-needs-input", packageId, variantId: null,
+    baseResumeId: null, applicationProfile: "default", atsKind: input.atsKind ?? "greenhouse", atsConfidence: 1, suggestedAtsKind: null, atsConfirmed: true,
     decisions: [], pauses: input.pauses ?? [], submittedAnswers: null, confirmationText: null, submissionApprovedAt: null, createdAt: now, updatedAt: now
   });
 }
@@ -590,7 +610,14 @@ describe("pnpm pipeline:retry", () => {
     [["--held", "--bogus"]],
     [["--held", "--reopen-unsubmitted", "--reason", "x"]],
     [["--run", "abcdef12", "--reopen-unsubmitted"]],
-    [["--run", "abcdef12", "--reopen-unsubmitted", "--reopen-unsubmitted", "--reason", "x"]]
+    [["--run", "abcdef12", "--reopen-unsubmitted", "--reopen-unsubmitted", "--reason", "x"]],
+    [["--run", "abcdef12", "--close-unsubmitted"]],
+    [["--held", "--close-unsubmitted", "--reason", "x"]],
+    [["--run", "abcdef12", "--close-unsubmitted", "--reason", "x", "--start"]],
+    [["--run", "abcdef12", "--close-unsubmitted", "--reopen-unsubmitted", "--reason", "x"]],
+    [["--run", "abcdef12", "--correct-submitted", "--reason", "x", "--start"]],
+    [["--run", "abcdef12", "--confirm", "--reason", "x"]],
+    [["--run", "abcdef12", "--correct-submitted", "--close-unsubmitted", "--reason", "x"]]
   ])("prints the usage for %j", async (argv) => {
     const database = disposableDatabase();
     const { deps, lines, lock } = commandDeps(database);
@@ -1117,6 +1144,317 @@ describe("pnpm pipeline:retry --reopen-unsubmitted", () => {
   });
 });
 
+/** Fictional Ashby and Dover pages, shaped like the real captures (scrubbed: no candidate or company data). */
+const ASHBY_RUN_URL = "https://jobs.ashbyhq.com/fixture-robotics/0b6c1f1e-4c1a-4f37-9d3e-2f0a7c1d5e11/application";
+const DOVER_RUN_URL = "https://app.dover.io/apply/job/5d2e8f4a-1b3c-4d5e-9f60-7a8b9c0d1e2f/";
+const DOVER_EVIDENCE_URL = "https://jobs.dover.com/job/5d2e8f4a-1b3c-4d5e-9f60-7a8b9c0d1e2f";
+const GREENHOUSE_RUN_URL = "https://boards.greenhouse.io/fixture-labs/jobs/1";
+const TURNSTILE = "a Cloudflare Turnstile challenge";
+const ASHBY_FORM = [
+  "Software Engineering Intern", "Application", "Autofill from resume", "Upload file", "Name", "Email", "Resume",
+  "resume-fixture.pdf", "Replace", "or drag and drop here", "Have you built a robot before?", "Yes", "No",
+  "Submit Application", "Powered by"
+].join("\n");
+const DOVER_FORM = [
+  "Software Engineering Intern", "Fixture Labs builds test rigs for small robots.", "Apply", "Autofill from resume",
+  "First Name *", "Email *", "Resume *", "Resume: resume-fixture.pdf", "Are you based in the United States?", "Yes", "No",
+  "Apply", "Jobs powered by"
+].join("\n");
+const REOPENED = "Automatic run retried after a fix: reopened as not submitted (";
+
+/** A pipeline-started run whose approved submit failed with no confirmation, approved a minute ago. */
+function failedSubmit(database: DatabaseSync, input: { company: string; applicationUrl: string; atsKind?: BrowserRun["atsKind"] }): BrowserRun {
+  const run = syntheticHeldRun(database, { company: input.company, by: "pipeline", pauses: [], applicationUrl: input.applicationUrl, atsKind: input.atsKind });
+  return updateBrowserRun(database, run.id, { status: "failed", submissionApprovedAt: new Date(Date.now() - 60_000).toISOString() });
+}
+
+/** One stored post-submit capture for the run (savePostSubmitEvidence, as the submit path writes it). */
+async function capture(database: DatabaseSync, dataDir: string, run: BrowserRun, evidence: {
+  outcome: "unknown" | "challenged" | "refused" | "field-errors" | "verification-code"; url: string; bodyText: string;
+  detail?: string | null; challenge?: string | null; alertText?: string; invalidFields?: Array<{ ref: string | null; label: string; error: string }>; now?: Date;
+}) {
+  await savePostSubmitEvidence({
+    database, dataDir, run, page: fakePage(), now: evidence.now,
+    evidence: {
+      outcome: evidence.outcome, url: evidence.url, bodyText: evidence.bodyText, detail: evidence.detail ?? null,
+      challenge: evidence.challenge ?? null, alertText: evidence.alertText ?? "", invalidFields: evidence.invalidFields ?? []
+    }
+  });
+}
+
+const current = (database: DatabaseSync, run: BrowserRun) => listBrowserRuns(database, run.jobId).find((entry) => entry.id === run.id)!;
+const activeHolds = (database: DatabaseSync, dataDir: string, jobId: string) =>
+  refreshApplicationHolds(database, dataDir).filter((hold) => hold.jobId === jobId);
+/**
+ * The job's stored active holds, without a refresh: a refresh of a synthetic
+ * READY_FOR_REVIEW job would read its placeholder package ("{}").
+ */
+const storedActiveHolds = (database: DatabaseSync, jobId: string) =>
+  database.prepare("SELECT run_id AS runId, reason FROM application_holds WHERE job_id = ? AND active = 1").all(jobId);
+const holdTrace = (database: DatabaseSync, jobId: string) => applicationHoldTrace(database, jobId).map((event) => event.event);
+
+describe("pnpm pipeline:retry --reopen-unsubmitted with evidence the site never took the submit", () => {
+  const REASON = "The site never took the click; the saved evidence shows the form.";
+
+  type Case = { site: "ashby" | "dover"; outcome: "unknown" | "challenged"; detail?: string | null; challenge?: string | null; text: string; kind: string };
+  const ACCEPTED: Array<[string, Case]> = [
+    ["Ashby's busy notice at the last click", { site: "ashby", outcome: "unknown", detail: ASHBY_BUSY_DETAIL, text: ASHBY_FORM, kind: "ashby-busy-evidence" }],
+    ["Dover's Turnstile challenge (redirected page)", { site: "dover", outcome: "challenged", challenge: TURNSTILE, text: DOVER_FORM, kind: "dover-turnstile-evidence" }],
+    ["an older capture of the intact Ashby form", { site: "ashby", outcome: "unknown", text: ASHBY_FORM, kind: "intact-form-evidence" }],
+    ["an older Dover capture with a Turnstile marker", {
+      site: "dover", outcome: "unknown", text: DOVER_FORM.replace("\nApply\nJobs", "\nVerify you are human\nApply\nJobs"), kind: "dover-turnstile-evidence"
+    }]
+  ];
+
+  async function failedWith(database: DatabaseSync, dataDir: string, item: Case): Promise<BrowserRun> {
+    const run = failedSubmit(database, item.site === "ashby"
+      ? { company: "Fixture Robotics", applicationUrl: ASHBY_RUN_URL, atsKind: "ashby" }
+      : { company: "Fixture Labs", applicationUrl: DOVER_RUN_URL, atsKind: "dover" });
+    await capture(database, dataDir, run, {
+      outcome: item.outcome, url: item.site === "ashby" ? ASHBY_RUN_URL : DOVER_EVIDENCE_URL, bodyText: item.text,
+      detail: item.detail ?? null, challenge: item.challenge ?? null
+    });
+    return run;
+  }
+
+  it.each(ACCEPTED)("accepts %s: reopened, ready for review, and its possible-submission hold resolved", async (_name, item) => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-never-taken-");
+    const run = await failedWith(database, dataDir, item);
+    expect(activeHolds(database, dataDir, run.jobId)).toEqual([expect.objectContaining({ runId: run.id, reason: "possible-submission" })]);
+    const evidence = unsubmittedEvidence(database, dataDir, run);
+    expect(evidence).toEqual({ kind: item.kind, text: expect.stringMatching(/^its post-submit evidence shows /) });
+    expect(reopenUnsubmittedBlocker(database, dataDir, run)).toContain("completed receipt check");
+    receiptCheck(database, run);
+    expect(reopenUnsubmittedBlocker(database, dataDir, run)).toBeNull();
+    const reopened = reopenUnsubmittedRun(database, dataDir, run.id, { reason: REASON });
+    expect(reopened.run.status).toBe("cancelled");
+    expect(reopened.evidence).toEqual(evidence);
+    expect(statusOf(database, run.jobId)).toBe("READY_FOR_REVIEW");
+    expect(details(database, run.jobId).at(-1)).toBe(`${REOPENED}${evidence!.text}): ${REASON}`);
+    expect(storedActiveHolds(database, run.jobId)).toEqual([]);
+    expect(holdTrace(database, run.jobId).slice(-2)).toEqual(["reopened-unsubmitted", "resolved"]);
+    database.close();
+  });
+
+  it("reopens an older Ashby capture through the command, with a dry run first", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-never-taken-");
+    const run = await failedWith(database, dataDir, ACCEPTED[2]![1]);
+    receiptCheck(database, run);
+    const text = unsubmittedEvidence(database, dataDir, run)!.text;
+    const ref = run.id.slice(0, 8);
+    const before = snapshot(database);
+    const dry = commandDeps(database, { dataDir: () => dataDir, acquireLock: () => { throw new Error("a dry run must not take the lock"); } });
+    expect(await runRetryCommand(["--run", ref, "--reopen-unsubmitted", "--reason", REASON, "--dry-run"], dry.deps)).toBe(0);
+    expect(dry.lines).toContain(`would reopen ${ref} Fixture Robotics — Software Engineering Intern (failed) (${text})`);
+    expect(dry.lines.at(-1)).toBe("Dry run: would reopen 1; skipped 0; nothing written.");
+    expect(dry.lock.taken).toBe(0);
+    expect(snapshot(database)).toEqual(before);
+
+    const { deps, lines, lock } = commandDeps(database, { dataDir: () => dataDir });
+    expect(await runRetryCommand(["--run", ref, "--reopen-unsubmitted", "--reason", REASON], deps)).toBe(0);
+    expect(lock).toEqual({ taken: 1, released: 1, held: false });
+    expect(lines).toContain(`reopened ${ref} Fixture Robotics — Software Engineering Intern (failed): cancelled as not submitted (${text}); the application is back to ready for review.`);
+    expect(lines).toContain("Reopened 1; skipped 0.");
+    expect(statusOf(database, run.jobId)).toBe("READY_FOR_REVIEW");
+    database.close();
+  });
+
+  const ashby: Case = ACCEPTED[2]![1];
+  const REFUSED: Array<[string, Case & { setup?: (database: DatabaseSync, dataDir: string, run: BrowserRun) => Promise<void> | void; url?: string; alertText?: string; invalid?: boolean; receipt?: "none" | "confirmed" }, RegExp | string]> = [
+    ["an older Dover capture without a Turnstile marker", { site: "dover", outcome: "unknown", text: DOVER_FORM, kind: "" }, /no Turnstile marker/],
+    ["a capture without the submit control", { ...ashby, text: ASHBY_FORM.replace("\nSubmit Application", "") }, /does not show the submit control \("Submit Application"\)/],
+    ["an older capture without the filled form", { ...ashby, text: ASHBY_FORM.replace("\nresume-fixture.pdf\nReplace", "") }, /does not show the filled form/],
+    ["a capture of another Ashby job", { ...ashby, url: "https://jobs.ashbyhq.com/fixture-robotics/9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d/application" }, /another address/],
+    ["a capture with success text", { ...ashby, text: `${ASHBY_FORM}\nThanks for applying!` }, /shows confirmation text \("Thanks for applying"\)/],
+    ["a capture with a required-field message", { ...ashby, text: ASHBY_FORM.replace("Submit Application", "This field is required.\nSubmit Application") }, /failure or correction text/],
+    ["a capture with the site's error text", { ...ashby, alertText: "Something went wrong" }, /shows the site's error text/],
+    ["a capture with an invalid field", { ...ashby, invalid: true }, /marked invalid/],
+    ["a confirmed receipt", { ...ashby, receipt: "confirmed" }, "a trusted application receipt was found, so it stays as it is."],
+    ["no fresh receipt check", { ...ashby, receipt: "none" }, /completed receipt check/],
+    ["a Turnstile challenge on a Greenhouse page", { ...ashby, outcome: "challenged", challenge: TURNSTILE, url: GREENHOUSE_RUN_URL }, /only on an Ashby or Dover application page/],
+    ["Ashby's busy detail on a Greenhouse page", { ...ashby, detail: ASHBY_BUSY_DETAIL, url: GREENHOUSE_RUN_URL }, /only on an Ashby or Dover application page/],
+    ["Ashby's spam check", { ...ashby, outcome: "challenged", challenge: "Ashby's spam check (reCAPTCHA Enterprise)" }, /a challenge other than Dover's Turnstile/],
+    ["a capture saved only before the approval", { ...ashby, setup: async (database, dataDir, run) => {
+      rmSync(join(dataDir, "applications"), { recursive: true, force: true });
+      await capture(database, dataDir, run, { outcome: "unknown", url: ASHBY_RUN_URL, bodyText: ASHBY_FORM, now: new Date(Date.parse(run.submissionApprovedAt!) - 30_000) });
+    } }, /no post-submit evidence saved after it/],
+    ["an older capture with a confirmation before a newer clean one", { ...ashby, setup: async (database, dataDir, run) => {
+      await capture(database, dataDir, run, { outcome: "unknown", url: ASHBY_RUN_URL, bodyText: `Thank you for applying\n${ASHBY_FORM}`, now: new Date(Date.now() - 40_000) });
+    } }, /shows confirmation text \("Thank you for applying"\)/]
+  ];
+
+  it.each(REFUSED)("refuses %s and writes nothing", async (_name, item, reason) => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-never-taken-");
+    const pageUrl = item.url ?? (item.site === "ashby" ? ASHBY_RUN_URL : DOVER_EVIDENCE_URL);
+    const run = failedSubmit(database, item.site === "ashby"
+      ? { company: "Fixture Robotics", applicationUrl: item.url === GREENHOUSE_RUN_URL ? GREENHOUSE_RUN_URL : ASHBY_RUN_URL, atsKind: "ashby" }
+      : { company: "Fixture Labs", applicationUrl: DOVER_RUN_URL, atsKind: "dover" });
+    await capture(database, dataDir, run, {
+      outcome: item.outcome, url: pageUrl, bodyText: item.text, detail: item.detail ?? null, challenge: item.challenge ?? null,
+      alertText: item.alertText, invalidFields: item.invalid ? [{ ref: "q1", label: "Email", error: "Enter a valid email." }] : []
+    });
+    await item.setup?.(database, dataDir, run);
+    if (item.receipt === "confirmed") receiptCheck(database, run, "confirmed");
+    else if (item.receipt !== "none") receiptCheck(database, run);
+    const blocker = reopenUnsubmittedBlocker(database, dataDir, run);
+    if (typeof reason === "string") expect(blocker).toBe(reason);
+    else expect(blocker).toMatch(reason);
+    if (item.receipt === undefined) {
+      expect(blocker).toMatch(/^there is no evidence the site did not complete it \(no security-code email after the submit click/);
+      expect(unsubmittedEvidence(database, dataDir, run)).toBeNull();
+      expect(unsubmittedEvidenceRefusal(database, dataDir, run)).toMatch(reason);
+    }
+    const before = snapshot(database);
+    expect(() => reopenUnsubmittedRun(database, dataDir, run.id, { reason: REASON })).toThrow(AutomaticRetryRefused);
+    const { deps, lines } = commandDeps(database, { dataDir: () => dataDir });
+    expect(await runRetryCommand(["--run", run.id, "--reopen-unsubmitted", "--reason", REASON], deps)).toBe(0);
+    expect(lines.at(-1)).toBe("Reopened 0; skipped 1.");
+    expect(snapshot(database)).toEqual(before);
+    expect(current(database, run).status).toBe("failed");
+    database.close();
+  });
+});
+
+describe("pnpm pipeline:retry --correct-submitted", () => {
+  const REASON = "The closed-dialog relabel was not a confirmation.";
+  const RELABEL = "Submitted with confirmation: Modal dialog closed after submit without errors";
+  const RELABEL_EVENT = "Submitted on Dover/Ashby: modal dialog closed after submit without errors.";
+
+  /** A SUBMITTED record that rests only on the closed-dialog relabel (the 2026-11-21 shape), with or without saved evidence. */
+  async function relabelledSubmitted(database: DatabaseSync, dataDir: string, options: { evidence?: boolean; text?: string } = {}): Promise<BrowserRun> {
+    const failed = failedSubmit(database, { company: "Fixture Robotics", applicationUrl: ASHBY_RUN_URL, atsKind: "ashby" });
+    if (options.evidence !== false) {
+      await capture(database, dataDir, failed, { outcome: "unknown", url: ASHBY_RUN_URL, bodyText: options.text ?? ASHBY_FORM, now: new Date(Date.now() - 30_000) });
+    }
+    const run = updateBrowserRun(database, failed.id, { status: "submitted", confirmationText: RELABEL });
+    logApplicationEvent(database, { jobId: run.jobId, fromStatus: "APPLYING", toStatus: "SUBMITTED", detail: RELABEL_EVENT });
+    database.prepare("UPDATE jobs SET status = 'SUBMITTED' WHERE id = ?").run(run.jobId);
+    return run;
+  }
+
+  it("refuses to run without --confirm and writes nothing", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-correct-");
+    const run = await relabelledSubmitted(database, dataDir);
+    const before = snapshot(database);
+    const { deps, lines, lock } = commandDeps(database, { dataDir: () => dataDir });
+    expect(await runRetryCommand(["--run", run.id.slice(0, 8), "--correct-submitted", "--reason", REASON], deps)).toBe(1);
+    expect(lines).toEqual(["Not run: --correct-submitted changes a SUBMITTED record; add --confirm once the candidate has agreed, or --dry-run to check it."]);
+    expect(lock.taken).toBe(0);
+    expect(() => correctSubmittedRun(database, dataDir, run.id, { reason: REASON, confirm: false })).toThrow(AutomaticRetryRefused);
+    expect(snapshot(database)).toEqual(before);
+    expect(current(database, run)).toMatchObject({ status: "submitted", confirmationText: RELABEL });
+    database.close();
+  });
+
+  it("--dry-run names what it would correct, writes nothing, and takes no lock", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-correct-");
+    const run = await relabelledSubmitted(database, dataDir);
+    expect(correctSubmittedBlocker(database, dataDir, run)).toBeNull();
+    const text = unsubmittedEvidence(database, dataDir, run)!.text;
+    const ref = run.id.slice(0, 8);
+    const before = snapshot(database);
+    const { deps, lines, lock } = commandDeps(database, { dataDir: () => dataDir, acquireLock: () => { throw new Error("a dry run must not take the lock"); } });
+    expect(await runRetryCommand(["--run", ref, "--correct-submitted", "--reason", REASON, "--dry-run"], deps)).toBe(0);
+    expect(lines).toEqual([`would correct ${ref} Fixture Robotics — Software Engineering Intern (submitted) (${text})`, "Dry run: would correct 1; skipped 0; nothing written."]);
+    expect(lock.taken).toBe(0);
+    expect(snapshot(database)).toEqual(before);
+    database.close();
+  });
+
+  it("--confirm corrects the record, keeps history, holds it as a possible submission, and the normal reopen follows", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-correct-");
+    const run = await relabelledSubmitted(database, dataDir);
+    const text = unsubmittedEvidence(database, dataDir, run)!.text;
+    const ref = run.id.slice(0, 8);
+    const eventsBefore = listApplicationEvents(database, run.jobId);
+    const { deps, lines, lock } = commandDeps(database, { dataDir: () => dataDir });
+    expect(await runRetryCommand(["--run", ref, "--correct-submitted", "--reason", REASON, "--confirm"], deps)).toBe(0);
+    expect(lock).toEqual({ taken: 1, released: 1, held: false });
+    expect(lines).toEqual([
+      `corrected ${ref} Fixture Robotics — Software Engineering Intern (submitted): no longer submitted (${text}); the application is applying again with the run failed and held as a possible submission. Check its receipt with pnpm mail:scan --receipt ${ref} before any reopen.`,
+      "Corrected 1; skipped 0."
+    ]);
+    const corrected = current(database, run);
+    expect(corrected).toMatchObject({ status: "failed", confirmationText: null, submissionApprovedAt: run.submissionApprovedAt });
+    expect(statusOf(database, run.jobId)).toBe("APPLYING");
+    const eventsAfter = listApplicationEvents(database, run.jobId);
+    expect(eventsAfter).toHaveLength(eventsBefore.length + 1);
+    expect(eventsAfter.filter((event) => event.detail === RELABEL_EVENT)).toHaveLength(1);
+    const correction = eventsAfter.at(-1)!;
+    expect(correction).toMatchObject({ fromStatus: "SUBMITTED", toStatus: "APPLYING" });
+    expect(correction.detail).toBe(`Submitted record corrected: not submitted (${text}); it was recorded as submitted only from "${RELABEL}": ${REASON}`);
+    expect(activeHolds(database, dataDir, run.jobId)).toEqual([expect.objectContaining({ runId: run.id, owner: "manager", reason: "possible-submission" })]);
+
+    expect(reopenUnsubmittedBlocker(database, dataDir, corrected)).toContain("completed receipt check");
+    receiptCheck(database, corrected);
+    expect(reopenUnsubmittedBlocker(database, dataDir, corrected)).toBeNull();
+    expect(reopenUnsubmittedRun(database, dataDir, run.id, { reason: REASON }).run.status).toBe("cancelled");
+    expect(statusOf(database, run.jobId)).toBe("READY_FOR_REVIEW");
+    expect(storedActiveHolds(database, run.jobId)).toEqual([]);
+    expect(holdTrace(database, run.jobId).slice(-2)).toEqual(["reopened-unsubmitted", "resolved"]);
+    database.close();
+  });
+
+  const REFUSED: Array<[string, (database: DatabaseSync, dataDir: string) => Promise<BrowserRun>, RegExp]> = [
+    ["a record with no saved evidence", (database, dataDir) => relabelledSubmitted(database, dataDir, { evidence: false }),
+      /^there is no evidence the site did not take it \(no security-code email after the submit click and no post-submit evidence saved after it\)\.$/],
+    ["a record whose evidence shows success text", (database, dataDir) => relabelledSubmitted(database, dataDir, { text: `Thank you for applying\n${ASHBY_FORM}` }),
+      /no evidence the site did not take it .*confirmation text/],
+    ["another confirmation text", async (database, dataDir) => {
+      const run = await relabelledSubmitted(database, dataDir);
+      return updateBrowserRun(database, run.id, { confirmationText: "Application submitted (application dialog closed)" });
+    }, /not the closed-dialog relabel/],
+    ["a second SUBMITTED event", async (database, dataDir) => {
+      const run = await relabelledSubmitted(database, dataDir);
+      logApplicationEvent(database, { jobId: run.jobId, fromStatus: "APPLYING", toStatus: "SUBMITTED", detail: "Checked off as submitted by you." });
+      return run;
+    }, /does not rest only on the closed-dialog relabel/],
+    ["a confirmed receipt", async (database, dataDir) => {
+      const run = await relabelledSubmitted(database, dataDir);
+      receiptCheck(database, run, "confirmed");
+      return run;
+    }, /^a trusted application receipt was found, so it stays as it is\.$/],
+    ["a recorded employer outcome", async (database, dataDir) => {
+      const run = await relabelledSubmitted(database, dataDir);
+      saveOutcomeEvent(database, run.jobId, "RESPONSE", null);
+      return run;
+    }, /employer outcome/],
+    ["an email after the submit", async (database, dataDir) => {
+      const run = await relabelledSubmitted(database, dataDir);
+      logApplicationEvent(database, { jobId: run.jobId, fromStatus: "SUBMITTED", toStatus: "SUBMITTED", detail: "Email received: Recruiter reply from example.test: \"Your application\"" });
+      return run;
+    }, /email about it arrived/],
+    ["an application moved on to interview", async (database, dataDir) => {
+      const run = await relabelledSubmitted(database, dataDir);
+      database.prepare("UPDATE jobs SET status = 'INTERVIEW' WHERE id = ?").run(run.jobId);
+      return run;
+    }, /^its application is interview, not submitted\.$/],
+    ["a failed run", async (database) => failedSubmit(database, { company: "Fixture Robotics", applicationUrl: ASHBY_RUN_URL, atsKind: "ashby" }),
+      /^it is failed; --correct-submitted corrects only a submitted record\.$/]
+  ];
+
+  it.each(REFUSED)("refuses %s, even with --confirm, and writes nothing", async (_name, setup, reason) => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-correct-");
+    const run = current(database, await setup(database, dataDir));
+    expect(correctSubmittedBlocker(database, dataDir, run)).toMatch(reason);
+    const before = snapshot(database);
+    expect(() => correctSubmittedRun(database, dataDir, run.id, { reason: REASON, confirm: true })).toThrow(AutomaticRetryRefused);
+    const { deps, lines } = commandDeps(database, { dataDir: () => dataDir });
+    expect(await runRetryCommand(["--run", run.id, "--correct-submitted", "--reason", REASON, "--confirm"], deps)).toBe(0);
+    expect(lines[0]).toMatch(/^skipped /);
+    expect(lines.at(-1)).toBe("Corrected 0; skipped 1.");
+    expect(snapshot(database)).toEqual(before);
+    database.close();
+  });
+});
+
 /**
  * The daily auto-submit cap counts only automatic approvals that may have
  * reached the site: a withdrawn approval (field errors, a missing security
@@ -1262,6 +1600,118 @@ describe("daily auto-submit cap", () => {
     expect(second.submitted).toEqual([{ jobId, confirmation: expect.stringContaining("application was received") }]);
     expect(automaticSubmissionsSince(database, startOfToday())).toBe(1);
     database.close();
+  });
+
+  /**
+   * `--close-unsubmitted`: the auto-submit found no submit control on a
+   * posting that had closed (the Greenhouse board root says so), so the click
+   * never happened. The run is cancelled, the job skipped as "Posting closed",
+   * and no pass starts it again. Never retried.
+   */
+  describe("pnpm pipeline:retry --close-unsubmitted", () => {
+    const REASON = "posting closed; the submit was never clicked";
+    const NEVER_CLICKED = "Automatic submission failed: No submit control was found.";
+    const CLOSED_TEXT = "The job you are looking for is no longer open.\nCurrent openings at Example";
+    const feedback = (database: DatabaseSync, jobId: string) =>
+      database.prepare("SELECT reason FROM discovery_feedback WHERE job_id = ?").all(jobId) as Array<{ reason: string }>;
+
+    it("closes a never-clicked auto-submit on a closed posting (real path), and no pass starts it again", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDirectory("internship-agent-close-");
+      const jobId = qualifiedForAutoSubmit(database);
+      const closedPage: BrowserPage = {
+        ...fakePage(),
+        url: () => "https://boards.greenhouse.io/example",
+        bodyText: async () => CLOSED_TEXT,
+        clickSubmit: async () => { throw new Error("No submit control was found."); }
+      };
+      // The walk sees the open form; the approved submit opens the page after the posting closed.
+      const first = await autoPass(database, dataDir, async () => (listBrowserRuns(database, jobId)[0]?.submissionApprovedAt ? closedPage : fakePage()));
+      expect(first.submitted).toEqual([]);
+      const failed = listBrowserRuns(database, jobId)[0]!;
+      expect(failed.status).toBe("failed");
+      const events = details(database, jobId);
+      expect(events.filter((detail) => detail.startsWith("Automatic submission failed: ")).at(-1)).toBe(NEVER_CLICKED);
+      expect(readSubmitEvidence(dataDir, failed).map(({ outcome }) => outcome)).toEqual(["unknown"]);
+      expect(activeHolds(database, dataDir, jobId)).toEqual([expect.objectContaining({ runId: failed.id, reason: "possible-submission" })]);
+      expect(closeUnsubmittedBlocker(database, dataDir, failed)).toBeNull();
+      // A reopen is still refused: a closed Greenhouse page is not evidence the click was refused.
+      expect(reopenUnsubmittedBlocker(database, dataDir, failed)).toMatch(/only on an Ashby or Dover application page/);
+
+      const ref = failed.id.slice(0, 8);
+      const before = snapshot(database);
+      const dry = commandDeps(database, { dataDir: () => dataDir, acquireLock: () => { throw new Error("a dry run must not take the lock"); } });
+      expect(await runRetryCommand(["--run", ref, "--close-unsubmitted", "--reason", REASON, "--dry-run"], dry.deps)).toBe(0);
+      expect(dry.lines).toEqual([
+        expect.stringMatching(new RegExp(
+          `^would close ${ref} Northstar Systems .*\\(failed\\) \\(the submit was never clicked: no submit control was found, and its post-submit evidence shows the posting closed\\)$`)),
+        "Dry run: would close 1; skipped 0; nothing written."
+      ]);
+      expect(dry.lock.taken).toBe(0);
+      expect(snapshot(database)).toEqual(before);
+
+      const { deps, lines, lock } = commandDeps(database, { dataDir: () => dataDir });
+      expect(await runRetryCommand(["--run", ref, "--close-unsubmitted", "--reason", REASON], deps)).toBe(0);
+      expect(lock).toEqual({ taken: 1, released: 1, held: false });
+      expect(lines).toEqual([
+        expect.stringMatching(new RegExp(`^closed ${ref} Northstar Systems .*: cancelled as never submitted \\(the submit was never clicked: .*\\); the application is skipped as "Posting closed" and will not be retried\\.$`)),
+        "Closed 1; skipped 0."
+      ]);
+      expect(listBrowserRuns(database, jobId).map((run) => run.status)).toEqual(["cancelled"]);
+      expect(statusOf(database, jobId)).toBe("READY_FOR_REVIEW");
+      expect(feedback(database, jobId)).toEqual([{ reason: "Posting closed" }]);
+      const last = details(database, jobId).at(-1)!;
+      expect(last.startsWith("Closed as never submitted (")).toBe(true);
+      expect(last.endsWith(`: ${REASON}`)).toBe(true);
+      expect(activeHolds(database, dataDir, jobId)).toEqual([]);
+      const next = await pass(database, dataDir, async () => fakePage());
+      expect(next.started).toEqual([]);
+      expect(listBrowserRuns(database, jobId)).toHaveLength(1);
+      database.close();
+    });
+
+    /** A synthetic never-clicked Greenhouse auto-submit on a closed posting, varied by `variant`. */
+    async function neverClicked(database: DatabaseSync, dataDir: string, variant: {
+      event?: string; text?: string; outcome?: "unknown" | "challenged"; receipt?: "ambiguous" | "confirmed"; jobStatus?: string;
+    } = {}): Promise<BrowserRun> {
+      const run = failedSubmit(database, { company: "Fixture Labs", applicationUrl: GREENHOUSE_RUN_URL });
+      logApplicationEvent(database, { jobId: run.jobId, fromStatus: "APPLYING", toStatus: "APPLYING", detail: variant.event ?? NEVER_CLICKED });
+      await capture(database, dataDir, run, {
+        outcome: variant.outcome ?? "unknown", url: "https://job-boards.greenhouse.io/fixture-labs", bodyText: variant.text ?? CLOSED_TEXT,
+        challenge: variant.outcome === "challenged" ? "a reCAPTCHA challenge" : null
+      });
+      if (variant.receipt) receiptCheck(database, run, variant.receipt);
+      if (variant.jobStatus) database.prepare("UPDATE jobs SET status = ? WHERE id = ?").run(variant.jobStatus, run.jobId);
+      return current(database, run);
+    }
+
+    it.each([
+      ["a capture of an open posting", { text: "Software Engineering Intern\nApply for this job\nSubmit application" }, /does not show the posting closed/],
+      ["a submit that was clicked", { event: "Automatic submission failed: The submit button was clicked but no new confirmation appeared." }, /no record that its submit was never clicked/],
+      ["a challenged capture", { outcome: "challenged" as const }, /may have been clicked/],
+      ["an ambiguous receipt check", { receipt: "ambiguous" as const }, /^its receipt check is ambiguous; check the application on the site\.$/],
+      ["a confirmed receipt", { receipt: "confirmed" as const }, /^a trusted application receipt was found, so it stays as it is\.$/],
+      ["an application no longer applying", { jobStatus: "READY_FOR_REVIEW" }, /not applying/]
+    ])("refuses %s and writes nothing", async (_name, variant, reason) => {
+      const database = disposableDatabase();
+      const dataDir = disposableDirectory("internship-agent-close-");
+      const baseline = await neverClicked(database, dataDir);
+      expect(closeUnsubmittedBlocker(database, dataDir, baseline)).toBeNull();
+      database.close();
+
+      const refused = disposableDatabase();
+      const refusedData = disposableDirectory("internship-agent-close-");
+      const run = await neverClicked(refused, refusedData, variant);
+      expect(closeUnsubmittedBlocker(refused, refusedData, run)).toMatch(reason);
+      const before = snapshot(refused);
+      expect(() => closeUnsubmittedRun(refused, refusedData, run.id, { reason: REASON })).toThrow(AutomaticRetryRefused);
+      const { deps, lines } = commandDeps(refused, { dataDir: () => refusedData });
+      expect(await runRetryCommand(["--run", run.id, "--close-unsubmitted", "--reason", REASON], deps)).toBe(0);
+      expect(lines.at(-1)).toBe("Closed 0; skipped 1.");
+      expect(snapshot(refused)).toEqual(before);
+      expect(feedback(refused, run.jobId)).toEqual([]);
+      refused.close();
+    });
   });
 });
 

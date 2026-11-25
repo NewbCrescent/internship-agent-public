@@ -12,17 +12,21 @@ import {
   listApplicationEvents,
   listBrowserRuns,
   listJobSummaries,
+  listOutcomeEvents,
   readApplicationReceiptCheck,
   recordApplicationHoldReopen,
   recordApplicationHoldRetry,
   resolveProfileDataDirectory,
+  saveDiscoverySkip,
   setJobStatus,
+  updateBrowserRun,
   withApplicationHoldTransaction,
   type ApplicationHold
 } from "@internship-agent/db";
 import {
   manualOnly,
   mentionsCompany,
+  QUICK_SKIP_REASONS,
   runStartedByPipeline,
   workspaceProfileSchema,
   type BrowserRun,
@@ -35,7 +39,8 @@ import { cancelBrowserRun } from "./browser-orchestrator";
 import { greenhouseMailSender } from "./greenhouse-security-code";
 import { acquirePipelineLock } from "./pipeline-lock";
 import { AUTOMATIC_RETRY_PREFIX, pipelineSettings, REOPENED_UNSUBMITTED_PREFIX } from "./pipeline-orchestrator";
-import { readSubmitEvidence } from "./submit-evidence";
+import { readSubmitEvidence, type StoredSubmitEvidence } from "./submit-evidence";
+import { judgeSubmitCapture, showsClosedPosting, type CaptureVerdict, type NeverTakenKind } from "./unsubmitted-evidence";
 import { resolveWorkdayAccounts, workdayAccountSettings } from "./workday-account-service";
 import { putWorkdayAccount, readWorkdayAccounts, WorkdayAccountsFileError, type WorkdayAccountEntry } from "./workday-account-store";
 
@@ -50,8 +55,20 @@ import { putWorkdayAccount, readWorkdayAccounts, WorkdayAccountsFileError, type 
  *
  * `--reopen-unsubmitted` is the one exception for a failed submit: it reopens
  * a run whose submit was clicked only with positive evidence that the site
- * did not complete it (Greenhouse's security-code email after the click, or a
- * verification-code evidence capture), never one with a confirmation.
+ * did not complete it (Greenhouse's security-code email after the click, a
+ * verification-code evidence capture, or post-submit evidence that shows the
+ * site never took the click: Ashby's busy notice, Dover's Turnstile, or an
+ * older capture of the intact form judged by unsubmitted-evidence.ts), never
+ * one with a confirmation, and only after a fresh absent receipt check.
+ *
+ * Two more explicit modes never retry anything. `--close-unsubmitted` closes
+ * a failed submit that was never clicked ("No submit control was found") on
+ * a posting its evidence shows closed: the run is cancelled and the job is
+ * skipped as "Posting closed". `--correct-submitted` (with `--confirm`)
+ * corrects a SUBMITTED record that rests only on the closed-dialog relabel
+ * ("Modal dialog closed after submit without errors") when the evidence shows
+ * the site never took it: the run becomes a failed, unconfirmed submit held
+ * as a possible submission; no row or event is deleted.
  *
  * `--held` also releases Workday account holds the account step left as
  * "unexpected" (it stopped on a page it did not recognize, or Workday did not
@@ -113,7 +130,7 @@ export function retryAutomaticRun(database: DatabaseSync, runId: string, options
 }
 
 /** Why a failed submit is known not to have completed on the site (shown in output and the event). */
-export type UnsubmittedEvidence = { kind: "security-code-email" | "verification-code-evidence"; text: string };
+export type UnsubmittedEvidence = { kind: "security-code-email" | "verification-code-evidence" | NeverTakenKind; text: string };
 
 const SECURITY_CODE_EMAIL_TEXT = "Greenhouse emailed a security code after the submit click";
 const VERIFICATION_EVIDENCE_TEXT = "its post-submit evidence shows the site's emailed security-code step";
@@ -143,7 +160,36 @@ export function unsubmittedEvidence(database: DatabaseSync, dataDir: string, run
     if (emailed) return { kind: "security-code-email", text: SECURITY_CODE_EMAIL_TEXT };
   }
   const captured = readSubmitEvidence(dataDir, run).some((entry) => entry.outcome === "verification-code" && Date.parse(entry.capturedAt) >= approvedAt);
-  return captured ? { kind: "verification-code-evidence", text: VERIFICATION_EVIDENCE_TEXT } : null;
+  if (captured) return { kind: "verification-code-evidence", text: VERIFICATION_EVIDENCE_TEXT };
+  // Every capture after the approval must show the site never took the click: an older confirmation or error vetoes a newer clean one.
+  const captures = capturesAfterApproval(dataDir, run);
+  if (captures.length === 0) return null;
+  const verdicts = captures.map(({ verdict }) => verdict);
+  const newest = verdicts[0]!;
+  if (!verdicts.every((verdict) => "kind" in verdict) || !("kind" in newest)) return null;
+  return { kind: newest.kind, text: newest.text };
+}
+
+type JudgedCapture = { entry: StoredSubmitEvidence & { dir: string }; verdict: CaptureVerdict };
+
+/** The run's stored captures saved at or after its submit approval, newest first, each judged by judgeSubmitCapture. */
+function capturesAfterApproval(dataDir: string, run: BrowserRun): JudgedCapture[] {
+  const approvedAt = Date.parse(run.submissionApprovedAt ?? "");
+  if (Number.isNaN(approvedAt)) return [];
+  return readSubmitEvidence(dataDir, run)
+    .filter((entry) => Date.parse(entry.capturedAt) >= approvedAt)
+    .map((entry) => ({ entry, verdict: judgeSubmitCapture(run, entry) }));
+}
+
+/** Why unsubmittedEvidence found nothing, naming the missing signal (meaningful only when it returned null). */
+export function unsubmittedEvidenceRefusal(_database: DatabaseSync, dataDir: string, run: BrowserRun): string {
+  if (!run.submissionApprovedAt || Number.isNaN(Date.parse(run.submissionApprovedAt))) return "its submit was never approved";
+  const captures = capturesAfterApproval(dataDir, run);
+  if (captures.length === 0) return "no security-code email after the submit click and no post-submit evidence saved after it";
+  // Newest first, so this is the newest capture that fails.
+  const failing = captures.find(({ verdict }) => "refusal" in verdict) ?? captures[0]!;
+  const refusal = "refusal" in failing.verdict ? failing.verdict.refusal : "does not show that the site never took the submit";
+  return `no security-code email after the submit click, and its post-submit evidence of ${failing.entry.capturedAt} ${refusal}`;
 }
 
 /** Why a failed submit may not be reopened as not submitted, or null when it may. */
@@ -163,7 +209,7 @@ export function reopenUnsubmittedBlocker(database: DatabaseSync, dataDir: string
   if (others.some((other) => other.status === "submitted" || other.status === "submitting")) return "the application already has a submitted run.";
   if (others.some((other) => other.status !== "cancelled")) return "another run of this application is open or failed.";
   if (unsubmittedEvidence(database, dataDir, run) === null) {
-    return "there is no evidence the site did not complete it (no security-code email after the submit click and no security-code step in its evidence); check the application on the site.";
+    return `there is no evidence the site did not complete it (${unsubmittedEvidenceRefusal(database, dataDir, run)}); check the application on the site.`;
   }
   const check = readApplicationReceiptCheck(database, run.id);
   const latestEvidence = readSubmitEvidence(dataDir, run)[0]?.capturedAt;
@@ -203,6 +249,156 @@ export function reopenUnsubmittedRun(
       (REOPENED_UNSUBMITTED_PREFIX + `${evidence.text}): ${reason}`).slice(0, 1_000));
     recordApplicationHoldReopen(database, run.jobId, run.id, new Date().toISOString());
     return { run: cancelled, evidence };
+  });
+}
+
+/** The pipeline's timeline note when the auto-submit found no submit control (handshake-executor.ts throws before any click). */
+export const NEVER_CLICKED_EVENT = "Automatic submission failed: No submit control was found.";
+export const CLOSED_UNSUBMITTED_PREFIX = "Closed as never submitted (";
+const CLOSED_EVIDENCE_TEXT = "the submit was never clicked: no submit control was found, and its post-submit evidence shows the posting closed";
+
+function statusWords(status: string): string {
+  return status.toLocaleLowerCase("en-US").replace(/_/g, " ");
+}
+
+function startedByPipeline(database: DatabaseSync, run: BrowserRun): boolean {
+  const applying = listApplicationEvents(database, run.jobId)
+    .filter((event) => event.toStatus === "APPLYING")
+    .map((event) => ({ detail: event.detail, at: event.createdAt }));
+  return runStartedByPipeline(run.createdAt, applying);
+}
+
+/** Why a failed submit may not be closed as never submitted on a closed posting, or null when it may. */
+export function closeUnsubmittedBlocker(database: DatabaseSync, dataDir: string, run: BrowserRun): string | null {
+  if (run.status !== "failed") return `it is ${run.status}; --close-unsubmitted closes only a failed submit.`;
+  if (!run.submissionApprovedAt) return "its submission was never approved; retry it without --close-unsubmitted.";
+  if (run.confirmationText && run.confirmationText.trim()) return "a confirmation was recognized, so it stays as it is.";
+  if (applicationReceiptConfirmed(database, run.id)) return "a trusted application receipt was found, so it stays as it is.";
+  const check = readApplicationReceiptCheck(database, run.id);
+  if (check && check.result !== "absent") return `its receipt check is ${check.result}; check the application on the site.`;
+  const posting = getJobPosting(database, run.jobId);
+  if (!posting) return "its posting is unknown.";
+  if (posting.status !== "APPLYING") return `its application is ${statusWords(posting.status)}, not applying.`;
+  if (!startedByPipeline(database, run)) return "you started it yourself; only runs the pipeline started are closed.";
+  const others = listBrowserRuns(database, run.jobId).filter((other) => other.id !== run.id);
+  if (others.some((other) => other.status === "submitted" || other.status === "submitting")) return "the application already has a submitted run.";
+  if (others.some((other) => other.status !== "cancelled")) return "another run of this application is open or failed.";
+  const approvedAt = Date.parse(run.submissionApprovedAt);
+  const neverClicked = listApplicationEvents(database, run.jobId)
+    .some((event) => event.detail === NEVER_CLICKED_EVENT && Date.parse(event.createdAt) >= approvedAt);
+  if (!neverClicked) {
+    return "there is no record that its submit was never clicked (\"No submit control was found\" after its approval); --close-unsubmitted closes only a submit that was never clicked.";
+  }
+  const captures = readSubmitEvidence(dataDir, run).filter((entry) => Date.parse(entry.capturedAt) >= approvedAt);
+  if (captures.length === 0) return "no post-submit evidence was saved after its approval, so nothing shows the posting closed.";
+  const clicked = captures.find((entry) => entry.outcome !== "unknown");
+  if (clicked) return `its post-submit evidence records ${clicked.outcome}, so the submit may have been clicked.`;
+  if (!showsClosedPosting(captures[0]!)) {
+    return "its post-submit evidence does not show the posting closed (\"The job you are looking for is no longer open\" or similar).";
+  }
+  return null;
+}
+
+/**
+ * Cancels a failed submit that was never clicked on a posting its evidence
+ * shows closed, moves the job from APPLYING to READY_FOR_REVIEW with the
+ * candidate's "Posting closed" skip (so no pass starts it again and the
+ * review queue hides it), logs "Closed as never submitted (<evidence>):
+ * <reason>", and resolves its possible-submission hold. Never retries.
+ * Throws AutomaticRetryRefused (with the reason) otherwise.
+ */
+export function closeUnsubmittedRun(
+  database: DatabaseSync,
+  dataDir: string,
+  runId: string,
+  options: { reason: string }
+): { run: BrowserRun; text: string } {
+  const reason = options.reason.replace(/\s+/g, " ").trim();
+  if (!reason) throw new Error("A close needs a reason.");
+  return withApplicationHoldTransaction(database, () => {
+    const run = getBrowserRun(database, runId);
+    if (!run) throw new Error("The browser run is unknown.");
+    const blocker = closeUnsubmittedBlocker(database, dataDir, run);
+    if (blocker) throw new AutomaticRetryRefused(blocker);
+    const cancelled = cancelBrowserRun(run.id, database);
+    setJobStatus(database, run.jobId, "APPLYING", "READY_FOR_REVIEW",
+      (CLOSED_UNSUBMITTED_PREFIX + `${CLOSED_EVIDENCE_TEXT}): ${reason}`).slice(0, 1_000));
+    saveDiscoverySkip(database, { jobId: run.jobId, reason: QUICK_SKIP_REASONS.closed, preferenceNote: null });
+    recordApplicationHoldReopen(database, run.jobId, run.id, new Date().toISOString());
+    return { run: cancelled, text: CLOSED_EVIDENCE_TEXT };
+  });
+}
+
+/** The confirmation the 2026-11-21 relabels wrote: a closed dialog, not a site confirmation. */
+export const RELABEL_CONFIRMATION = /^Submitted with confirmation: Modal dialog closed after submit without errors\.?$/i;
+const RELABEL_EVENT = /\bmodal dialog closed after submit without errors\b/i;
+export const CORRECTED_SUBMITTED_PREFIX = "Submitted record corrected: not submitted (";
+const MAIL_NOTE = /^Email received: /;
+
+/** Why a SUBMITTED record may not be corrected as not submitted, or null when it may. */
+export function correctSubmittedBlocker(database: DatabaseSync, dataDir: string, run: BrowserRun): string | null {
+  if (run.status !== "submitted") return `it is ${run.status}; --correct-submitted corrects only a submitted record.`;
+  const posting = getJobPosting(database, run.jobId);
+  if (!posting) return "its posting is unknown.";
+  if (posting.status !== "SUBMITTED") return `its application is ${statusWords(posting.status)}, not submitted.`;
+  if (!RELABEL_CONFIRMATION.test((run.confirmationText ?? "").trim())) {
+    return "its confirmation is not the closed-dialog relabel (\"Modal dialog closed after submit without errors\"), so it stays as it is.";
+  }
+  const events = listApplicationEvents(database, run.jobId);
+  const toSubmitted = events.filter((event) => event.toStatus === "SUBMITTED" && event.fromStatus !== "SUBMITTED");
+  if (toSubmitted.length !== 1 || !RELABEL_EVENT.test(toSubmitted[0]!.detail ?? "")) {
+    return "its SUBMITTED status does not rest only on the closed-dialog relabel event, so it stays as it is.";
+  }
+  if (!run.submissionApprovedAt) return "its submission was never approved.";
+  if (applicationReceiptConfirmed(database, run.id)) return "a trusted application receipt was found, so it stays as it is.";
+  const check = readApplicationReceiptCheck(database, run.id);
+  if (check && check.result !== "absent") return `its receipt check is ${check.result}; check the application on the site.`;
+  if (listOutcomeEvents(database, run.jobId).length > 0) return "an employer outcome is recorded for it, so it stays submitted.";
+  const approvedAt = Date.parse(run.submissionApprovedAt);
+  if (events.some((event) => MAIL_NOTE.test(event.detail ?? "") && Date.parse(event.createdAt) > approvedAt)) {
+    return "an email about it arrived after the submit, so it stays submitted; read it first.";
+  }
+  if (!startedByPipeline(database, run)) return "you started it yourself; only runs the pipeline started are corrected.";
+  const others = listBrowserRuns(database, run.jobId).filter((other) => other.id !== run.id);
+  if (others.some((other) => other.status !== "cancelled")) return "another run of this application is open, failed, or submitted.";
+  if (unsubmittedEvidence(database, dataDir, run) === null) {
+    return `there is no evidence the site did not take it (${unsubmittedEvidenceRefusal(database, dataDir, run)}).`;
+  }
+  return null;
+}
+
+/**
+ * Corrects a SUBMITTED record that rests only on the closed-dialog relabel
+ * when the evidence shows the site never took the submit: the run becomes a
+ * failed, unconfirmed submit (approval, answers, and decisions kept), the job
+ * moves from SUBMITTED back to APPLYING, and the timeline logs "Submitted
+ * record corrected: not submitted (<evidence>); it was recorded as submitted
+ * only from "<old confirmation>": <reason>". No row or event is deleted. The
+ * next hold refresh holds it as a possible submission, so `pnpm mail:scan
+ * --receipt` can check it before any `--reopen-unsubmitted`. Never retries.
+ * Requires `confirm: true`; throws AutomaticRetryRefused otherwise.
+ */
+export function correctSubmittedRun(
+  database: DatabaseSync,
+  dataDir: string,
+  runId: string,
+  options: { reason: string; confirm: boolean }
+): { run: BrowserRun; evidence: UnsubmittedEvidence } {
+  if (options.confirm !== true) throw new AutomaticRetryRefused("a correction of a SUBMITTED record needs --confirm.");
+  const reason = options.reason.replace(/\s+/g, " ").trim();
+  if (!reason) throw new Error("A correction needs a reason.");
+  return withApplicationHoldTransaction(database, () => {
+    const run = getBrowserRun(database, runId);
+    if (!run) throw new Error("The browser run is unknown.");
+    const blocker = correctSubmittedBlocker(database, dataDir, run);
+    if (blocker) throw new AutomaticRetryRefused(blocker);
+    const evidence = unsubmittedEvidence(database, dataDir, run)!;
+    const old = run.confirmationText;
+    // The confirmation must be cleared, or the hold logic and the reopen keep reading the run as submitted; the event quotes it.
+    const updated = updateBrowserRun(database, run.id, { status: "failed", confirmationText: null });
+    setJobStatus(database, run.jobId, "SUBMITTED", "APPLYING",
+      (CORRECTED_SUBMITTED_PREFIX + `${evidence.text}); it was recorded as submitted only from "${old}": ${reason}`).slice(0, 1_000));
+    return { run: updated, evidence };
   });
 }
 
@@ -285,11 +481,14 @@ export type RetryCommandDeps = {
   env: Record<string, string | undefined>;
 };
 
-const RETRY_USAGE = "Usage: pnpm pipeline:retry [--profile real|demo] (--run <id or 8-character prefix> ... | --held) [--dry-run] [--start] [--reason \"<text>\"] | --run <id or 8-character prefix> ... --reopen-unsubmitted --reason \"<text>\" [--dry-run] [--start] | --run <ref> --verified-hold --revision <n> --recheck <hex ref> --reason \"<text>\" [--dry-run]";
+const RETRY_USAGE = "Usage: pnpm pipeline:retry [--profile real|demo] (--run <id or 8-character prefix> ... | --held) [--dry-run] [--start] [--reason \"<text>\"] | --run <id or 8-character prefix> ... --reopen-unsubmitted --reason \"<text>\" [--dry-run] [--start] | --run <ref> --verified-hold --revision <n> --recheck <hex ref> --reason \"<text>\" [--dry-run] | --run <ref> ... --close-unsubmitted --reason \"<text>\" [--dry-run] | --run <ref> ... --correct-submitted --reason \"<text>\" (--dry-run | --confirm)";
 const DEFAULT_REASON = "the bug that held it is fixed.";
 const FULL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-type RetryArgs = { profile: WorkspaceProfile; runs: string[]; held: boolean; dryRun: boolean; start: boolean; reason: string; reopen: boolean; verified: VerifiedHoldFix | null };
+type RetryArgs = {
+  profile: WorkspaceProfile; runs: string[]; held: boolean; dryRun: boolean; start: boolean; reason: string; reopen: boolean;
+  close: boolean; correct: boolean; confirm: boolean; verified: VerifiedHoldFix | null;
+};
 
 /** `--run` takes one or more references (repeated flags or several values); null on anything unknown, missing, or contradictory. */
 function parseRetryArgs(argv: string[]): RetryArgs | null {
@@ -300,18 +499,26 @@ function parseRetryArgs(argv: string[]): RetryArgs | null {
   let dryRun = false;
   let start = false;
   let reopen = false;
+  let close = false;
+  let correct = false;
+  let confirm = false;
   let verified = false;
   let revision: string | undefined;
   let recheck: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
-    if (arg === "--held" || arg === "--dry-run" || arg === "--start" || arg === "--reopen-unsubmitted" || arg === "--verified-hold") {
+    if (arg === "--held" || arg === "--dry-run" || arg === "--start" || arg === "--reopen-unsubmitted" || arg === "--verified-hold"
+      || arg === "--close-unsubmitted" || arg === "--correct-submitted" || arg === "--confirm") {
       if ((arg === "--held" && held) || (arg === "--dry-run" && dryRun) || (arg === "--start" && start)
-        || (arg === "--reopen-unsubmitted" && reopen) || (arg === "--verified-hold" && verified)) return null;
+        || (arg === "--reopen-unsubmitted" && reopen) || (arg === "--verified-hold" && verified)
+        || (arg === "--close-unsubmitted" && close) || (arg === "--correct-submitted" && correct) || (arg === "--confirm" && confirm)) return null;
       if (arg === "--held") held = true;
       else if (arg === "--dry-run") dryRun = true;
       else if (arg === "--reopen-unsubmitted") reopen = true;
       else if (arg === "--verified-hold") verified = true;
+      else if (arg === "--close-unsubmitted") close = true;
+      else if (arg === "--correct-submitted") correct = true;
+      else if (arg === "--confirm") confirm = true;
       else start = true;
     } else if (arg === "--run") {
       const before = runs.length;
@@ -349,7 +556,11 @@ function parseRetryArgs(argv: string[]): RetryArgs | null {
   if (verified && (held || start || reopen || runs.length !== 1 || !trimmed || !revision || !recheck
     || !/^[1-9]\d*$/.test(revision) || !Number.isSafeInteger(Number(revision)) || !/^[a-f0-9]{7,64}$/i.test(recheck))) return null;
   if (!verified && (revision !== undefined || recheck !== undefined)) return null;
-  return { profile: profile.data, runs, held, dryRun, start, reason: trimmed ?? DEFAULT_REASON, reopen,
+  // One explicit mode at a time; a close or a correction names its runs, says why, and starts no pass.
+  if ([reopen, close, correct, verified].filter(Boolean).length > 1) return null;
+  if ((close || correct) && (held || start || reason === undefined)) return null;
+  if (confirm && !correct) return null;
+  return { profile: profile.data, runs, held, dryRun, start, reason: trimmed ?? DEFAULT_REASON, reopen, close, correct, confirm,
     verified: verified ? { revision: Number(revision), recheck: recheck!.toLowerCase() } : null };
 
 }
@@ -382,6 +593,11 @@ function resolveRef(database: DatabaseSync, typed: string): BrowserRun | string 
  * the lock. `--reopen-unsubmitted --reason "<text>"` (with `--run` only)
  * reopens failed submits instead, each only with evidence the site did not
  * complete it (reopenUnsubmittedBlocker), printing `reopened` or `skipped`.
+ * `--close-unsubmitted --reason` closes never-clicked failed submits on
+ * closed postings (closeUnsubmittedBlocker), printing `closed` or `skipped`.
+ * `--correct-submitted --reason` corrects SUBMITTED records that rest only on
+ * the closed-dialog relabel (correctSubmittedBlocker), printing `corrected`
+ * or `skipped`; it refuses to write without `--confirm` (`--dry-run` checks).
  * With Workday account automation on, `--held` also releases the account
  * holds left as "unexpected" (releasableWorkdayHolds), one line per host.
  * Returns 0, 1 (lock, retry, accounts file, or pass failure), or 2 (usage).
@@ -400,6 +616,10 @@ export async function runRetryCommand(argv: string[], deps: Partial<RetryCommand
   if (!args) {
     io.log(RETRY_USAGE);
     return 2;
+  }
+  if (args.correct && !args.dryRun && !args.confirm) {
+    io.log("Not run: --correct-submitted changes a SUBMITTED record; add --confirm once the candidate has agreed, or --dry-run to check it.");
+    return 1;
   }
   if ((!args.dryRun || args.verified) && manualOnly(io.env)) {
     io.log("Not run: manual checklist mode is on; the pipeline starts no browser runs.");
@@ -450,6 +670,54 @@ export async function runRetryCommand(argv: string[], deps: Partial<RetryCommand
             if (!args.dryRun) requeueVerifiedHold(database, dataDir, target.id, args.verified, args.reason);
             retried += 1;
             io.log(`${args.dryRun ? "would requeue" : "requeued"} ${label} after verified pre-submit fix.`);
+          } catch (error) {
+            skipped += 1;
+            exit = 1;
+            io.log(`skipped ${label} (${clip(error instanceof Error ? error.message : String(error), 300)})`);
+          }
+          continue;
+        }
+        if (args.close) {
+          const dataDir = io.dataDir(args.profile);
+          const blocker = closeUnsubmittedBlocker(database, dataDir, target);
+          if (blocker) {
+            skipped += 1;
+            io.log(`skipped ${label} (${blocker})`);
+            continue;
+          }
+          if (args.dryRun) {
+            retried += 1;
+            io.log(`would close ${label} (${CLOSED_EVIDENCE_TEXT})`);
+            continue;
+          }
+          try {
+            const { text } = closeUnsubmittedRun(database, dataDir, target.id, { reason: args.reason });
+            retried += 1;
+            io.log(`closed ${label}: cancelled as never submitted (${text}); the application is skipped as "Posting closed" and will not be retried.`);
+          } catch (error) {
+            skipped += 1;
+            exit = 1;
+            io.log(`skipped ${label} (${clip(error instanceof Error ? error.message : String(error), 300)})`);
+          }
+          continue;
+        }
+        if (args.correct) {
+          const dataDir = io.dataDir(args.profile);
+          const blocker = correctSubmittedBlocker(database, dataDir, target);
+          if (blocker) {
+            skipped += 1;
+            io.log(`skipped ${label} (${blocker})`);
+            continue;
+          }
+          if (args.dryRun) {
+            retried += 1;
+            io.log(`would correct ${label} (${unsubmittedEvidence(database, dataDir, target)!.text})`);
+            continue;
+          }
+          try {
+            const { evidence } = correctSubmittedRun(database, dataDir, target.id, { reason: args.reason, confirm: args.confirm });
+            retried += 1;
+            io.log(`corrected ${label}: no longer submitted (${evidence.text}); the application is applying again with the run failed and held as a possible submission. Check its receipt with pnpm mail:scan --receipt ${target.id.slice(0, 8)} before any reopen.`);
           } catch (error) {
             skipped += 1;
             exit = 1;
@@ -510,14 +778,15 @@ export async function runRetryCommand(argv: string[], deps: Partial<RetryCommand
     } finally {
       io.close(args.profile);
     }
-    const verb = args.reopen ? "reopen" : "retry";
+    const verb = args.reopen ? "reopen" : args.close ? "close" : args.correct ? "correct" : "retry";
+    const done = args.reopen ? "Reopened" : args.close ? "Closed" : args.correct ? "Corrected" : "Retried";
     io.log(args.dryRun
       ? `Dry run: would ${verb} ${retried}; skipped ${skipped}; nothing written.`
-      : `${args.reopen ? "Reopened" : "Retried"} ${retried}; skipped ${skipped}.`);
+      : `${done} ${retried}; skipped ${skipped}.`);
     if (released > 0) {
       io.log(args.dryRun ? `Dry run: would release ${released} Workday account hold(s).` : `Released ${released} Workday account hold(s).`);
     }
-    if (!args.dryRun && retried + released > 0 && !pipelineSettings(io.env).autoApply) {
+    if (!args.dryRun && !args.close && !args.correct && retried + released > 0 && !pipelineSettings(io.env).autoApply) {
       io.log("Auto-apply is off (INTERNSHIP_AGENT_AUTO_APPLY), so no pass will start these runs until it is on.");
     }
     if (args.start) {

@@ -13,13 +13,26 @@
  * xvfb-run -a env -u WAYLAND_DISPLAY pnpm pipeline:retry ... --start.
  * --reopen-unsubmitted --reason … cancels a failed submit only with evidence
  * the site did not complete it (Greenhouse's security-code email after the
- * click, or a verification-code evidence capture), then the job is ready for
- * review again unless a trusted receipt has been recorded.
+ * click, a verification-code evidence capture, or post-submit evidence that
+ * shows the site never took the click: Ashby's busy notice, Dover's
+ * Turnstile, or an older capture of the intact Ashby form or of a Dover form
+ * with a Turnstile marker), then the job is ready for review again unless a
+ * trusted receipt has been recorded; a fresh absent receipt check is required.
+ * --close-unsubmitted --reason … closes a failed submit that was never
+ * clicked ("No submit control was found") on a posting its evidence shows
+ * closed: the run is cancelled and the job skipped as "Posting closed"; it is
+ * never retried. --correct-submitted --reason … corrects a SUBMITTED record
+ * that rests only on the closed-dialog relabel ("Modal dialog closed after
+ * submit without errors") when the evidence shows the site never took it; it
+ * writes only with --confirm (--dry-run checks), leaves the run failed and
+ * held as a possible submission, and deletes no history.
  * --verified-hold --revision <n> --recheck <hex ref> --reason "<text>" names
  * one verified pre-submit repair and requeues only its manager-owned hold.
  *
  * Usage: pnpm pipeline:retry [--profile real|demo] (--run <id or 8-character prefix> ... | --held) [--dry-run] [--start] [--reason "<text>"]
  *        pnpm pipeline:retry [--profile real|demo] --run <id or 8-character prefix> ... --reopen-unsubmitted --reason "<text>" [--dry-run] [--start]
+ *        pnpm pipeline:retry [--profile real|demo] --run <id or 8-character prefix> ... --close-unsubmitted --reason "<text>" [--dry-run]
+ *        pnpm pipeline:retry [--profile real|demo] --run <id or 8-character prefix> ... --correct-submitted --reason "<text>" (--dry-run | --confirm)
  */
 import { runRetryCommand } from "../src/automatic-retry";
 import { runPipelinePass } from "./pipeline-pass";
