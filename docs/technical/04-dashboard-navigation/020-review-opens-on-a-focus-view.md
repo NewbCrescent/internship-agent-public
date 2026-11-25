@@ -1,0 +1,5 @@
+Review opens on a focus view (`?view=all` keeps the full queue and its controls).
+The focus is one row in `review_focus` (migration 0026), validated by `packages/domain/src/review-focus.ts` and kept apart from `candidate_preferences`, whose triggers bump the AI-fit context version and would mark every AI score out of date.
+It keeps postings whose title category is in the focus (software engineering always), that state a focus country or (by default) none, that were posted within the window (default 14 days), and whose stated USD pay meets the optional minimum; an unknown date or unstated pay never hides a posting.
+Focus entries rank by AI fit (unscored last), then stated USD pay, then the newer posting, filtered and sorted in the agent over the whole queue before paging.
+Each card shows pay, place, age, AI score, and category on one line, and links straight to the application (`applicationUrlFor`), the latest prepared resume PDF, and a two-click "Not for me" whose fixed reasons are recorded as the skip reason.

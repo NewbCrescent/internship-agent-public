@@ -1,0 +1,14 @@
+**Gmail outcome watcher.**
+`pnpm mail:watch [--profile real|demo] [--since 3d]` is a long-running listener, not a poll: `pnpm mail:schedule install|remove|status` installs it as the systemd user service `com.internship-agent.mail.<profile>` (`Restart=always`, `WantedBy=default.target`) or a launchd `KeepAlive` agent, and refuses to install without the Gmail and Discord settings.
+It holds one IMAP connection to Gmail's INBOX opened read-only (EXAMINE; IDLE restarted every 10 minutes, under Gmail's ~29-minute limit) and reacts to IDLE's new-mail pushes; nothing is flagged, moved, deleted, or sent.
+`packages/agent/src/mail-watch.ts` keeps `<workspace data>/mail-watch.json` (mode 600: UIDVALIDITY, the last handled UID, sha256 digests of notified Message-IDs, and whether the sign-in alert was sent).
+The first run starts at UIDNEXT (or at most `--since` back); a UIDVALIDITY change restarts from new mail without a flood; every connect runs a catch-up round over UIDs above the last one; reconnects back off from 5 s to 5 min; an auth failure DMs once ("Gmail access stopped working; check the app password") and waits 30 minutes.
+Only bodies of mail from ATS, assessment, or scheduling domains or from a company the candidate applied to are read (at most 64 KB, in memory only).
+`src/mail-outcomes.ts` classifies deterministically (rejection, then offer, then assessment, then interview, then recruiter reply; a subject naming a security code, verification code, one-time code, or "verify your account", or a would-be recruiter reply whose body names a security or one-time code, is a `verification` email instead; receipts, other account emails, newsletters, and job boards are ignored) and matches by sender domain, ATS tenant, sender name, subject, or body against submitted applications first, then ones the agent started (APPLYING or with a browser run).
+Only matched mail is DMed: category (assessments first, marked urgent, deadline first), company, title and job reference, the redacted subject, and the sender domain.
+An unambiguous match also gets the timeline note `Email received: …` (no status change).
+A `verification` email is machinery, not a company reply: it is never DMed and the daily digest never counts it (nor an older "Recruiter reply" note whose subject names such a code), but it still gets the note `Email received: Verification code from <domain>: "<subject>"` (code-like tokens in the subject replaced by "[code]"; the code itself is never kept), which the `--reopen-unsubmitted` evidence reads.
+Body text never appears in DMs or logs and nothing goes to a model.
+A failed DM is retried on the next round without advancing.
+`pnpm mail:scan [--since 7d] [--dry-run]` is the manual catch-up and debug tool with the same rules; it never moves the watcher's UID position.
+Logs (state only) go to `<workspace data>/mail-logs/`.

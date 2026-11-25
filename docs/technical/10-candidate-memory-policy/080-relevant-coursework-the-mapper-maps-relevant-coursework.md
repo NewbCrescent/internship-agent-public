@@ -1,0 +1,4 @@
+Relevant coursework: the mapper maps relevant-coursework and courses-taken questions ("Relevant coursework", "Which courses have you taken?", "Courses taken") to `relevant_coursework`, after every other key, and never GPA, grade, transcript, credit, online-course, certification, or training questions.
+`resolveCandidateQuestion` builds its answer from `candidate_coursework` (`courseworkAnswerFact`, packages/agent `src/coursework.ts`): completed courses first, then in-progress ones, each group in the stored order, as `Title (CODE)` or `Title (CODE, in progress)`, joined by "; "; with no saved courses the question needs input.
+The answer is never stored in `candidate_facts`: `saveCandidateFact` refuses the key, a `pnpm profile:facts` file cannot name it, and a pause or memory answer is used once.
+Browser runs fill it only into free-text fields; a select or radio field asking for coursework pauses.

@@ -1,0 +1,7 @@
+Version-2 AI responses contain a model-chosen 0-100 judgment of how reasonable a shot the application is and how well it matches the candidate's intent (the bands are unchanged: STRONG 75-100, a good shot and clearly wanted; MODERATE 40-74, a reasonable shot with real gaps or a crowded field; WEAK 0-39, a long shot or not what the candidate wants), or an INSUFFICIENT_INFORMATION rating; HIGH/MEDIUM/LOW confidence in the assessment; summary, strengths, gaps, and uncertainties.
+The prompt distinguishes duties and training from entry requirements and considers transferable projects/experience and academic alignment rather than keyword arithmetic.
+It also asks the model to weigh, from general knowledge, how selective the employer or program usually is (big tech, top quantitative firms, prominent AI labs, and well-known programs draw very large pools; mid-size companies and startups are often more reachable) against the candidate's evidence and level, never stating odds, acceptance rates, applicant counts, or other pool facts, and naming that read as uncertain.
+Every strength/gap quotes the full description exactly; strengths additionally cite exact approved candidate evidence.
+Validators check source membership, quotes, rating/score consistency, and prevent an unsupported assessment with no evidence.
+Citation validity does not prove semantic accuracy.
+Missing evidence is never a candidate fact, and eligibility verdicts, approvals, application packages, and submission state are untouched by this service.

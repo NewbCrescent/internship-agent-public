@@ -1,0 +1,5 @@
+Handshake's observed post-submission job page shows "Applied on <date>".
+The confirmation reader recognizes that phrase only when it newly appears after the submit click, using the same before-and-after rule as other confirmations.
+Each phrase is counted on its own, and the longer ones ("Thank you for applying", "We've received your application", "We have received your application") are separate phrases from a bare "thank you", so a job description that already says "Thank you for your interest" cannot hide a later "Thank you for applying".
+A site's own confirmation address also counts when the page before the click was not one: Greenhouse's `/confirmation` path or `?confirmation` parameter on `job-boards.greenhouse.io`, `boards.greenhouse.io`, and their `.eu.` hosts, and Lever's `/thanks` path on `jobs.lever.co` and `jobs.eu.lever.co` (`isConfirmationUrl`, `readNewConfirmationUrl` in `packages/browser/src/submission-outcome.ts`; the URL rules come from public knowledge and were not checked against live pages).
+A page read that fails during the navigation never ends the wait.

@@ -1,0 +1,14 @@
+`pnpm pipeline:run [--profile real|demo] [--skip-discovery]` (root `.env` loaded) is the unattended pass: it checks every enabled discovery source, then `advancePipeline` prepares every eligible QUALIFIED posting (and, with a target, the needs-review postings described under **Needs-review postings on AI fit**) and, with `INTERNSHIP_AGENT_AUTO_APPLY=1`, starts one automatic browser run per clean READY_FOR_REVIEW package that has no run.
+An automatic run replaces the package approval, never the submit approval: it opens the candidate's persistent, visible browser at `applicationUrlFor(posting)` (Lever `/apply`, Ashby `/application`, otherwise the posting or external application URL), fills known answers, and stops at `awaiting-approval` or `paused-needs-input`.
+It records "started automatically" rather than an APPROVED event.
+Before filling, an automatic run stops on any field labelled as a password (sign-in or account creation, which the agent never performs) and on pages with no recognizable form fields; the stop is logged once as "Automatic browser run needs you: …", the job stays READY_FOR_REVIEW, and the pipeline does not retry it.
+Any other failure is logged as "Automatic browser run failed: …" (up to 500 characters) and retried on the next pass; `--retry-stopped` also retries earlier "needs you" stops for one pass.
+Before reading a form, the Playwright adapter waits (up to 15 s) until visible controls exist and their count holds for 1 s, because client-rendered forms such as Ashby draw their fields after load.
+Recognition trims labels to 300 characters, ids to 200, and select options to 500 of 200 characters each rather than rejecting a real form, and types `input[type=number]` as `number`, which the planner fills only with a purely numeric value (otherwise it pauses; a date is never reformatted to fit).
+A single year, month, or day box labelled "start date" is not mapped to the availability date.
+The Playwright adapter installs a no-op `__name` in each page (now and on every navigation) because tsx compiles with esbuild keepNames, whose helper would otherwise be missing inside functions passed to `evaluate`.
+`pnpm pipeline:run` holds `<workspace data>/pipeline.lock` (`{ pid, startedAt }`, created atomically) for its whole run and releases it on exit, Ctrl-C, or SIGTERM.
+While a live process holds it, a second pipeline run refuses to start, the Jobs page disables every Check board button with a note, and the board-check action refuses on its own (covering stale pages); adding a board stays available.
+A lock whose process has exited is stale and ignored.
+The review queue also lists APPLYING jobs whose latest run awaits approval or input.
+Before preparing, `advancePipeline` analyzes any DISCOVERED posting that has no match report, so postings stranded by an interrupted discovery run are not skipped forever by known-link filtering.

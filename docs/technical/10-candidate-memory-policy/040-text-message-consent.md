@@ -1,0 +1,8 @@
+**Text-message consent.**
+The candidate's rule (2026-11-20, verbatim: "Texts yes about my application status") is applied deterministically by `textMessageConsentDecision` (`packages/browser/src/standing-fields.ts`) in `planAutofill`, before the standing settings and only for non-sensitive fields, whatever the settings.
+`textMessageTopic` (`packages/domain/src/standing-consent.ts`) reads a consent question about texts (SMS, text messages, WhatsApp) from its label and options together: texts only about this application (its status, the hiring process, interviews) take the Yes option (a single box is checked); texts only about marketing, job alerts, other openings, newsletters, events, or a talent community take the No option (an optional box stays unchecked, a required one pauses as a marketing opt-in); a question that mixes the two, names another channel (WhatsApp, calls, email), names no topic, or whose label was clipped pauses ("text messages: …") with its label.
+Marketing texts are never accepted.
+The decision has no basis; its reason names the rule.
+Ashby draws its text-message consent (`communicationConsent`; `smsConsent` and `whatsAppConsent` when both channels are asked) inside the phone field's entry, in `.ashby-application-form-texting-consent-description`: the radios take the consent body's first paragraph as their label (a channel heading such as "WhatsApp" in front), never the phone's title or the radio name, and do not inherit the phone title's `_required`.
+A fieldset checkbox group with no legend takes its question-title label (Ashby's checkbox groups).
+Choosing an Ashby consent radio is saved by Ashby at once, before the submit.

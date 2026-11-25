@@ -54,8 +54,9 @@ pnpm verify:feature -- browser
 pnpm agent:finish browser   # lint, typecheck, scoped suites, production build
 ```
 
-`AGENTS.md`, `ProjectStructure.md`, and `TECHNICAL.md` describe the
-architecture, the test harness, and every command.
+`AGENTS.md`, `ProjectStructure.md`, and the technical guide (`TECHNICAL.md`,
+an index of `docs/technical/`) describe the architecture, the test harness,
+and every command.
 
 ## Privacy model
 

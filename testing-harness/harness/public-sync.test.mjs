@@ -10,6 +10,7 @@ import {
   applyReplacements,
   parseScrubList,
   preparePublicTree,
+  scanPath,
   scanText,
   scrubText,
   scrubTree,
@@ -121,6 +122,35 @@ test("the public tree drops private-only paths and takes the public README", () 
     assert.equal(readFileSync(join(dir, "README.md"), "utf8"), "public");
     assert.deepEqual(scrubTree(dir, LIST), { hits: [], changed: 1 });
     assert.equal(readFileSync(join(dir, "notes.ts"), "utf8"), `// Example Co run ${RUN_ID_MASK}\n`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("nested doc and bug files are scrubbed like root docs", () => {
+  const dir = mkdtempSync(join(tmpdir(), "public-sync-docs-"));
+  try {
+    mkdirSync(join(dir, "docs", "technical", "01-topic"), { recursive: true });
+    mkdirSync(join(dir, "bugs", "resolved"), { recursive: true });
+    writeFileSync(join(dir, "docs/technical/01-topic/010-a-sentence.md"), "Zorblax ran 1a2b3c4d.\nNext sentence.\n");
+    writeFileSync(join(dir, "bugs/resolved/clean-bug.md"), "# Clean bug\n\nRun 12345678 failed.\n");
+    assert.deepEqual(scrubTree(dir, LIST), { hits: [], changed: 2 });
+    assert.equal(readFileSync(join(dir, "docs/technical/01-topic/010-a-sentence.md"), "utf8"), `Example Co ran ${RUN_ID_MASK}.\nNext sentence.\n`);
+    assert.equal(readFileSync(join(dir, "bugs/resolved/clean-bug.md"), "utf8"), `# Clean bug\n\nRun ${RUN_ID_MASK} failed.\n`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file names are scanned and fail closed", () => {
+  assert.deepEqual(scanPath("bugs/open/zorblax-form-fails.md", LIST), [{ path: "bugs/open/zorblax-form-fails.md", line: 0, kind: "path deny-list", note: "Zorblax" }]);
+  assert.deepEqual(scanPath("bugs/open/run-1a2b3c4d-held.md", LIST).map((hit) => hit.kind), ["path run-id"]);
+  assert.deepEqual(scanPath("docs/technical/06-job-posting-model/010-jobs-holds-posting-identity.md", LIST), []);
+  const dir = mkdtempSync(join(tmpdir(), "public-sync-names-"));
+  try {
+    mkdirSync(join(dir, "bugs", "open"), { recursive: true });
+    writeFileSync(join(dir, "bugs/open/quillon-labs-form.md"), "# A form\n\nClean.\n");
+    assert.deepEqual(scrubTree(dir, LIST).hits.map((hit) => [hit.path, hit.line, hit.kind]), [["bugs/open/quillon-labs-form.md", 0, "path deny-list"]]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -11,7 +11,7 @@ export const suiteManifest = [
     mutation: "none",
     timeoutMs: 30_000,
     reportPrefixes: [],
-    description: "Manifest validation and change-aware feature selection; the public mirror's scrub (deny-list replacement, run-id masking, fail-closed leftover and secret scans) and clone sync with a fictional deny-list."
+    description: "Manifest validation and change-aware feature selection; the public mirror's scrub (deny-list replacement, run-id masking, fail-closed leftover, file-name, and secret scans) and clone sync with a fictional deny-list; the lossless docs split (sentence lines, per-paragraph and per-bug files, round trip) and the docs layout (index-only TECHNICAL.md and BUGS.md, well-formed docs/technical and bugs files)."
   },
   {
     id: "domain-contracts",

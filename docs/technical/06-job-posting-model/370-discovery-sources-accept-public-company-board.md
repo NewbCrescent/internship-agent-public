@@ -1,0 +1,20 @@
+Discovery sources accept public company board roots on Greenhouse, Lever, and Ashby and exactly five selected GitHub job-list repositories: SimplifyJobs/Summer2027-Internships, vanshb03/Summer2027-Internships, speedyapply/2027-AI-College-Jobs, northwesternfintech/2027QuantInternships, and speedyapply/2027-SWE-College-Jobs.
+GitHub rows are listing leads, not posting text.
+The adapter reads bounded README or listing files, drops listed links already present in the workspace, and resolves at most `INTERNSHIP_AGENT_DISCOVERY_MAX_POSTINGS` complete descriptions per check (1-100, default 100).
+The rest of the budget scales with that limit: it scans at most five remaining internship links and requests at most 1.5 public Greenhouse/Lever/Ashby/Workday/SmartRecruiters/Oracle Cloud posting APIs per posting, at a deliberate pace, within 4.5 seconds per posting overall (100 postings: 500 links, 150 requests, 450 seconds).
+Workday links (`{tenant}.wdN.myworkdayjobs.com/[locale/]{site}/job/...`) resolve through the career site's own public `/wday/cxs/{tenant}/{site}/job/...` JSON endpoint; postings reporting `canApply: false` count as unavailable, and a returned `externalUrl` is kept only on the same Workday host.
+Workday's `location` is often a bare city ("Milan"), which the extractor never reads as a country, so the posting's own country descriptor (`jobRequisitionLocation.country`, else `country`) joins a single location ("Location: Milan, Italy"); a multi-location value ("2 Locations") or one already naming the country is kept as is.
+Postings stored before this keep their old snapshot.
+SmartRecruiters links (`jobs.smartrecruiters.com/{company}/{postingId}[-slug]`) resolve through `api.smartrecruiters.com/v1/companies/{company}/postings/{id}`; inactive postings are unavailable, the text joins the job description, qualifications, and additional-information sections under their headings, and `postingUrl` is kept only on `jobs.smartrecruiters.com`.
+Oracle Cloud Candidate Experience links (`{tenant}.fa[.region].oraclecloud.com/hcmUI/CandidateExperience/{lang}/sites/{site}/job/{id}`) resolve through the site's `recruitingCEJobRequisitionDetails` `ById` finder; only the `External*` description, responsibilities, and qualifications fields are read (never the `Internal*` copies), and a requisition with no match or a past `ExternalPostedEndDate` is unavailable.
+Known links are identified before any request by `postingLinkKey`, which reduces a listing link and a stored posting URL to the same identity (the Greenhouse job id, including `gh_jid` on employer domains; Lever and Ashby board ids; the Workday host, site, and path without locale; the SmartRecruiters posting id; the Oracle host and requisition id).
+`fetchCompanySource` builds the key set from every current posting regardless of status and passes it to the fetcher; a known posting is never re-fetched, so later edits to its description are not picked up automatically.
+When every new link is known or unresolvable after skipping, the check finishes as an empty run instead of failing.
+Every QUALIFIED posting at or above `INTERNSHIP_AGENT_PREPARE_MIN_FIT` (default 0) is prepared after a discovery run, with no top-N cut; callers may still pass an explicit threshold and limit.
+Other links remain in the source repository for manual review; the source check reports how many were skipped.
+Company-board fetches still use public listing APIs without redirects, with a 15-second timeout, a 5 MB response limit, and at most 100 internship listings ingested per run.
+GitHub sources are limited to one check per minute.
+The source row is stamped before each fetch attempt, including failed attempts.
+Adding a source does not poll or import it.
+`discovery_feedback` stores explicit skip decisions and optional preference notes.
+Notes never edit `candidate_preferences`, and skipped jobs are excluded from the review queue until restored.

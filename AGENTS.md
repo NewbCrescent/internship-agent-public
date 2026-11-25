@@ -4,7 +4,7 @@ This is the authoritative guide for agents contributing to this repository.
 
 ## Before any change
 
-Read this file and `ProjectStructure.md` in full. Read the status and the task-relevant sections of `TECHNICAL.md`; do not load unrelated history or generated artifacts. Discover files with `rg --files` and trace symbols with scoped `rg -n` searches.
+Read this file and `ProjectStructure.md` in full. Read the status and the task-relevant topic folders of the technical guide (`docs/technical/`, indexed by `TECHNICAL.md`); do not load unrelated history or generated artifacts. Discover files with `rg --files` and trace symbols with scoped `rg -n` searches.
 
 For non-trivial work, present a file-level plan and a **Harness impact** assessment before editing. Apply the standing authorization below and run `pnpm agent:doctor --feature <feature>` before implementation. Before handoff, run the smallest feature gate and then `pnpm agent:finish <feature>` when its prerequisites are available.
 
@@ -90,4 +90,4 @@ Browser verification must start and stop its own server on a dedicated port and 
 
 ## Documentation discipline
 
-Keep `TECHNICAL.md` and `ProjectStructure.md` aligned with structural, schema, workflow, and command changes. Record confirmed gaps in `BUGS.md`; do not maintain competing bug lists.
+Keep the technical guide (`docs/technical/`, indexed by `TECHNICAL.md`) and `ProjectStructure.md` aligned with structural, schema, workflow, and command changes. Record each confirmed gap as its own file in `bugs/open/`, and move it with `git mv` to `bugs/resolved/` when it is fixed (`BUGS.md` describes the layout); do not maintain competing bug lists. Parallel runs must not edit the same lines: add a new file rather than appending to a shared one, keep one sentence per line in `docs/technical/`, and add a sentence beside the sentences about the same feature, not at the end of a file.

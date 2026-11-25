@@ -1,0 +1,11 @@
+**Daily digest.**
+With the same Discord settings, each watcher tick (`runWatchTick`, whether or not a list changed; skipped while another pass holds the lock) calls `dailyDigestTick` in `packages/agent/src/daily-digest.ts`, which sends one short DM at or after 09:00 local time, at most once per local day.
+It reads the workspace read-only: postings in APPLYING whose latest run is paused with open questions, shows a CAPTCHA, or waits at the submit step, numbered (`1. <company> <title> — 2 questions: "…", "…" +N more`, `solve a CAPTCHA`, `ready, say "send <company>"`; at most two questions per item and eight items); applications first SUBMITTED since the last digest (or the last 24 hours before the first); and replies the Gmail watcher logged as `Email received: …` timeline notes since then.
+A run at the submit step on a recognized site the candidate approves each run on (Oracle Cloud HCM, SmartRecruiters: its suggested kind needs approval) reads `ready, say "send <company>"`.
+Older runs that recorded the hidden CAPTCHA token field (`g-recaptcha-response` and its siblings) as a safeguard pause count neither as a CAPTCHA nor as a question.
+Holds the agent fixes itself (a run at the submit step whose site type was not recognized, open pauses that are only unlabeled controls or the token field, and READY_FOR_REVIEW postings whose last event is the over-one-page resume failure) become one line, `Being fixed automatically: N`; that count alone sends nothing, and nothing is sent when there is nothing else to report (the digest stays due for later ticks that day).
+Text goes through `redactNoticeText` and the token is stripped before `sendDiscordDm`; no answers, drafts, confirmations, or email text are read.
+`<workspace data>/discord-digest.json` (mode 600) keeps the last sent date and time and the last digest's number-to-run mapping (`{ number, runId, jobId, company }`) so a reply such as "1: yes" maps back to its run.
+A failure logs `Discord digest failed: <status>` (never the token), is retried no sooner than an hour later, and never fails the tick.
+`pnpm digest:preview [--profile real|demo]` prints the digest without sending or saving anything; `--send` sends it now, ignoring the 09:00 gate, and records it as that day's digest.
+The local suite `pnpm test:agent:digest` covers it with a fake clock and an injected fetch.

@@ -28,3 +28,14 @@ test("candidate domain and dashboard changes select their feature gates", () => 
     ["dashboard", "evidence", "github", "profile", "remember"]
   );
 });
+
+test("docs, bug files, and the doc scripts select the agent-workflow gate", () => {
+  assert.deepEqual(
+    selectChangedFeatures(["docs/technical/06-job-posting-model/010-jobs-holds-posting-identity.md", "bugs/open/example-bug.md", "scripts/split-docs.mjs", "scripts/public-sync.mjs"]),
+    { features: ["agent-workflow"], requiresBuild: false }
+  );
+  assert.deepEqual(
+    selectChangedFeatures(["packages/domain/src/candidate-facts.ts", "bugs/open/example-bug.md"]).features,
+    ["agent-workflow", "foundation", "profile", "remember"]
+  );
+});

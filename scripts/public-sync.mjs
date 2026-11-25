@@ -2,7 +2,7 @@
 // Public mirror sync: exports a ref's tracked files, drops private-only paths,
 // scrubs them with a local deny-list, scans the result, and fails closed when
 // anything private remains. Only then does it write a local clone of the
-// public repository. See "Public mirror" in TECHNICAL.md.
+// public repository. See docs/technical/13-public-mirror/.
 //
 //   pnpm public:sync -- --public-dir <clone> [--ref <ref>] [--scrub <file>]
 //                       [--verify] [--dry-run] [--push] [--out <new dir>]
@@ -189,6 +189,21 @@ export function scanText(text, path, list) {
   return hits;
 }
 
+/** Private items in a file's path (doc and bug file names come from titles), read as written and with -_./ as spaces. */
+export function scanPath(path, list) {
+  const hits = [];
+  const seen = new Set();
+  for (const form of [path, path.replace(/[-_./]+/g, " ")]) {
+    for (const hit of scanText(form, "path.md", list)) {
+      const key = `${hit.kind}\n${hit.note}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      hits.push({ path, line: 0, kind: `path ${hit.kind}`, note: hit.note });
+    }
+  }
+  return hits;
+}
+
 function isBinary(buffer) {
   return buffer.subarray(0, 8000).includes(0);
 }
@@ -229,6 +244,7 @@ export function scrubTree(dir, list) {
   const hits = [];
   let changed = 0;
   for (const path of walk(dir)) {
+    hits.push(...scanPath(path, list));
     const full = join(dir, path);
     const buffer = readFileSync(full);
     if (isBinary(buffer)) {

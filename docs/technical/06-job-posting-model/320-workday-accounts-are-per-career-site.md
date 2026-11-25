@@ -1,0 +1,6 @@
+Workday accounts are per career site (`{tenant}.wdN.myworkdayjobs.com/[locale/]{site}`; `parseWorkdayUrl` and `workdaySiteKey` in packages/domain).
+Migration 0017 rebuilds `browser_sessions` so it holds Handshake plus one row per Workday site (`workday:{host}/{site}`), still storing only a status, a short detail, and a timestamp.
+The Workday accounts page (`/workday`) lists sites with prepared or in-progress applications; Open sign-in (`connectWorkdaySite`) opens one of the site's postings in the candidate's persistent, visible browser, where the candidate signs in or creates the account themselves (password manager, email verification, any challenge).
+That window never reads, types, or stores credentials; it polls the site's public job endpoint with the profile's cookies and records Workday's own `userAuthenticated` answer, the last one before the window closes deciding the status.
+Only one window may use the browser profile at a time, so sign-in refuses while a pipeline run, a Handshake sign-in, or another Workday sign-in holds it.
+`advancePipeline` never opens a browser for a Workday application until its site is connected; it reports it as waiting for sign-in, unless the account opt-in below is on.

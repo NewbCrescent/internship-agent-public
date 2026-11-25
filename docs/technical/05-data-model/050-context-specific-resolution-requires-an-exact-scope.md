@@ -1,0 +1,10 @@
+Context-specific resolution requires an exact scope.
+There is no automatic fallback from location-specific to global or between locations.
+The one fallback is one-way: a question asked on an alternate-profile application (a Handshake Quick Apply / Apply posting with `application_type = HANDSHAKE_INTERNAL`, or any browser run whose form asks for a transcript) uses the `handshake_internal` answer and, when none exists, the global answer.
+A Handshake-only answer never answers a global question, an external ATS, an employer site, or an unknown application type.
+Eligibility applies the same order for graduation windows, but only by posting type: a transcript requirement is known only once the application form is open, so eligibility for other postings uses the global answer.
+A second one-way fallback covers company-scoped questions: a question about the posting's employer uses that company's answer and, when none exists, the global answer; a company answer never answers another company or a global question (browser runs pass the posting's company through `postingQuestionContext`).
+Relocation is recorded per country: a named place readable as a country (`readPlace`: "Austin, TX" is US; a bare city stays a location scope), else the question's own country words, else the posting's one stated country.
+No country, or a country without an answer, pauses; the legacy global relocation answer never answers a question (eligibility reads the location's answer, then the posting location's country, then global).
+Work-authorization and sponsorship questions take the same order without the place reading: a pause answer's country, else the question's own country words, else the posting's one stated country ("Will you require future sponsorship?" on a US posting is `requires_sponsorship` for US); a posting with no country or several stays AMBIGUOUS.
+When a question names both, the one asked first decides: "Will you require sponsorship … or any immigration work authorization …?" is a sponsorship question, and "Are you legally authorized to work … without the need for sponsorship?" stays a work-authorization question (2026-11-25).

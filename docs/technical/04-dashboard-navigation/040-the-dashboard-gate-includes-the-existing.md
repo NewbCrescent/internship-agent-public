@@ -1,0 +1,3 @@
+The dashboard gate includes the existing disposable-SQLite job-list suite with a 2,000-posting pagination/count scenario and browser checks for tab navigation, URL history, status preservation, bounded rows/checkboxes and response size, global resume refresh, and Review fit/age ordering and boundary cases.
+Timing on a real development workspace is observational and excludes first compilation; browser tests check behavior rather than enforcing a machine-specific latency budget.
+The fast `dashboard-style-contracts` suite (`pnpm test:dashboard:fast`) parses every dashboard TSX file and fails when a rendered class name (including both branches of a conditional) has no rule in `app/styles.css`, or when buttons without a class would fall back to the browser default.

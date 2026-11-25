@@ -1,0 +1,3 @@
+A listed skill also covers its other names and the broader skill it is a kind of, one way only (`SKILL_IMPLIES` in `skill-keys.ts`): PostgreSQL covers Postgres, SQL, and relational databases; Machine Learning and ML cover each other, and QLoRA covers LoRA, fine-tuning, machine learning, and LLMs (large language models); Redis, MongoDB, and Firebase cover NoSQL; AWS and its services cover phrases such as "cloud platforms" and "cloud infrastructure" but never a bare "Cloud", so "Oracle Cloud" stays unmet; SQL never covers PostgreSQL.
+The reason names the term: "Your resume lists PostgreSQL (as SQL)".
+Both hard requirements and fit use the same table.

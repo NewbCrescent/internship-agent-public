@@ -1,0 +1,6 @@
+- pnpm workspaces and Turborepo
+- Next.js App Router with TypeScript
+- SQLite through Node's built-in `node:sqlite`
+- Zod runtime contracts
+- Vitest for pure and local integration suites
+- Playwright for critical browser workflows

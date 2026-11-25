@@ -1,0 +1,9 @@
+Preparation uses every active, approved entry in the candidate's order, verbatim, with no per-job tailoring.
+Each experience or project bullet and each skills line becomes a resume bullet, and each entry heading becomes a claim.
+Their `resume_entry` basis names the exact revision, and the verifier passes a line only while that revision is current, approved, unarchived, and still contains the exact text.
+Evidence claims still ground answers and relevance but never become resume bullets.
+The variant freezes the structured document (`resume_variants.document_json`) alongside a readable markdown snapshot.
+The document renders in the candidate's layout: centered name and linked `•` contact line; Education as school — degree | GPA (Expected Month YYYY); Professional Experience headings in small caps as organization | role with location and date right-aligned; Projects with their link; Technical Skills as `Label: items`.
+`@internship-agent/browser` prints it to a Letter PDF with a throwaway headless Chromium and reports the page count; an upload of the generated resume stops when it exceeds one page (that stop applies only to the generated print, never to the candidate's uploaded resume; `pnpm profile:resume` warns when an uploaded resume is not one page).
+Variants made before structured entries print their markdown snapshot.
+The application page labels each variant with what the application actually sends (browser runs record the truth; before a run, the candidate's uploaded resume for the expected profile when one is stored, otherwise the newest variant, printed with the 2029 graduation date on Handshake-internal postings, whose Quick Apply dialog instead keeps the Handshake account's resume once the candidate confirms it) and links to `/applications/<job>/variants/<variant>`, which prints that variant exactly as an upload would.

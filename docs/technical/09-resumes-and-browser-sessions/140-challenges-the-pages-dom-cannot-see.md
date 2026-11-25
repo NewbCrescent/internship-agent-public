@@ -1,0 +1,6 @@
+**Challenges the page's DOM cannot see.**
+Cloudflare Turnstile draws its frame inside a closed shadow root, which the in-page read (`findVisibleChallengeIn`) never reaches, and its "Verify you are human" text sits inside the frame.
+The Playwright page's `visibleChallenge` therefore also reads the browser's frame tree (`findShadowTurnstileFrame` in `packages/browser/src/handshake-executor.ts`): a `challenges.cloudflare.com` frame (by its element's `src` or the frame's address, `isTurnstileFrameSource` in `challenge.ts`) whose element is visible and at least 20×20 px is a Turnstile challenge; a hidden or zero-size (invisible-mode) frame is not.
+Only the frame's address and its element's attributes, visibility, and box are read; nothing is evaluated in, clicked, or typed into the frame.
+Because such a widget can render while the form fills, `submitBrowserRun` reads the page for a challenge again after filling, right before the click: one found there withdraws the approval and pauses the run as a safeguard (`SubmissionChallenged`; nothing clicked, no evidence).
+Dover's application pages showed this widget to the agent's browser on 2026-11-24, so Dover runs that show it are held for the candidate to finish in their own browser.

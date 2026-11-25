@@ -1,0 +1,3 @@
+`pnpm profile:resume --profile real|demo` lists the current uploads of both channels (label, original name, page count, size, SHA-256, stored time; a missing or changed file is flagged).
+`pnpm profile:resume --profile real|demo --channel default|handshake_internal --file <pdf> [--label <text>] [--dry-run]` stores a PDF with `storeBaseResume` under the pipeline lock, superseding the channel's current upload, and prints its label, page count, and SHA-256; it warns when the PDF is not one page (never blocking), skips a file whose bytes equal the current upload, and `--dry-run` prints `would store …` and writes nothing.
+Agents never run it against the real workspace.

@@ -1,0 +1,7 @@
+Browser runs draft open-ended answers in the candidate's voice when a model, the local voice corpus (`pnpm voice:import` copies the reference set and guides from the Codex skill into the Git-ignored `data/profiles/<profile>/voice`), and `VOICE_GATE_COMMAND` are all configured; without the gate nothing is drafted.
+`isDraftableQuestion` (packages/domain) limits drafting to required open-ended prose fields, plus fields a template package answer would fill, and never covers facts, dates, education, contact, compensation, protected or demographic answers, or attestations, nor a field with no readable label (the recognizer's "Unlabeled … control N").
+A draft may cite only approved resume entries, allowed current evidence, education, and the posting (facts are excluded because some are channel-scoped); each claim must cite that material and every number must appear in it.
+Drafts that copy eight or more words from the corpus, or fail grounding, are revised before any gate run.
+Each grounded draft runs the local three-detector voice gate; a draft fills the field only when the gate passes, with at most five revisions after the first draft.
+If none passes, or the gate cannot run, the field stays blank as a pause that shows the best grounded version and its scores, and the candidate writes the answer; written answers are used for that run only and never remembered.
+Drafted fills carry a `voice_draft` basis with the gate summary, and model calls are recorded as `application.answer_draft` and `application.voice_revision`.

@@ -60,9 +60,17 @@ The candidate-owned graduate-internship exclusion is typed in `packages/domain`,
 
 Manifest-driven agent verification. Pure tests, temporary-SQLite integration, browser workflows, runner support, and workflow self-tests are separated by tier and feature.
 
+## `docs/technical`
+
+The technical guide, split so parallel runs edit different lines: one folder per topic (`NN-<topic>/`, listed with its title in `TECHNICAL.md`), one file per paragraph (`NNN-<slug>.md`, read in name order), and one sentence per line. New material goes in a new file numbered between its neighbours, or in a new sentence beside the sentences about the same feature; only a new topic folder edits `TECHNICAL.md`.
+
+## `bugs`
+
+Confirmed defects, one file per bug: `open/<slug>.md` until it is fixed, then moved with `git mv` to `resolved/<slug>.md`. The slug is the title in lower-case words joined by hyphens, and the file starts with `# <title>`. Bugs are not numbered, and `BUGS.md` only describes this layout, so filing or resolving a bug never edits a shared line.
+
 ## `scripts`
 
-`public-sync.mjs` (`pnpm public:sync`) builds the public mirror: it exports a ref's tracked files, drops private-only paths, puts `PUBLIC-README.md` in place of `README.md`, scrubs the rest with the Git-ignored deny-list `data/public-scrub.json`, scans for leftovers and secrets (failing closed), and syncs the result into a local clone of the public repository. Its regressions are in `testing-harness/harness/public-sync.test.mjs`.
+`public-sync.mjs` (`pnpm public:sync`) builds the public mirror: it exports a ref's tracked files, drops private-only paths, puts `PUBLIC-README.md` in place of `README.md`, scrubs the rest with the Git-ignored deny-list `data/public-scrub.json`, scans file contents and file names for leftovers and secrets (failing closed), and syncs the result into a local clone of the public repository. Its regressions are in `testing-harness/harness/public-sync.test.mjs`. `split-docs.mjs` is the one-time migration that split the single-file `TECHNICAL.md` and `BUGS.md` into `docs/technical/` and `bugs/`; `--check` proves the split lost nothing, and `--write` runs only on the pre-split files (the split's own merge rounds), never after runs have edited the new folders. Its regressions are in `testing-harness/harness/split-docs.test.mjs`, and `docs-layout.test.mjs` keeps `TECHNICAL.md` and `BUGS.md` index-only.
 
 ## `data`
 

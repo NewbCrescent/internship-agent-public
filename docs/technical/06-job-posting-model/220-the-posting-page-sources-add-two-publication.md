@@ -1,0 +1,2 @@
+The posting-page sources add two publication fields: schema.org JSON-LD `datePosted` (iCIMS job pages and career pages) and Workable `published`, under the same validity rules.
+Dover's `created` and Rippling's `createdOn` are creation dates and never stand in for employer publication; those postings keep an unknown date, and `fetchEmployerPublication` does not read dates for Dover, iCIMS, Workable, Rippling, `gh_jid` employer links, or career pages.

@@ -20,7 +20,7 @@ const PATH_FEATURE_RULES = [
   { pattern: /^packages\/browser\/|^testing-harness\/browser-worker\//, features: ["browser", "database"] },
   { pattern: /^packages\/agent\/src\/browser-orchestrator|^apps\/dashboard\/components\/applications\/(?:BrowserRunPanel|RunControls)|^testing-harness\/browser\/fixture/, features: ["browser", "dashboard", "applications"] },
   { pattern: /^apps\/dashboard\/(?:app\/evidence\/|components\/evidence\/)|^testing-harness\/browser\/github-evidence\.spec\.ts$/, features: ["github", "evidence"] },
-  { pattern: /^(?:AGENTS|CLAUDE|TECHNICAL|ProjectStructure|PROJECT_CONTEXT|README|BUGS)\.md$/, features: ["agent-workflow"] }
+  { pattern: /^(?:AGENTS|CLAUDE|TECHNICAL|ProjectStructure|PROJECT_CONTEXT|README|BUGS)\.md$|^docs\/|^bugs\/|^scripts\/(?:public-sync|split-docs)\.mjs$/, features: ["agent-workflow"] }
 ];
 
 export function normalizeCliArgs(argv) {
