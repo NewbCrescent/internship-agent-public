@@ -219,13 +219,25 @@ export function ashbySubmitSentAfter(network: AshbySubmitNetwork | null, clicks:
   return Boolean(network?.submits.some((submit) => submit.clicks >= clicks));
 }
 
-/** The fields Ashby's last answered submit named, as invalid fields (no labels: Ashby names them by field-entry id). */
+/** Ashby's field-entry id is "<form render id>_<field path>"; the render id changes on every page load, the path does not. */
+const RENDER_PREFIX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_(.+)$/i;
+
+/** The field path of an Ashby field-entry id (the id itself when it carries no render id); null stays null. */
+export function ashbyFieldPath(entryId: string | null): string | null {
+  if (!entryId) return null;
+  return RENDER_PREFIX.exec(entryId)?.[1] ?? entryId;
+}
+
+/**
+ * The fields Ashby's last answered submit named, as invalid fields (no labels: Ashby names them by field-entry id,
+ * mapped to the field path the form's ids use).
+ */
 export function ashbyNetworkInvalidFields(network: AshbySubmitNetwork | null): InvalidField[] {
   if (!network) return [];
   const answered = network.submits.filter((submit) => submit.status !== null);
   const last = answered[answered.length - 1];
   if (!last) return [];
-  const fields: InvalidField[] = last.fieldErrors.map((error) => ({ ref: error.fieldEntryId, label: "", error: error.message }));
+  const fields: InvalidField[] = last.fieldErrors.map((error) => ({ ref: ashbyFieldPath(error.fieldEntryId), label: "", error: error.message }));
   const named = new Set(last.fieldErrors.map((error) => error.message));
   for (const message of last.formErrorMessages) {
     if (!named.has(message)) fields.push({ ref: null, label: "", error: message });

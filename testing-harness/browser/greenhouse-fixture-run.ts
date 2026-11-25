@@ -107,7 +107,10 @@
  * derived from Ashby's public bundle, Track 22) are drawn without the
  * field-entry wrapper: the radio or checkbox group's `_required` title marks
  * them required, and the short "Visa Support" title takes its question from
- * Ashby's description. Ashby's submit on the network (fixture ?network=,
+ * Ashby's description. The form draws a fresh render id on every load and
+ * React-controlled radios (Track 25): a run planned on one load fills, reads
+ * back, and submits on another, and a radio that will not take is reported
+ * unfilled and never reads back as chosen. Ashby's submit on the network (fixture ?network=,
  * answered by this harness's routes): the reCAPTCHA token request and the
  * ApiSubmitSingleApplicationFormAction submit are recorded (operation names,
  * statuses, booleans, codes and messages; never the answers, token, or
@@ -130,6 +133,7 @@ import { chromium, type Page } from "playwright-core";
 import {
   applyDecisions,
   atsFlowFor,
+  choicesNotTaken,
   classifyAts,
   applicationWallReason,
   createPlaywrightPage,
@@ -152,6 +156,7 @@ import {
   type FieldResolution
 } from "@internship-agent/browser";
 import { greenhouseSecurityCodeLookup, type MailMessage, type VerificationMailboxFactory } from "@internship-agent/agent";
+import type { FillDecision } from "@internship-agent/domain";
 
 const PREFIX = "internship-agent-greenhouse-";
 const VARIANT_ID = "11111111-1111-4111-8111-111111111111";
@@ -162,8 +167,8 @@ const SMARTRECRUITERS_APPLY = "https://jobs.smartrecruiters.com/oneclick-ui/comp
 const ASHBY = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a1/application";
 const ASHBY_TEXTING = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a2/application";
 const ASHBY_VALUE_SELECT = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a3/application";
-/** The Visa Support question's field-entry id in fixtures/ashby-value-select.html (its radios' name). */
-const ASHBY_VISA_ENTRY = "9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2";
+/** The Visa Support question's field path in fixtures/ashby-value-select.html (its field id; its entry id is "<render id>_<path>"). */
+const ASHBY_VISA_PATH = "9a0b1c2d-0000-4000-8000-0000000000d1";
 const LEVER = "https://jobs.lever.co/fixturerobotics/00000000-0000-4000-8000-0000000000b1/apply";
 /** Where app.dover.io application links land (they redirect to jobs.dover.com/job/<id>). */
 const DOVER = "https://jobs.dover.com/job/00000000-0000-4000-8000-0000000000d1";
@@ -249,7 +254,15 @@ async function main(): Promise<void> {
         let scenario: string | null = null;
         try { scenario = new URL(pageUrl).searchParams.get("network"); } catch { scenario = null; }
         let answers: { name?: unknown; email?: unknown } = {};
-        try { answers = (JSON.parse(request.postData() ?? "{}") as { variables?: { answers?: typeof answers } }).variables?.answers ?? {}; } catch { answers = {}; }
+        let render = "";
+        try {
+          const variables = (JSON.parse(request.postData() ?? "{}") as { variables?: { answers?: typeof answers; formRenderIdentifier?: unknown } }).variables;
+          answers = variables?.answers ?? {};
+          render = typeof variables?.formRenderIdentifier === "string" ? variables.formRenderIdentifier : "";
+        } catch {
+          answers = {};
+          render = "";
+        }
         const json = (status: number, payload: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(payload) });
         if (scenario === "accepted") {
           await json(200, { data: { submitApplicationFormAction: { applicationFormResult: { __typename: "FormSubmitSuccess" }, messages: { blockMessageForCandidateHtml: null } } } });
@@ -264,7 +277,7 @@ async function main(): Promise<void> {
               sections: [{ title: "Fixture section", fieldEntries: [] }],
               fieldValues: { _systemfield_name: answers.name ?? null, _systemfield_email: answers.email ?? null },
               errorMessages: ["Missing entry for required field: Visa Support"],
-              formErrors: [{ message: "Missing entry for required field: Visa Support", fieldEntryId: ASHBY_VISA_ENTRY }]
+              formErrors: [{ message: "Missing entry for required field: Visa Support", fieldEntryId: `${render}_${ASHBY_VISA_PATH}` }]
             },
             messages: { blockMessageForCandidateHtml: null }
           } } });
@@ -721,7 +734,7 @@ async function main(): Promise<void> {
         const labels = form.fields.map((field) => field.label);
         check(labels.join("|") === ["Name", "Email", VISA, TEAM, TOOLS].join("|"), `Ashby value-select labels: ${labels.join("|")}`);
         const visa = form.fields.find((field) => field.label === VISA);
-        check(visa?.kind === "radio" && visa.required && visa.options?.join("|") === "Yes|No" && visa.id === ASHBY_VISA_ENTRY, `Ashby Visa Support: ${JSON.stringify(visa)}`);
+        check(visa?.kind === "radio" && visa.required && visa.options?.join("|") === "Yes|No" && visa.id === ASHBY_VISA_PATH, `Ashby Visa Support: ${JSON.stringify(visa)}`);
         const team = form.fields.find((field) => field.label === TEAM);
         check(team?.kind === "radio" && !team.required, `Ashby optional single choice: ${JSON.stringify(team)}`);
         const tools = form.fields.find((field) => field.label === TOOLS);
@@ -735,17 +748,19 @@ async function main(): Promise<void> {
       for (const scenario of ["accepted", "recaptcha", "form-errors", "hang", "server-error"] as const) {
         const { tab, page, form } = await recognizeValueSelect(`?network=${scenario}`);
         const id = (label: string) => form.fields.find((field) => field.label === label)?.id ?? `missing-${label}`;
-        const filled = await applyDecisions(page, form, [
+        const decisions: FillDecision[] = [
           { fieldId: id("Name"), action: "fill", value: PROFILE.fullName, basis: null, reason: "fixture", pause: null },
           { fieldId: id("Email"), action: "fill", value: PROFILE.email, basis: null, reason: "fixture", pause: null },
           { fieldId: id(VISA), action: "choose", value: "No", basis: null, reason: "fixture", pause: null }
-        ]);
+        ];
+        const filled = await applyDecisions(page, form, decisions);
         check(filled.unfilled.length === 0, `Ashby ?network=${scenario} unfilled: ${JSON.stringify(filled.unfilled)}`);
+        check((await choicesNotTaken(page, form, decisions)).length === 0, `Ashby ?network=${scenario}: the Visa Support choice did not read back`);
         const outcome = await submitAndConfirm(page, { timeoutMs: scenario === "hang" ? 2_000 : 3_000, pollMs: 100, atsKind: "ashby" })
           .then((text) => text, (error: unknown) => error);
         const evidence = postSubmitEvidenceOf(outcome);
-        const sent = await tab.evaluate(() => (window as unknown as { fixture: { submitClicks: number; radios: Record<string, string> } }).fixture);
-        check(sent.radios[ASHBY_VISA_ENTRY] === "No", `Ashby ?network=${scenario} Visa Support chosen: ${JSON.stringify(sent.radios)}`);
+        const sent = await tab.evaluate(() => (window as unknown as { fixture: { submitClicks: number; radios: Record<string, string>; render: string } }).fixture);
+        check(sent.radios[ASHBY_VISA_PATH] === "No", `Ashby ?network=${scenario} Visa Support chosen: ${JSON.stringify(sent.radios)}`);
         const described = outcome instanceof Error ? `${outcome.constructor.name}: ${outcome.message}` : String(outcome);
         if (scenario === "accepted") {
           check(outcome === ASHBY_ACCEPTED_CONFIRMATION, `Ashby ?network=accepted: ${described}`);
@@ -773,6 +788,50 @@ async function main(): Promise<void> {
           check(evidence?.ashbyNetwork?.submits[0]?.status === 500 && evidence.ashbyNetwork.submits[0].success === false, `Ashby ?network=server-error record: ${JSON.stringify(evidence?.ashbyNetwork)}`);
         }
         if (scenario !== "accepted") check(leaked(evidence?.ashbyNetwork).length === 0, `Ashby ?network=${scenario} record kept: ${leaked(evidence?.ashbyNetwork).join(", ")}`);
+        await tab.close();
+      }
+      // Track 25: Ashby gives the form a new render id on every load and names a single-choice question's radios by it.
+      // The run plans on one load and submits on another: the choice is still made, read back, and submitted.
+      {
+        const first = await recognizeValueSelect("");
+        const firstRender = await first.tab.evaluate(() => (window as unknown as { fixture: { render: string } }).fixture.render);
+        const fid = (label: string) => first.form.fields.find((field) => field.label === label)?.id ?? `missing-${label}`;
+        const decisions: FillDecision[] = [
+          { fieldId: fid("Name"), action: "fill", value: PROFILE.fullName, basis: null, reason: "fixture", pause: null },
+          { fieldId: fid("Email"), action: "fill", value: PROFILE.email, basis: null, reason: "fixture", pause: null },
+          { fieldId: fid(VISA), action: "choose", value: "No", basis: null, reason: "fixture", pause: null }
+        ];
+        await first.tab.close();
+        const { tab, page, form } = await recognizeValueSelect("?network=accepted");
+        const fixtureState = () => tab.evaluate(() => (window as unknown as { fixture: { submitClicks: number; radios: Record<string, string>; render: string } }).fixture);
+        check((await fixtureState()).render !== firstRender, "Ashby per-load: the fixture kept its render id");
+        check(form.fields.find((field) => field.label === VISA)?.id === fid(VISA) && fid(VISA) === ASHBY_VISA_PATH, `Ashby per-load: Visa Support's id changed between loads: ${fid(VISA)} → ${form.fields.find((field) => field.label === VISA)?.id}`);
+        const filled = await applyDecisions(page, form, decisions);
+        check(filled.unfilled.length === 0 && filled.skipped === 0 && filled.applied === 3, `Ashby per-load fills: ${JSON.stringify(filled)}`);
+        check((await choicesNotTaken(page, form, decisions)).length === 0, "Ashby per-load: the Visa Support choice did not read back");
+        const outcome = await submitAndConfirm(page, { timeoutMs: 3_000, pollMs: 100, atsKind: "ashby" }).then((text) => text, (error: unknown) => error);
+        check(outcome === ASHBY_ACCEPTED_CONFIRMATION, `Ashby per-load submit: ${outcome instanceof Error ? outcome.message : String(outcome)}`);
+        const sent = await fixtureState();
+        check(sent.radios[ASHBY_VISA_PATH] === "No" && sent.submitClicks === 1, `Ashby per-load sent: ${JSON.stringify(sent)}`);
+        await tab.close();
+      }
+      // A required radio that will not take: the choice is reported unfilled, and a DOM-only `checked` (the old
+      // fallback's) still reads back as not taken, since the read-back reads Ashby's own state. Nothing is clicked.
+      {
+        const { tab, page, form } = await recognizeValueSelect("?network=accepted&stuck=1");
+        const id = (label: string) => form.fields.find((field) => field.label === label)?.id ?? `missing-${label}`;
+        const decisions: FillDecision[] = [{ fieldId: id(VISA), action: "choose", value: "No", basis: null, reason: "fixture", pause: null }];
+        const filled = await applyDecisions(page, form, decisions);
+        check(filled.unfilled.length === 1 && filled.unfilled[0]?.fieldId === id(VISA) && filled.unfilled[0]?.reason === "the site did not keep the choice", `Ashby stuck radio fill: ${JSON.stringify(filled.unfilled)}`);
+        await tab.evaluate((path) => {
+          const radios = Array.from(document.querySelectorAll(`[data-field-path="${path}"] input[type="radio"]`)) as HTMLInputElement[];
+          const no = radios.find((radio) => document.querySelector(`label[for="${CSS.escape(radio.id)}"]`)?.textContent === "No");
+          if (no) no.checked = true;
+        }, ASHBY_VISA_PATH);
+        const notTaken = await choicesNotTaken(page, form, decisions);
+        check(notTaken.length === 1 && notTaken[0]?.fieldId === id(VISA) && notTaken[0]?.reason === "the page did not take the choice", `Ashby stuck radio read-back: ${JSON.stringify(notTaken)}`);
+        const sent = await tab.evaluate(() => (window as unknown as { fixture: { submitClicks: number; radios: Record<string, string> } }).fixture);
+        check(sent.submitClicks === 0 && sent.radios[ASHBY_VISA_PATH] === undefined, `Ashby stuck radio state: ${JSON.stringify(sent)}`);
         await tab.close();
       }
     }

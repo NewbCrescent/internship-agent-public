@@ -1,6 +1,14 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Robotics Software Intern @ Fixture Robotics</title></head>
+<head>
+  <meta charset="utf-8"><title>Robotics Software Intern @ Fixture Robotics</title>
+  <style>
+    ._container_fx2 { display: inline-grid; place-items: center; width: 24px; height: 24px; border: 2px solid #555; border-radius: 24px; }
+    ._circle_fx2 { grid-area: 1 / 1 / 2 / 2; width: 12px; height: 12px; border-radius: 12px; }
+    ._container_fx2 input[type="radio"] { grid-area: 1 / 1 / 2 / 2; width: 24px; height: 24px; margin: 0; opacity: 0; z-index: 1; cursor: pointer; }
+    ._container_fx2[data-checked] ._circle_fx2 { background: #5b5bd6; }
+  </style>
+</head>
 <body>
   <!--
     A fictional Ashby application page ("Fixture Robotics"); every text, uuid, token, and host name
@@ -14,7 +22,8 @@
     field path; `_required_<hash>` only when required), the optional
     `ashby-application-form-question-description`, then the options
     (`ashby-application-form-input-radio-group-option`, the radio with id
-    "<entry>-labeled-radio-<n>", name "<entry>", no `required` attribute, and its own label).
+    "<entry>-labeled-radio-<n>", name "<entry>", no `required` attribute, and its own label); the
+    entry id is "<form render id>_<field path>".
     The submit sequence: a reCAPTCHA Enterprise token request (POST recaptcha.net
     /recaptcha/enterprise/reload), then POST /api/non-user-graphql?op=ApiSubmitSingleApplicationFormAction;
     the harness answers it per ?network= (accepted, recaptcha, form-errors, server-error; hang: the
@@ -26,6 +35,16 @@
     application page on 2026-11-24 (same structure: the radio inside span._container inside the
     option div, the fieldset inside a bare div[data-field-entry-id], the title's `_required_<hash>`
     class; no form interaction).
+    OBSERVED (three read-only loads of First Resonance's public application page, 2026-11-25, no form
+    interaction): every field entry's id is `<form render id>_<field path>`, the render id is new on
+    every load, a single-choice question's radios are named by that entry id, and the radio input is
+    `opacity: 0` over a drawn circle in an inline grid.
+    DERIVED from Ashby's public bundle (index-CY3T4pnC.js): a radio's choice is React state drawn on
+    the option as `data-checked`; a click on an unchosen option chooses it, a click on the chosen
+    option clears it, and the page always shows the state (a DOM-only `checked` change is not an
+    answer).
+    SYNTHETIC (not observed on Ashby): `?stuck=1` makes the Visa Support question ignore every click,
+    a required radio that will not take.
   -->
   <div id="root">
     <h1 class="ashby-job-posting-heading">Robotics Software Intern</h1>
@@ -40,27 +59,27 @@
             <label class="_heading _required_fx1 _label ashby-application-form-question-title" for="_systemfield_email">Email</label>
             <div><input placeholder="hello@example.com..." name="_systemfield_email" required id="_systemfield_email" type="email" class="_input ashby-application-form-input-text"></div>
           </div>
-          <div data-field-path="9a0b1c2d-0000-4000-8000-0000000000d1" data-field-entry-id="9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2">
+          <div data-field-path="9a0b1c2d-0000-4000-8000-0000000000d1" data-field-entry-id="RENDER_9a0b1c2d-0000-4000-8000-0000000000d1">
             <fieldset class="_container _fieldEntry ashby-application-form-input-radio-group">
               <label class="_heading _required_fx1 _label ashby-application-form-question-title" for="9a0b1c2d-0000-4000-8000-0000000000d1">Visa Support</label>
               <div class="_description ashby-application-form-question-description"><p>Do you require any visa support to work in the U.S.?</p></div>
-              <div class="_option ashby-application-form-input-radio-group-option"><span class="_container"><input type="radio" class="ashby-application-form-input-radio-group-option-radio" id="9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2-labeled-radio-0" name="9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2"></span><label for="9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2-labeled-radio-0">Yes</label></div>
-              <div class="_option ashby-application-form-input-radio-group-option"><span class="_container"><input type="radio" class="ashby-application-form-input-radio-group-option-radio" id="9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2-labeled-radio-1" name="9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2"></span><label for="9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2-labeled-radio-1">No</label></div>
+              <div class="_option ashby-application-form-input-radio-group-option"><span class="_container_fx2" data-disabled="false"><span class="_circle_fx2"></span><input type="radio" class="ashby-application-form-input-radio-group-option-radio" id="RENDER_9a0b1c2d-0000-4000-8000-0000000000d1-labeled-radio-0" name="RENDER_9a0b1c2d-0000-4000-8000-0000000000d1"></span><label for="RENDER_9a0b1c2d-0000-4000-8000-0000000000d1-labeled-radio-0" class="_label ashby-application-form-input-radio-group-option-label">Yes</label></div>
+              <div class="_option ashby-application-form-input-radio-group-option"><span class="_container_fx2" data-disabled="false"><span class="_circle_fx2"></span><input type="radio" class="ashby-application-form-input-radio-group-option-radio" id="RENDER_9a0b1c2d-0000-4000-8000-0000000000d1-labeled-radio-1" name="RENDER_9a0b1c2d-0000-4000-8000-0000000000d1"></span><label for="RENDER_9a0b1c2d-0000-4000-8000-0000000000d1-labeled-radio-1" class="_label ashby-application-form-input-radio-group-option-label">No</label></div>
             </fieldset>
           </div>
-          <div data-field-path="1c2d3e4f-0000-4000-8000-0000000000d3" data-field-entry-id="1c2d3e4f-0000-4000-8000-0000000000d3_2d3e4f50-0000-4000-8000-0000000000d4">
+          <div data-field-path="1c2d3e4f-0000-4000-8000-0000000000d3" data-field-entry-id="RENDER_1c2d3e4f-0000-4000-8000-0000000000d3">
             <fieldset class="_container _fieldEntry ashby-application-form-input-radio-group">
               <label class="_heading _label ashby-application-form-question-title" for="1c2d3e4f-0000-4000-8000-0000000000d3">Preferred team</label>
-              <div class="_option ashby-application-form-input-radio-group-option"><span class="_container"><input type="radio" class="ashby-application-form-input-radio-group-option-radio" id="1c2d3e4f-0000-4000-8000-0000000000d3_2d3e4f50-0000-4000-8000-0000000000d4-labeled-radio-0" name="1c2d3e4f-0000-4000-8000-0000000000d3_2d3e4f50-0000-4000-8000-0000000000d4"></span><label for="1c2d3e4f-0000-4000-8000-0000000000d3_2d3e4f50-0000-4000-8000-0000000000d4-labeled-radio-0">Autonomy</label></div>
-              <div class="_option ashby-application-form-input-radio-group-option"><span class="_container"><input type="radio" class="ashby-application-form-input-radio-group-option-radio" id="1c2d3e4f-0000-4000-8000-0000000000d3_2d3e4f50-0000-4000-8000-0000000000d4-labeled-radio-1" name="1c2d3e4f-0000-4000-8000-0000000000d3_2d3e4f50-0000-4000-8000-0000000000d4"></span><label for="1c2d3e4f-0000-4000-8000-0000000000d3_2d3e4f50-0000-4000-8000-0000000000d4-labeled-radio-1">Controls</label></div>
+              <div class="_option ashby-application-form-input-radio-group-option"><span class="_container_fx2" data-disabled="false"><span class="_circle_fx2"></span><input type="radio" class="ashby-application-form-input-radio-group-option-radio" id="RENDER_1c2d3e4f-0000-4000-8000-0000000000d3-labeled-radio-0" name="RENDER_1c2d3e4f-0000-4000-8000-0000000000d3"></span><label for="RENDER_1c2d3e4f-0000-4000-8000-0000000000d3-labeled-radio-0" class="_label ashby-application-form-input-radio-group-option-label">Autonomy</label></div>
+              <div class="_option ashby-application-form-input-radio-group-option"><span class="_container_fx2" data-disabled="false"><span class="_circle_fx2"></span><input type="radio" class="ashby-application-form-input-radio-group-option-radio" id="RENDER_1c2d3e4f-0000-4000-8000-0000000000d3-labeled-radio-1" name="RENDER_1c2d3e4f-0000-4000-8000-0000000000d3"></span><label for="RENDER_1c2d3e4f-0000-4000-8000-0000000000d3-labeled-radio-1" class="_label ashby-application-form-input-radio-group-option-label">Controls</label></div>
             </fieldset>
           </div>
-          <div data-field-path="3e4f5061-0000-4000-8000-0000000000d5" data-field-entry-id="3e4f5061-0000-4000-8000-0000000000d5_4f506172-0000-4000-8000-0000000000d6">
+          <div data-field-path="3e4f5061-0000-4000-8000-0000000000d5" data-field-entry-id="RENDER_3e4f5061-0000-4000-8000-0000000000d5">
             <fieldset class="_container _fieldEntry ashby-application-form-input-checkbox-group">
               <label class="_heading _required_fx1 _label ashby-application-form-question-title" for="3e4f5061-0000-4000-8000-0000000000d5">Which of these tools have you used?</label>
-              <div class="_option ashby-application-form-input-checkbox-group-option"><span class="ashby-application-form-input-checkbox-group-option-checkbox"><input type="checkbox" id="3e4f5061-0000-4000-8000-0000000000d5_4f506172-0000-4000-8000-0000000000d6-labeled-checkbox-0" name="ROS"></span><span class="ashby-application-form-input-checkbox-group-option-label"><label for="3e4f5061-0000-4000-8000-0000000000d5_4f506172-0000-4000-8000-0000000000d6-labeled-checkbox-0">ROS</label></span></div>
-              <div class="_option ashby-application-form-input-checkbox-group-option"><span class="ashby-application-form-input-checkbox-group-option-checkbox"><input type="checkbox" id="3e4f5061-0000-4000-8000-0000000000d5_4f506172-0000-4000-8000-0000000000d6-labeled-checkbox-1" name="Git"></span><span class="ashby-application-form-input-checkbox-group-option-label"><label for="3e4f5061-0000-4000-8000-0000000000d5_4f506172-0000-4000-8000-0000000000d6-labeled-checkbox-1">Git</label></span></div>
-              <div class="_option ashby-application-form-input-checkbox-group-option"><span class="ashby-application-form-input-checkbox-group-option-checkbox"><input type="checkbox" id="3e4f5061-0000-4000-8000-0000000000d5_4f506172-0000-4000-8000-0000000000d6-labeled-checkbox-2" name="Docker"></span><span class="ashby-application-form-input-checkbox-group-option-label"><label for="3e4f5061-0000-4000-8000-0000000000d5_4f506172-0000-4000-8000-0000000000d6-labeled-checkbox-2">Docker</label></span></div>
+              <div class="_option ashby-application-form-input-checkbox-group-option"><span class="ashby-application-form-input-checkbox-group-option-checkbox"><input type="checkbox" id="RENDER_3e4f5061-0000-4000-8000-0000000000d5-labeled-checkbox-0" name="ROS"></span><span class="ashby-application-form-input-checkbox-group-option-label"><label for="RENDER_3e4f5061-0000-4000-8000-0000000000d5-labeled-checkbox-0">ROS</label></span></div>
+              <div class="_option ashby-application-form-input-checkbox-group-option"><span class="ashby-application-form-input-checkbox-group-option-checkbox"><input type="checkbox" id="RENDER_3e4f5061-0000-4000-8000-0000000000d5-labeled-checkbox-1" name="Git"></span><span class="ashby-application-form-input-checkbox-group-option-label"><label for="RENDER_3e4f5061-0000-4000-8000-0000000000d5-labeled-checkbox-1">Git</label></span></div>
+              <div class="_option ashby-application-form-input-checkbox-group-option"><span class="ashby-application-form-input-checkbox-group-option-checkbox"><input type="checkbox" id="RENDER_3e4f5061-0000-4000-8000-0000000000d5-labeled-checkbox-2" name="Docker"></span><span class="ashby-application-form-input-checkbox-group-option-label"><label for="RENDER_3e4f5061-0000-4000-8000-0000000000d5-labeled-checkbox-2">Docker</label></span></div>
             </fieldset>
           </div>
         </div>
@@ -72,15 +91,47 @@
     <textarea id="g-recaptcha-response-100000" name="g-recaptcha-response" class="g-recaptcha-response" style="display:none"></textarea>
   </div>
   <script>
+    // A new form render id on every load; every field entry is "<render id>_<field path>".
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    const RENDER = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+    for (const element of document.querySelectorAll("[data-field-entry-id], [id^='RENDER_'], [name^='RENDER_'], [for^='RENDER_']")) {
+      for (const attribute of ["data-field-entry-id", "id", "name", "for"]) {
+        const value = element.getAttribute(attribute);
+        if (value && value.startsWith("RENDER_")) element.setAttribute(attribute, `${RENDER}_${value.slice("RENDER_".length)}`);
+      }
+    }
     const params = new URLSearchParams(location.search);
     const NETWORK = params.get("network");
-    const state = { submitClicks: 0, responseStatus: null, radios: {} };
+    const STUCK = params.get("stuck") === "1";
+    // `radios` maps a field path to the chosen option's label: Ashby's own state.
+    const state = { submitClicks: 0, responseStatus: null, radios: {}, render: RENDER };
     window.fixture = state;
-    document.addEventListener("change", (event) => {
-      if (event.target.type !== "radio") return;
-      state.radios[event.target.name] = document.querySelector(`label[for="${CSS.escape(event.target.id)}"]`).textContent;
+    const VISA = "9a0b1c2d-0000-4000-8000-0000000000d1";
+    const pathOf = (element) => element.closest("[data-field-path]").getAttribute("data-field-path");
+    const optionLabel = (input) => document.querySelector(`label[for="${CSS.escape(input.id)}"]`).textContent;
+    // The page always shows Ashby's state: each option's radio, its circle and the option carry it.
+    const render = () => {
+      for (const input of document.querySelectorAll(".ashby-application-form-input-radio-group-option input[type='radio']")) {
+        const on = state.radios[pathOf(input)] === optionLabel(input);
+        input.checked = on;
+        for (const holder of [input.closest(".ashby-application-form-input-radio-group-option"), input.parentElement]) {
+          if (on) holder.setAttribute("data-checked", ""); else holder.removeAttribute("data-checked");
+        }
+      }
+    };
+    document.addEventListener("click", (event) => {
+      const input = event.target;
+      if (!(input instanceof HTMLInputElement) || input.type !== "radio" || !input.closest(".ashby-application-form-input-radio-group-option")) return;
+      const path = pathOf(input);
+      const label = optionLabel(input);
+      if (!(STUCK && path === VISA)) {
+        // onClick: a click on the chosen option clears it; onChange: a newly checked option is chosen.
+        if (state.radios[path] === label) delete state.radios[path];
+        else if (input.checked) state.radios[path] = label;
+      }
+      render();
     });
-    const VISA = "9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2";
     document.querySelector(".ashby-application-form-submit-button").addEventListener("click", async () => {
       state.submitClicks += 1;
       // reCAPTCHA Enterprise's execute(): a token request first.
@@ -100,7 +151,7 @@
             variables: {
               organizationHostedJobsPageName: "fixturerobotics",
               jobPostingId: "00000000-0000-4000-8000-0000000000a3",
-              formRenderIdentifier: "fixture-render",
+              formRenderIdentifier: RENDER,
               actionIdentifier: "fixture-action",
               recaptchaToken: "UNIVERSAL_ENT===fixture-token-7f3a",
               deviceFingerprint: "fixture-fingerprint-9c1e",

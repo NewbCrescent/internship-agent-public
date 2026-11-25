@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { promptSearchTerms } from "@internship-agent/domain";
+import { promptSearchTerms, type FillDecision } from "@internship-agent/domain";
 
 import {
+  absentDecisionFields,
+  ashbyFieldPath,
+  choicesNotTaken,
+  formChangedPause,
+  FORM_CHANGED_FIELD,
   ASHBY_ACCEPTED_CONFIRMATION,
   ASHBY_BLOCKED_MESSAGE,
   ASHBY_RECAPTCHA_REJECTED,
@@ -1859,7 +1864,8 @@ describe("known-answer gaps from the 2026-11-25 pass", () => {
 
 describe("Ashby's submit on the network (Track 22)", () => {
   const FAST = { timeoutMs: 50, pollMs: 1 };
-  const ENTRY = "9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2";
+  const ENTRY = "0b1c2d3e-0000-4000-8000-0000000000d2_9a0b1c2d-0000-4000-8000-0000000000d1";
+  const ENTRY_PATH = "9a0b1c2d-0000-4000-8000-0000000000d1";
   const MISSING = "Missing entry for required field: Visa Support";
   const PERSONAL = ["Jordan Rivera", "jordan.rivera@example.test", "+1 555 010 0199", "tok-5c2d", "fp-77aa", "UNIVERSAL_ENT"];
   const GRAPHQL = (op: string) => `https://jobs.ashbyhq.com/api/non-user-graphql?op=${op}`;
@@ -2016,7 +2022,7 @@ describe("Ashby's submit on the network (Track 22)", () => {
     expect(ashbyNetworkVerdict(blocked)).toBe("blocked");
     expect(ashbyNetworkVerdict(fieldErrors)).toBe("form-errors");
     expect(ashbyNetworkVerdict(network([submit({ status: 500, errorMessages: ["Internal error"] })]))).toBe("none");
-    expect(ashbyNetworkInvalidFields(fieldErrors)).toEqual([{ ref: ENTRY, label: "", error: MISSING }]);
+    expect(ashbyNetworkInvalidFields(fieldErrors)).toEqual([{ ref: ENTRY_PATH, label: "", error: MISSING }]);
     expect(ashbyNetworkInvalidFields(network([submit({ resultType: "FormRender", formErrorMessages: ["Something is missing"] })]))).toEqual([{ ref: null, label: "", error: "Something is missing" }]);
     expect(ashbyNetworkInvalidFields(null)).toEqual([]);
     expect(ashbySubmitSentAfter(null, 1)).toBe(false);
@@ -2084,7 +2090,7 @@ describe("Ashby's submit on the network (Track 22)", () => {
     const error = await submitAndConfirm(page, FAST).then(() => null, (caught: unknown) => caught);
     expect(error).toBeInstanceOf(SubmissionNeedsInput);
     const needsInput = error as SubmissionNeedsInput;
-    expect(needsInput.invalidFields).toEqual([{ ref: ENTRY, label: "", error: MISSING }]);
+    expect(needsInput.invalidFields).toEqual([{ ref: ENTRY_PATH, label: "", error: MISSING }]);
     expect(needsInput.message).toBe(ashbyFormErrorsMessage(1));
     expect(needsInput.evidence.outcome).toBe("field-errors");
     expect(clicks()).toBe(1);
@@ -2112,5 +2118,74 @@ describe("Ashby's submit on the network (Track 22)", () => {
     const error = await submitAndConfirm(page, FAST).then(() => null, (caught: unknown) => caught);
     expect(error).toBeInstanceOf(SubmissionUnconfirmed);
     expect((error as SubmissionUnconfirmed).evidence.ashbyNetwork).toEqual(serverError);
+  });
+});
+
+describe("Read-back before the submit click (Track 25)", () => {
+  const decision = (fieldId: string, action: FillDecision["action"], value: string | null): FillDecision =>
+    ({ fieldId, action, value, basis: null, reason: "fixture", pause: null });
+  const CONTROLS: RawControl[] = [
+    control({ tag: "input", type: "radio", id: "club", label: "Which student club do you belong to?", options: ["Robotics", "Chess"] }),
+    control({ tag: "select", id: "team", label: "Team", options: ["X", "Y"] }),
+    control({ tag: "input", type: "text", id: "text", label: "Anything else?" })
+  ];
+  const form = recognizeForm("https://example.test/apply", "Apply", CONTROLS);
+  const decisions = [decision("club", "choose", "Chess"), decision("team", "choose", "X"), decision("text", "fill", "y")];
+  const shownWith = (value: string | undefined, drop = false) =>
+    recognizeFields(CONTROLS.filter((entry) => !(drop && entry.id === "club")).map((entry) => (entry.id === "club" ? { ...entry, value } : entry)));
+  const pageShowing = (read: () => Promise<ReturnType<typeof recognizeFields>>) => ({ readFields: read }) as unknown as BrowserPage;
+
+  it("maps an Ashby field-entry id to its field path", () => {
+    expect(ashbyFieldPath("73bb726a-b0f7-4639-9e72-3a04cd646a5e__systemfield_name")).toBe("_systemfield_name");
+    expect(ashbyFieldPath("6a876f10-4249-48be-af03-e76978d9139a_901b3122-65bd-4c58-b252-24dc79e8b108")).toBe("901b3122-65bd-4c58-b252-24dc79e8b108");
+    expect(ashbyFieldPath("survey-1")).toBe("survey-1");
+    expect(ashbyFieldPath(null)).toBeNull();
+  });
+
+  it("names the value decisions whose field the form no longer shows", () => {
+    const small = recognizeForm("https://example.test/apply", "Apply", [
+      control({ tag: "input", type: "text", id: "a", label: "First answer" }),
+      control({ tag: "input", type: "radio", id: "b", label: "Second answer", options: ["Yes", "No"] })
+    ]);
+    expect(absentDecisionFields(small, [
+      decision("a", "fill", "x"), decision("c", "choose", "Yes"), decision("d", "upload", null),
+      decision("e", "pause", null), decision("f", "skip", null), decision("g", "keep", null)
+    ])).toEqual(["c", "d"]);
+  });
+
+  it("holds a changed form with one safeguard pause", () => {
+    const held = formChangedPause(2);
+    expect(held.pause).toMatchObject({ fieldId: FORM_CHANGED_FIELD, safeguard: true, status: "open", sensitive: false });
+    expect(held.pause.question.startsWith("2 answer(s) the approval covered are no longer on the application form")).toBe(true);
+    expect(held.decision.action).toBe("pause");
+    expect(held.decision.pause?.safeguard).toBe(true);
+  });
+
+  it("passes a radio choice the page shows as made", async () => {
+    expect(await choicesNotTaken(pageShowing(async () => shownWith("Chess")), form, decisions)).toEqual([]);
+    expect(await choicesNotTaken(pageShowing(async () => shownWith("chess ")), form, decisions)).toEqual([]);
+  });
+
+  it("reports a radio choice the page does not show as made", async () => {
+    const notTaken = [{ fieldId: "club", reason: "the page did not take the choice" }];
+    expect(await choicesNotTaken(pageShowing(async () => shownWith(undefined)), form, decisions)).toEqual(notTaken);
+    expect(await choicesNotTaken(pageShowing(async () => shownWith("Robotics")), form, decisions)).toEqual(notTaken);
+  });
+
+  it("reports a radio gone from the page or a read that fails", async () => {
+    expect(await choicesNotTaken(pageShowing(async () => shownWith(undefined, true)), form, decisions)).toEqual([{ fieldId: "club", reason: "it is no longer on the page" }]);
+    expect(await choicesNotTaken(pageShowing(async () => { throw new Error("detached"); }), form, decisions)).toEqual([{ fieldId: "club", reason: "the agent could not read the choice back" }]);
+  });
+
+  it("reads nothing back without readFields, and never reads a list back", async () => {
+    expect(await choicesNotTaken({} as unknown as BrowserPage, form, decisions)).toEqual([]);
+    const result = await choicesNotTaken(pageShowing(async () => shownWith(undefined)), form, decisions);
+    expect(result.map((entry) => entry.fieldId)).toEqual(["club"]);
+    expect(await choicesNotTaken(pageShowing(async () => shownWith(undefined)), form, [decision("team", "choose", "X")])).toEqual([]);
+  });
+
+  it("compares a clipped option by its prefix", async () => {
+    const clipped = [decision("club", "choose", "A".repeat(199) + "…")];
+    expect(await choicesNotTaken(pageShowing(async () => shownWith("A".repeat(250))), form, clipped)).toEqual([]);
   });
 });

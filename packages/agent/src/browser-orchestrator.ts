@@ -29,16 +29,19 @@ import {
   type CurrentPackage
 } from "@internship-agent/db";
 import {
+  absentDecisionFields,
   applicationWallKind,
   applicationWallReason,
   applyDecisions,
   atsFlowFor,
   capturePostSubmitEvidence,
   challengePause,
+  choicesNotTaken,
   classifyAts,
   classifyFieldRole,
   createApplicationPage,
   createWorkdayPage,
+  formChangedPause,
   hasApplicationFields,
   hasIcimsSteps,
   hasJobviteConsent,
@@ -1489,6 +1492,19 @@ export async function submitBrowserRun(
   let postSubmit: PostSubmitEvidence | null = null;
   try {
     form = await recognizeCurrentForm(page);
+    // Every answer the approval covered must still be on the reloaded form; applyDecisions would skip one that is not.
+    const absent = absentDecisionFields(form, run.decisions);
+    if (absent.length > 0) {
+      const held = formChangedPause(absent.length);
+      updateBrowserRun(database, runId, {
+        status: "paused-needs-input",
+        submissionApprovedAt: null,
+        decisions: [...run.decisions.filter((decision) => decision.fieldId !== held.decision.fieldId), held.decision],
+        pauses: [...run.pauses.filter((pause) => pause.fieldId !== held.pause.fieldId), held.pause]
+      });
+      heldForInput = true;
+      throw new SubmissionHeld(held.pause.question);
+    }
     const uploadPathFor = await prepareUploads(
       database,
       dataDir,
@@ -1507,6 +1523,18 @@ export async function submitBrowserRun(
       const fields = new Map(form.fields.map((field) => [field.id, field.label]));
       const labels = unfilled.map((entry) => `"${fields.get(entry.fieldId) ?? entry.fieldId}"`).join(", ");
       throw new SubmissionHeld(`Before the submit click the agent could not fill ${unfilled.length} field(s) (${labels}); the application is held for you.`.slice(0, 600));
+    }
+    // Read back before the click: every choice on a radio question must show as made (Track 25).
+    const notTaken = await choicesNotTaken(page, form, run.decisions);
+    if (notTaken.length > 0) {
+      const filled = pauseUnfilled(form, run.decisions, run.pauses, notTaken);
+      updateBrowserRun(database, runId, {
+        status: "paused-needs-input", submissionApprovedAt: null, decisions: filled.decisions, pauses: filled.pauses
+      });
+      heldForInput = true;
+      const fields = new Map(form.fields.map((field) => [field.id, field.label]));
+      const labels = notTaken.map((entry) => `"${fields.get(entry.fieldId) ?? entry.fieldId}"`).join(", ");
+      throw new SubmissionHeld(`Before the submit click ${labels} did not take the choice, so nothing was clicked; the application is held for you.`.slice(0, 600));
     }
     // A widget drawn while the form filled (Dover's Turnstile renders late) is read again right before the click.
     const lateChallenge = page.visibleChallenge ? await page.visibleChallenge() : null;

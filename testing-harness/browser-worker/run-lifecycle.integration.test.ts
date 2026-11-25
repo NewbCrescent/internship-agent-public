@@ -26,6 +26,8 @@ import {
 } from "@internship-agent/db";
 import { AUTO_SUBMIT_EVENT, type BrowserField } from "@internship-agent/domain";
 import {
+  FORM_CHANGED_FIELD,
+  recognizeFields,
   SubmissionChallenged,
   SubmissionCodeNotFound,
   SubmissionHeld,
@@ -105,6 +107,13 @@ function disposableDataDir(): string {
 function playwrightTimeout(): Error {
   return Object.assign(new Error("locator.fill: Timeout 30000ms exceeded. waiting for getByLabel('Start typing...').first()"), { name: "TimeoutError" });
 }
+
+/** A text question the facts answer and a required radio set the candidate answers (Track 25's read-back). */
+const CLUB_CONTROLS: RawControl[] = [
+  { tag: "input", type: "text", id: "q1", label: "What is your available start date?", required: true },
+  { tag: "input", type: "radio", id: "club", label: "Which student club do you belong to?", required: true, options: ["Robotics", "Chess"] },
+  { tag: "button", label: "Submit application" }
+];
 
 /** In-memory stand-in for a page: records fills, never touches a browser. */
 function fakePage(overrides: {
@@ -420,6 +429,77 @@ describe("browser run lifecycle", () => {
     expect(run.status).toBe("paused-needs-input");
     expect(run.submissionApprovedAt).toBeNull();
     expect(run.pauses).toEqual([expect.objectContaining({ fieldId: "q1", status: "open" })]);
+    expect((database.prepare("SELECT status FROM jobs WHERE id = ?").get(jobId) as { status: string }).status).not.toBe("SUBMITTED");
+    database.close();
+  });
+
+  /** Starts a run on CLUB_CONTROLS, answers the club pause with "chess", continues, and approves the submission. */
+  async function approvedClubRun(database: DatabaseSync, dataDir: string): Promise<{ jobId: string; runId: string }> {
+    const jobId = approvedJobId(database);
+    const started = await startBrowserRun(jobId, "https://app.joinhandshake.com/apply/900001", { database, dataDir, openPage: async () => fakePage({ controls: CLUB_CONTROLS }) });
+    expect(started.run.pauses.map((pause) => pause.fieldId)).toContain("club");
+    await answerRunPause(started.run.id, "club", "chess", false, { database });
+    const continued = await continueBrowserRun(started.run.id, { database, dataDir, openPage: async () => fakePage({ controls: CLUB_CONTROLS }) });
+    expect(continued.run.status).toBe("awaiting-approval");
+    expect(continued.run.decisions.find((decision) => decision.fieldId === "club")).toMatchObject({ action: "choose", value: "Chess" });
+    approveRunSubmission(started.run.id, undefined, { database });
+    return { jobId, runId: started.run.id };
+  }
+
+  it("holds a run whose radio choice does not read back before the submit click: nothing is clicked and the approval is withdrawn", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const { jobId, runId } = await approvedClubRun(database, dataDir);
+    const flag = { clicked: false };
+    // The page took nothing: the radio set shows no option chosen.
+    const page = { ...fakePage({ controls: CLUB_CONTROLS, submitted: flag }), readFields: async () => recognizeFields(CLUB_CONTROLS) };
+    const failure = await submitBrowserRun(runId, { database, dataDir, openPage: async () => page }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(SubmissionHeld);
+    expect(String((failure as Error).message)).toContain(`"Which student club do you belong to?" did not take the choice`);
+    expect(flag.clicked).toBe(false);
+    const run = getBrowserRuns(jobId, database)[0]!;
+    expect(run.status).toBe("paused-needs-input");
+    expect(run.submissionApprovedAt).toBeNull();
+    expect(run.pauses).toEqual(expect.arrayContaining([expect.objectContaining({
+      fieldId: "club",
+      status: "open",
+      question: 'The agent could not fill "Which student club do you belong to?": the page did not take the choice. Answer it here, or fill it in the browser.'
+    })]));
+    expect((database.prepare("SELECT status FROM jobs WHERE id = ?").get(jobId) as { status: string }).status).not.toBe("SUBMITTED");
+    database.close();
+
+    // Positive control: the same run whose page shows the choice made submits.
+    const shownDatabase = disposableDatabase();
+    const shownDataDir = disposableDataDir();
+    const shown = await approvedClubRun(shownDatabase, shownDataDir);
+    const shownFlag = { clicked: false };
+    const chosen = CLUB_CONTROLS.map((control) => (control.id === "club" ? { ...control, value: "Chess" } : control));
+    const shownPage = { ...fakePage({ controls: CLUB_CONTROLS, submitted: shownFlag }), readFields: async () => recognizeFields(chosen) };
+    await submitBrowserRun(shown.runId, { database: shownDatabase, dataDir: shownDataDir, openPage: async () => shownPage });
+    expect(getBrowserRuns(shown.jobId, shownDatabase)[0]!.status).toBe("submitted");
+    expect(shownFlag.clicked).toBe(true);
+    shownDatabase.close();
+  });
+
+  it("holds a run whose approved answer is no longer on the reloaded form, before anything is typed", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const { jobId, runId } = await approvedClubRun(database, dataDir);
+    const flag = { clicked: false };
+    // The radio set's id changed between loads, as Ashby's did.
+    const page = fakePage({ controls: CLUB_CONTROLS.map((control) => (control.id === "club" ? { ...control, id: "club-reloaded" } : control)), submitted: flag });
+    const failure = await submitBrowserRun(runId, { database, dataDir, openPage: async () => page }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(SubmissionHeld);
+    expect(String((failure as Error).message).startsWith("1 answer(s) the approval covered are no longer on the application form")).toBe(true);
+    expect(flag.clicked).toBe(false);
+    expect(page.filled.size).toBe(0);
+    expect(page.uploads.size).toBe(0);
+    const run = getBrowserRuns(jobId, database)[0]!;
+    expect(run.status).toBe("paused-needs-input");
+    expect(run.submissionApprovedAt).toBeNull();
+    expect(run.pauses).toEqual(expect.arrayContaining([expect.objectContaining({ fieldId: FORM_CHANGED_FIELD, safeguard: true, status: "open" })]));
+    expect(run.decisions.find((decision) => decision.fieldId === FORM_CHANGED_FIELD)).toMatchObject({ action: "pause" });
+    expect(run.decisions.find((decision) => decision.fieldId === "club")).toMatchObject({ action: "choose", value: "Chess" });
     expect((database.prepare("SELECT status FROM jobs WHERE id = ?").get(jobId) as { status: string }).status).not.toBe("SUBMITTED");
     database.close();
   });

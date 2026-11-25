@@ -32,7 +32,7 @@ import {
 import { classifyFieldRole, isSensitiveRole } from "./ats/field-roles";
 import { matchSuggestion } from "./autofill-planner";
 import { findVisibleChallengeIn, isTurnstileFrameSource, SubmissionChallenged, SubmissionRefused, type VisibleChallenge } from "./challenge";
-import { isSubmitControl, readNewConfirmation, recognizeForm, waitForStableControls, type RawControl } from "./form-recognition";
+import { isSubmitControl, readableText, readNewConfirmation, recognizeFields, recognizeForm, waitForStableControls, type RawControl } from "./form-recognition";
 import {
   capturePostSubmitEvidence,
   classifyUnconfirmed,
@@ -74,6 +74,11 @@ export type BrowserPage = {
   close(): Promise<void>;
   /** Fields the page marks invalid, read from the DOM; [] when none. */
   invalidFields?(): Promise<InvalidField[]>;
+  /**
+   * The form's fields as the page shows them now, read without opening any list
+   * (the read-back before a submit click); same ids as recognizeCurrentForm.
+   */
+  readFields?(): Promise<BrowserField[]>;
   /** Whether the terminal submit control is still shown. */
   submitControlShown?(): Promise<boolean>;
   /**
@@ -190,6 +195,76 @@ export function unfilledPause(field: BrowserField, reason: string): { decision: 
       ...(field.options?.length ? { options: field.options } : {})
     }
   };
+}
+
+/** The safeguard pause's field id when approved answers are no longer on the form at the submit click. */
+export const FORM_CHANGED_FIELD = "form-changed";
+
+/** Decisions that put a value on the page. */
+const VALUE_ACTIONS: ReadonlySet<FillDecision["action"]> = new Set(["fill", "choose", "check", "upload"]);
+
+/**
+ * Field ids of decisions that put a value on the page but whose field the form does not show. Before the submit
+ * click such a decision would be skipped silently (Track 25: Ashby renamed a single-choice question on every load).
+ */
+export function absentDecisionFields(form: RecognizedForm, decisions: FillDecision[]): string[] {
+  const present = new Set(form.fields.map((field) => field.id));
+  return decisions.filter((decision) => VALUE_ACTIONS.has(decision.action) && !present.has(decision.fieldId)).map((decision) => decision.fieldId);
+}
+
+/** The safeguard pause that holds a run whose approved answers are no longer on the form; nothing is clicked. */
+export function formChangedPause(count: number): { decision: FillDecision; pause: PauseRecord } {
+  const question = `${count} answer(s) the approval covered are no longer on the application form, so nothing was clicked. Check the application in your browser, or cancel this run and start it again.`.slice(0, 500);
+  return {
+    decision: { fieldId: FORM_CHANGED_FIELD, action: "pause", value: null, basis: null, reason: question, pause: { question, key: null, scope: null, safeguard: true } },
+    pause: {
+      fieldId: FORM_CHANGED_FIELD, label: "Application form", question, suggestedKey: null, suggestedScope: null,
+      safeguard: true, sensitive: false, upload: false, status: "open", answer: null, draft: null
+    }
+  };
+}
+
+/** Option text compared as the page shows it: invisible characters dropped, spaces collapsed, case ignored. */
+function choiceText(value: string | null | undefined): string {
+  return readableText(value).replace(/\s+/g, " ").trim().toLocaleLowerCase("en-US");
+}
+
+/**
+ * Read-back before the submit click: every `choose` on a radio question (native radios, Ashby's single-choice
+ * questions and Yes/No pairs) must show its option as chosen, read without opening any list
+ * (`BrowserPage.readFields`). A field gone from the page, a different or no option shown, or a read that fails
+ * counts as not taken. Lists, check boxes, and type-aheads are not read back. A page without `readFields` reads
+ * nothing back. Never reports a value, only the field and a plain reason.
+ */
+export async function choicesNotTaken(page: BrowserPage, form: RecognizedForm, decisions: FillDecision[]): Promise<UnfilledField[]> {
+  if (!page.readFields) return [];
+  const planned = new Map(form.fields.map((field) => [field.id, field]));
+  const choices = decisions.filter((decision) => decision.action === "choose" && decision.value !== null && planned.get(decision.fieldId)?.kind === "radio");
+  if (choices.length === 0) return [];
+  let shown: Map<string, BrowserField> | null;
+  try {
+    shown = new Map((await page.readFields()).map((field) => [field.id, field]));
+  } catch {
+    shown = null;
+  }
+  const notTaken: UnfilledField[] = [];
+  for (const decision of choices) {
+    if (!shown) {
+      notTaken.push({ fieldId: decision.fieldId, reason: "the agent could not read the choice back" });
+      continue;
+    }
+    const field = shown.get(decision.fieldId);
+    if (!field) {
+      notTaken.push({ fieldId: decision.fieldId, reason: "it is no longer on the page" });
+      continue;
+    }
+    const wanted = choiceText(decision.value);
+    const current = choiceText(field.currentValue);
+    // Recognition clips a long option with "…"; the shown value is compared by that prefix.
+    const same = current === wanted || (wanted.endsWith("…") && current.startsWith(wanted.slice(0, -1).trimEnd()));
+    if (!same) notTaken.push({ fieldId: decision.fieldId, reason: "the page did not take the choice" });
+  }
+  return notTaken;
 }
 
 /**
@@ -583,7 +658,9 @@ export function createPlaywrightPage(page: Page): BrowserPage {
       }
       if (field.kind === "radio" || field.kind === "checkbox") {
         // Radios (and checkboxes outside a group element) sharing a name are one question: the field id is that name.
-        const named = within().locator(`input[type="${field.kind}"][name="${cssValue(field.id)}"]`);
+        const named = field.kind === "radio"
+          ? within().locator(`input[type="radio"][name="${cssValue(field.id)}"], input[type="radio"][data-ia-radio-group="${cssValue(field.id)}"]`)
+          : within().locator(`input[type="checkbox"][name="${cssValue(field.id)}"]`);
         const byId = field.kind === "checkbox" ? await within().locator(idSelector(field.id)).count().catch(() => 0) : 0;
         if (byId === 0 && (await named.count().catch(() => 0)) > 0) {
           if (field.kind === "radio") {
@@ -592,6 +669,22 @@ export function createPlaywrightPage(page: Page): BrowserPage {
             const count = await target.count();
             if (count === 0) throw new FieldUnfillable("the option was not found");
             if (count > 1) throw new FieldUnfillable("more than one option matched");
+            // Ashby's single-choice question: React draws the choice from its own state (the option's `data-checked`),
+            // and a click on the option already chosen clears it. Click the option's own label once, then wait for
+            // Ashby to show it chosen; never the DOM fallback below (Track 25).
+            const ashbyOption = target.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' ashby-application-form-input-radio-group-option ')][1]");
+            if ((await ashbyOption.count()) === 1) {
+              if ((await ashbyOption.getAttribute("data-checked")) !== null) return;
+              const radioId = await target.getAttribute("id");
+              const label = radioId ? within().locator(`label[for="${cssValue(radioId)}"]`) : null;
+              if (label && (await label.count()) === 1) await label.click({ timeout: 10_000 });
+              else await target.click({ timeout: 10_000 });
+              for (let attempt = 0; attempt < 10; attempt += 1) {
+                if ((await ashbyOption.getAttribute("data-checked").catch(() => null)) !== null) return;
+                await page.waitForTimeout(200);
+              }
+              throw new FieldUnfillable("the site did not keep the choice");
+            }
             try {
               await target.check({ timeout: 10_000 });
             } catch {
@@ -678,6 +771,10 @@ export function createPlaywrightPage(page: Page): BrowserPage {
       await page.screenshot({ path, fullPage: options?.fullPage ?? false });
     },
     close: () => page.close(),
+    readFields: async () => {
+      await ensureNameShim(page);
+      return recognizeFields(await root().evaluate(collectControlsIn));
+    },
     invalidFields: async () => {
       try {
         await ensureNameShim(page);
@@ -1658,6 +1755,11 @@ export function collectControlsIn(root: Element): RawControl[] {
       // Radios sharing a name are one choice question.
       if (namesDone.has(`radio:${input.name}`)) continue;
       namesDone.add(`radio:${input.name}`);
+      // Ashby names a single-choice question's radios after its field entry, "<form render id>_<field path>", and the
+      // render id changes on every page load: the field path is the question's stable id (Track 25).
+      const entry = input.closest("[data-field-entry-id]");
+      const path = entry?.getAttribute("data-field-path") ?? "";
+      const fieldId = path && entry?.getAttribute("data-field-entry-id") === input.name && input.name.endsWith(`_${path}`) ? path : input.name;
       const radios = named("radio", input.name);
       const group = input.closest('fieldset, [role="radiogroup"]');
       const consentBlock = input.closest(TEXTING_CONSENT);
@@ -1668,16 +1770,22 @@ export function collectControlsIn(root: Element): RawControl[] {
       const rawLabel = textingConsentQuestion(input)
         || (group ? textOf(group.querySelector("legend")) || byIds(group.getAttribute("aria-labelledby")) || collapse(group.getAttribute("aria-label")) || textOf(titleLabel) || "" : "")
         || questionLabelNear(input) || nameLabel(input.name);
-      const checked = radios.find((radio) => radio.checked);
+      // Ashby draws a chosen option from its own state (the option's `data-checked`); a DOM-only `checked` is not its answer.
+      const chosen = (radio: HTMLInputElement): boolean => {
+        const option = radio.closest(".ashby-application-form-input-radio-group-option");
+        return option ? option.hasAttribute("data-checked") : radio.checked;
+      };
+      const checked = radios.find(chosen);
       const options = radios.map((radio) => {
         const label = optionLabel(radio);
         radio.setAttribute("data-ia-radio-option", label);
+        radio.setAttribute("data-ia-radio-group", fieldId);
         return label;
       });
       controls.push({
         tag: "input",
         type: "radio",
-        id: input.name,
+        id: fieldId,
         name: input.name,
         label: (consentBlock ? unstar(rawLabel) : ashbyDescribed(input, unstar(rawLabel))) || undefined,
         required: radios.some((radio) => radio.required) || group?.getAttribute("aria-required") === "true" || (!consentBlock && ashbyRequired(input)) || MARKER.test(rawLabel),
