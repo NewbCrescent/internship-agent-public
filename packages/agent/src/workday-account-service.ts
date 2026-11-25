@@ -232,7 +232,12 @@ export async function ensureWorkdayAccount(
     throw new WorkdayAccountHeld(reason);
   }
 
-  const verifyFlow = async (unconfirmedCreateHold?: () => never, signInAfter = true): Promise<"signed-in" | "created"> => {
+  /**
+   * `unconfirmedFallback`: the account was never confirmed as created, so a single mailbox read anchored to its
+   * creation time must find exactly one link on the tenant's own origin; otherwise this runs instead (an unexpected
+   * hold after a silent create, or the one create submit for a pending account).
+   */
+  const verifyFlow = async (unconfirmedFallback?: () => Promise<"signed-in" | "created">, signInAfter = true): Promise<"signed-in" | "created"> => {
     if (!runtime.mailbox) {
       return hold("verify-email", `Workday ${host}: verify the account email Workday sent you; the agent signs in again on a later pass.`);
     }
@@ -240,19 +245,19 @@ export async function ensureWorkdayAccount(
     let result: Awaited<ReturnType<typeof pollVerificationLink>>;
     try {
       result = await pollVerificationLink(runtime.mailbox, { host, tenant, company, since: new Date(current!.createdAt) }, {
-        ...(unconfirmedCreateHold ? { timeoutMs: 0 } : { pollMs: runtime.mailPollMs, timeoutMs })
+        ...(unconfirmedFallback ? { timeoutMs: 0 } : { pollMs: runtime.mailPollMs, timeoutMs })
       });
     } catch (error) {
       if (error instanceof MailboxUnavailable) {
-        if (unconfirmedCreateHold) return unconfirmedCreateHold();
+        if (unconfirmedFallback) return unconfirmedFallback();
         return hold("verify-email", `Workday ${host}: the verification email could not be read (${error.message}).`);
       }
       throw error;
     }
     // A timeout alone does not establish account creation. Require the exact
     // tenant origin as well as the normal mailbox checks before opening a link.
-    if (unconfirmedCreateHold && (result.kind !== "found" || new URL(result.link).origin !== `https://${host}`)) {
-      return unconfirmedCreateHold();
+    if (unconfirmedFallback && (result.kind !== "found" || new URL(result.link).origin !== `https://${host}`)) {
+      return unconfirmedFallback();
     }
     if (result.kind === "none") {
       const minutes = Math.max(1, Math.round(timeoutMs / 60_000));
@@ -268,6 +273,8 @@ export async function ensureWorkdayAccount(
       return unexpected("the verification page could not be opened");
     }
     event(`Workday ${host}: verification email found and opened.`);
+    // The email shows Workday created the account, even when the agent never read the create's answer.
+    if (current?.account === "pending") save({ account: "created" });
     await safely(() => goto(applicationUrl));
     const entered = await safely(() => page.enterApplication());
     if (entered === "flow" && !(await safely(() => page.signInRequired()))) {
@@ -297,10 +304,25 @@ export async function ensureWorkdayAccount(
         return verifyFlow();
       case "wrong-password":
       case "no-account":
+        // A tenant that verifies emails refuses sign-ins with Workday's generic failure until the email is
+        // verified (nvidia.wd5, 2026-11-25): right after this call created the account, or on a pass that
+        // retries a verify-email hold, the agent looks for the verification email instead of holding.
+        if (!afterVerify && (afterCreate || entry.hold?.kind === "verify-email")) {
+          event(afterCreate
+            ? `Workday ${host}: Workday refused the sign-in right after the account was created; the agent looks for the verification email.`
+            : `Workday ${host}: Workday refused the sign-in while the account waits for email verification; the agent looks for the verification email.`);
+          return verifyFlow();
+        }
         if (entry.account === "pending") {
-          // Never confirmed as created: Workday dropped the earlier create submit (see the one-second wait), so on an
-          // automatic run the agent submits the create form once with the saved password, and does not sign in again.
-          if (mode === "create" && !afterVerify && !afterCreate) return createAfterRefusedSignIn();
+          // Never confirmed as created. An earlier create may have succeeded on a tenant that verifies emails, so
+          // with a mailbox the agent first reads it once for that account's verification email (tenant origin only);
+          // otherwise, as when Workday dropped the earlier submit (see the one-second wait), on an automatic run it
+          // submits the create form once with the saved password, and does not sign in again.
+          if (mode === "create" && !afterVerify && !afterCreate) {
+            if (!runtime.mailbox) return createAfterRefusedSignIn();
+            event(`Workday ${host}: Workday did not accept the saved password for the account an earlier run started to create; the agent looks for that account's verification email first.`);
+            return verifyFlow(createAfterRefusedSignIn, false);
+          }
           return hold("interrupted", `Workday ${host}: an earlier account creation did not finish, and Workday does not accept the saved password. ${YOURSELF}`);
         }
         return hold("wrong-password", `Workday ${host}: Workday refused the saved password; the agent does not try it again. ${YOURSELF}`);

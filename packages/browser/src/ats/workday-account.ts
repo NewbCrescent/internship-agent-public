@@ -325,7 +325,8 @@ async function errorText(page: Page): Promise<string> {
  * long) and 20 after a sign-in, unless `options` say otherwise. `before` is
  * the account screen's text just before the submit: a verification notice
  * that was not there then is a verify-email outcome even with the form still
- * showing.
+ * showing. After a create, the sign-in form or Workday's email-method chooser
+ * with no error means the account was created.
  */
 async function settle(
   page: Page,
@@ -358,7 +359,11 @@ async function settle(
     }
     if (screen === "verify-email") return { result: "verify-email" };
     if (screen === "application" || screen === "job") return { result: "signed-in" };
-    if (after === "create" && screen === "sign-in" && !errors) return { result: "created" };
+    // Workday's create handler sends tenants that verify emails to the career site's /login page
+    // (candidate-experience-apply-flow 2026.47.19); nvidia.wd5's shows only the email-method chooser,
+    // since it also offers Google and LinkedIn sign-in (read-only capture, 2026-11-25). Either screen,
+    // with no error, means the account was created.
+    if (after === "create" && (screen === "sign-in" || screen === "method") && !errors) return { result: "created" };
     if (errors) {
       unknownErrors += 1;
       if (unknownErrors >= 3) {

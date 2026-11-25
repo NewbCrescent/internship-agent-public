@@ -35,6 +35,14 @@
  * created account is held as a refused password, and a real lockout message
  * still holds as locked (pending-generic, pending-locked, created-generic,
  * pending-generic-exists, pending-generic-later, pending-generic-verify).
+ * Workday's create handler sends tenants that verify emails to the site's
+ * /login, which on nvidia.wd5 shows only the email-method chooser: that
+ * chooser after a create counts as created, the generic refusal of the
+ * unverified account's sign-in goes to the verification email, a pending
+ * account refused at sign-in reads the mailbox once before any second create
+ * (opening the link holds the host for a later pass), and a refused sign-in
+ * on a pass that retries a verify-email hold reads the mailbox again
+ * (login-redirect, login-redirect-pending, login-redirect-late).
  * Never reads process.env for accounts or Gmail.
  *
  * Usage: pnpm test:browser:workday-account
@@ -666,7 +674,8 @@ async function main(): Promise<void> {
     const pendingVerifyHost = "fixture-pending-generic-verify.wd1.myworkdayjobs.com";
     seedAccount(pendingVerifyHost, "pending");
     let pendingVerifyTab: Page | null = null;
-    mail = linkFor(pendingVerifyHost, () => pendingVerifyTab);
+    // No verification email exists before the create (the agent reads the mailbox once before submitting it).
+    mail = async () => (pendingVerifyTab && (await storedAccount(pendingVerifyTab))?.token ? linkFor(pendingVerifyHost, () => pendingVerifyTab)() : []);
     const pendingVerify = await scenario("pending-generic-verify", pendingVerifyHost, "verify&signin-error=generic", undefined, (tab) => { pendingVerifyTab = tab; });
     held("pending-generic-verify", pendingVerify, "signs in on a later pass");
     const pendingVerifyEntry = getWorkdayAccount(file, pendingVerifyHost);
@@ -680,6 +689,94 @@ async function main(): Promise<void> {
     if (accountSubmits.get(pendingVerifyHost)?.join(",") !== "Sign In,Create Account") {
       failures.push(`pending-generic-verify: account submits ${accountSubmits.get(pendingVerifyHost)?.join(",")}`);
     }
+    mail = async () => [];
+
+    // nvidia.wd5's flow (read-only captures and Workday's public create handler, 2026-11-25): the account step opens on
+    // the email-method chooser; a create that succeeds sends the page to the site's /login, which shows only the chooser
+    // since the site verifies emails; and Workday refuses the unverified account's sign-in with its generic failure. The
+    // chooser counts as created at once, and the refused sign-in goes to the verification email.
+    const redirectHost = "fixture-login-redirect.wd1.myworkdayjobs.com";
+    let redirectTab: Page | null = null;
+    mail = linkFor(redirectHost, () => redirectTab);
+    const redirectClock = virtualClock(0);
+    const redirect = await scenario("login-redirect", redirectHost, "login-redirect", { clock: redirectClock.clock }, (tab) => { redirectTab = tab; });
+    if (redirect.result !== "signed-in") failures.push(`login-redirect: expected "signed-in", got ${redirect.result ?? redirect.error?.message}`);
+    if (redirectClock.clock.now() >= 60_000) failures.push(`login-redirect: the agent waited ${redirectClock.clock.now()} virtual ms`);
+    if (savedBeforeSubmit.get(redirectHost) !== true) failures.push("login-redirect: the password was not saved before the create submit");
+    if (accountSubmits.get(redirectHost)?.join(",") !== "Create Account,Sign In,Sign In") failures.push(`login-redirect: account submits ${accountSubmits.get(redirectHost)?.join(",")}`);
+    const redirectEntry = getWorkdayAccount(file, redirectHost);
+    if (redirectEntry?.account !== "created" || redirectEntry.hold !== null) failures.push(`login-redirect: entry is ${redirectEntry?.account} with hold ${redirectEntry?.hold?.kind}`);
+    for (const text of [
+      `Workday ${redirectHost}: account created with your email; the password is saved locally.`,
+      `Workday ${redirectHost}: Workday refused the sign-in right after the account was created; the agent looks for the verification email.`,
+      `Workday ${redirectHost}: verification email found and opened.`
+    ]) if (!events().includes(text)) failures.push(`login-redirect: no event "${text}"`);
+    if (!(await storedAccount(redirect.tab))?.verified) failures.push("login-redirect: the fixture account was not verified");
+    await opensFlow("login-redirect", redirect.page);
+
+    // The same tenant after an earlier create was read as no answer (nvidia.wd5's state, 2026-11-25): the saved pending
+    // password is refused because the email is not verified. One mailbox read finds the verification email; the link is
+    // opened, the account saved as created, and the host waits for a later pass, with no second create submit.
+    const redirectPendingHost = "fixture-login-redirect-pending.wd1.myworkdayjobs.com";
+    const seededToken = "seededfixturetoken";
+    seedAccount(redirectPendingHost, "pending");
+    const seedTab = await context.newPage();
+    await seedTab.goto(urlFor(redirectPendingHost, "login-redirect"));
+    await seedTab.evaluate(({ email, password, token }) => {
+      localStorage.setItem("fixture-workday-accounts", JSON.stringify({ [email]: { password, verified: false, token } }));
+    }, { email: EMAIL, password: SEEDED_PASSWORD, token: seededToken });
+    await seedTab.close();
+    let pendingReads = 0;
+    mail = async () => {
+      pendingReads += 1;
+      return [{
+        from: "Fixture Verify <fixture-login-redirect-pending@myworkday.com>", subject: "Verify your candidate account", receivedAt: new Date(), text: "",
+        html: `<a href="https://${redirectPendingHost}/External/activate/${seededToken}">Verify</a>`
+      }];
+    };
+    const redirectPending = await scenario("login-redirect-pending", redirectPendingHost, "login-redirect", { clock: virtualClock(0).clock });
+    held("login-redirect-pending", redirectPending, "signs in on a later pass");
+    if (pendingReads !== 1) failures.push(`login-redirect-pending: expected one mailbox read, got ${pendingReads}`);
+    const redirectPendingEntry = getWorkdayAccount(file, redirectPendingHost);
+    if (redirectPendingEntry?.account !== "created" || redirectPendingEntry.hold?.kind !== "verify-email") {
+      failures.push(`login-redirect-pending: entry is ${redirectPendingEntry?.account} with hold ${redirectPendingEntry?.hold?.kind}`);
+    }
+    if (accountSubmits.get(redirectPendingHost)?.join(",") !== "Sign In") failures.push(`login-redirect-pending: account submits ${accountSubmits.get(redirectPendingHost)?.join(",")}`);
+    if (!(await storedAccount(redirectPending.tab))?.verified) failures.push("login-redirect-pending: the fixture account was not verified");
+    for (const text of [
+      `Workday ${redirectPendingHost}: Workday did not accept the saved password for the account an earlier run started to create; the agent looks for that account's verification email first.`,
+      `Workday ${redirectPendingHost}: verification email found and opened.`
+    ]) if (!events().includes(text)) failures.push(`login-redirect-pending: no event "${text}"`);
+    if (workdayAccountWait(gate, redirectPendingHost, EMAIL) === null) failures.push("login-redirect-pending: the gate does not hold now");
+    if (workdayAccountWait(gate, redirectPendingHost, EMAIL, new Date(Date.now() + 61 * 60_000)) !== null) failures.push("login-redirect-pending: the gate still holds after an hour");
+    // The later pass signs in with the saved password.
+    mail = async () => [];
+    const redirectPendingLater = await scenario("login-redirect-pending later pass", redirectPendingHost, "login-redirect", { clock: virtualClock(0).clock });
+    if (redirectPendingLater.result !== "signed-in") failures.push(`login-redirect-pending later pass: expected "signed-in", got ${redirectPendingLater.result ?? redirectPendingLater.error?.message}`);
+    if (getWorkdayAccount(file, redirectPendingHost)?.hold !== null) failures.push("login-redirect-pending later pass: the hold was not cleared");
+    if (accountSubmits.get(redirectPendingHost)?.join(",") !== "Sign In,Sign In") failures.push(`login-redirect-pending later pass: account submits ${accountSubmits.get(redirectPendingHost)?.join(",")}`);
+    await opensFlow("login-redirect-pending later pass", redirectPendingLater.page);
+
+    // The verification email arrives after the agent's mailbox window (synthetic): the host waits as verify-email, and on
+    // the later pass the refused sign-in reads the mailbox again instead of holding the password as refused.
+    const redirectLateHost = "fixture-login-redirect-late.wd1.myworkdayjobs.com";
+    mail = async () => [];
+    const redirectLateFirst = await scenario("login-redirect-late", redirectLateHost, "login-redirect", { clock: virtualClock(0).clock });
+    held("login-redirect-late", redirectLateFirst, "verification email not found");
+    const redirectLateEntry = getWorkdayAccount(file, redirectLateHost);
+    if (redirectLateEntry?.account !== "created" || redirectLateEntry.hold?.kind !== "verify-email") {
+      failures.push(`login-redirect-late: entry is ${redirectLateEntry?.account} with hold ${redirectLateEntry?.hold?.kind}`);
+    }
+    mail = linkFor(redirectLateHost, () => redirectLateFirst.tab);
+    const redirectLate = await scenario("login-redirect-late later pass", redirectLateHost, "login-redirect", { clock: virtualClock(0).clock });
+    if (redirectLate.result !== "signed-in") failures.push(`login-redirect-late later pass: expected "signed-in", got ${redirectLate.result ?? redirectLate.error?.message}`);
+    if (!events().includes(`Workday ${redirectLateHost}: Workday refused the sign-in while the account waits for email verification; the agent looks for the verification email.`)) {
+      failures.push("login-redirect-late later pass: no look-for-the-email event");
+    }
+    if (!(await storedAccount(redirectLate.tab))?.verified) failures.push("login-redirect-late later pass: the fixture account was not verified");
+    if (getWorkdayAccount(file, redirectLateHost)?.hold !== null) failures.push("login-redirect-late later pass: the hold was not cleared");
+    if (accountSubmits.get(redirectLateHost)?.join(",") !== "Create Account,Sign In,Sign In,Sign In") failures.push(`login-redirect-late: account submits ${accountSubmits.get(redirectLateHost)?.join(",")}`);
+    await opensFlow("login-redirect-late later pass", redirectLate.page);
     mail = async () => [];
 
     // No password anywhere it must not be.
@@ -702,7 +799,7 @@ async function main(): Promise<void> {
     console.error(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"failed","failures":${JSON.stringify(failures)}}`);
     process.exit(1);
   }
-  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":36}`);
+  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":39}`);
 }
 
 main().catch((error) => {

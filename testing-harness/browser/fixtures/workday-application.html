@@ -1,6 +1,9 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Fixture Aerospace Careers</title></head>
+<head><meta charset="utf-8"><title>Fixture Aerospace Careers</title>
+<style>html[data-fixture-login] [data-automation-id="jobPostingPage"] { display: none; }</style>
+<script>if (/\/login$/.test(location.pathname)) document.documentElement.setAttribute("data-fixture-login", "");</script>
+</head>
 <body>
   <!-- A fictional Workday-style career site. Markers mirror Workday's data-automation-id attributes. -->
   <button data-automation-id="utilityButtonSignIn">Sign In</button>
@@ -13,7 +16,7 @@
   <div id="popup"></div>
   <script>
     const params = new URLSearchParams(location.search);
-    // Candidate accounts (?account=create|verify|captcha|exists|sms|double|silent|silent-chooser|lost|banner|signin-after|notice|quiet):
+    // Candidate accounts (?account=create|verify|captcha|exists|sms|double|silent|silent-chooser|lost|banner|signin-after|notice|quiet|login-redirect):
     // accounts live in localStorage (shared by the context's tabs), the signed-in session in
     // sessionStorage (per tab, so every new tab starts signed out).
     //   create: the account is created and the application opens; verify: Workday asks to verify
@@ -26,7 +29,12 @@
     //   observed flow after a create); notice: the account is stored unverified and the sign-in
     //   form shows, and signing in to it writes a plain-text "not been verified" notice (not an
     //   error element) and keeps the form; quiet: the same, but signing in to the unverified
-    //   account changes nothing on screen.
+    //   account changes nothing on screen; login-redirect (synthetic, modelled on nvidia.wd5's read-only
+    //   captures and Workday's public create handler, 2026-11-25): the account step opens on the
+    //   email-method chooser (Google, LinkedIn, email), the in-flow Sign In link returns to it, a
+    //   successful create stores the account unverified and sends the page to the site's /login with
+    //   the same query, which shows only the chooser (no apply flow), and signing in to the unverified
+    //   account shows Workday's generic failure.
     // &signin-error=generic|locked: a failed sign-in shows Workday's generic message (generic: "You may
     // have entered the wrong email address or password or your account might be locked.", seen on 11
     // tenants on 2026-11-25) or a real lockout message (locked) instead of "Wrong email address or password.".
@@ -98,6 +106,7 @@
     const accountMode = params.get("account");
     const signInError = params.get("signin-error");
     window.fixtureAccount = { honeypotTyped: false, termsChecked: false, creates: 0, signIns: 0, emailMethodClicks: 0, headerClicks: 0, ignoredSubmits: 0, submitDelays: [] };
+    if (/\/login$/.test(location.pathname)) renderLoginPage();
     const dwellMode = params.get("dwell") === "1";
     const submitMounts = new WeakMap();
     if (dwellMode) {
@@ -309,6 +318,19 @@
         </div>`;
     }
 
+    /** ?account=login-redirect: the career site's own /login page as nvidia.wd5 draws it (read-only capture, 2026-11-25, reduced): no apply flow, only the sign-in chooser. */
+    function renderLoginPage() {
+      document.getElementById("app").innerHTML = `
+        <div data-automation-id="pageMainContent"><div data-automation-id="auth_container">
+          <div data-automation-id="signInContent">
+            <h2>Sign In</h2>
+            <button type="button" data-automation-id="GoogleSignInButton">Sign in with Google</button>
+            <button type="button" data-automation-id="LinkedInSignInButton">Sign in with LinkedIn</button>
+            <div>OR</div>
+            <button type="button" data-automation-id="SignInWithEmailButton">Sign in with email</button>
+          </div></div></div>`;
+    }
+
     /** Workday's account panel: the submit buttons sit under a click filter, as on Workday. */
     function renderAccount(kind) {
       if (params.get("markup") === "real") return renderRealAccount(kind);
@@ -435,9 +457,10 @@
           `<div data-automation-id="errorBanner" role="alert"><ul><li>We could not create your account right now. Try again later.</li></ul></div>`;
         return;
       }
-      const unverified = ["verify", "notice", "quiet", "silent-quiet"].includes(accountMode);
+      const unverified = ["verify", "notice", "quiet", "silent-quiet", "login-redirect"].includes(accountMode);
       accounts[email] = { password, verified: !unverified, token: Math.random().toString(36).slice(2) };
       writeAccounts(accounts);
+      if (accountMode === "login-redirect") { location.assign(`${location.pathname.replace(/\/job\/.*$/, "")}/login${location.search}`); return; }
       if (accountMode === "double") return accountError("An account already exists for this email address.");
       if (accountMode === "signin-after" || accountMode === "notice" || accountMode === "quiet") return renderAccount("sign-in");
       if (["silent", "silent-chooser", "silent-quiet"].includes(accountMode)) return;
@@ -466,6 +489,7 @@
         return;
       }
       if (!account.verified && (accountMode === "quiet" || accountMode === "silent-quiet")) return;
+      if (!account.verified && accountMode === "login-redirect") return accountError("You may have entered the wrong email address or password or your account might be locked.");
       if (!account.verified) return accountError("Please verify your account before signing in.");
       sessionStorage.setItem(SESSION_KEY, email);
       render();
@@ -545,10 +569,10 @@
             <label for="password">Password</label><input id="password" type="password"><button>Sign In</button>`;
           return;
         }
-        if (accountMode && !sessionStorage.getItem(SESSION_KEY)) { renderAccount("create"); return; }
+        if (accountMode && !sessionStorage.getItem(SESSION_KEY)) { if (accountMode === "login-redirect") renderSignInMethods(); else renderAccount("create"); return; }
         render();
       } else if (target.matches('[data-automation-id="signInLink"]')) {
-        if (accountMode === "silent-chooser") renderSignInMethods();
+        if (accountMode === "silent-chooser" || accountMode === "login-redirect") renderSignInMethods();
         else renderAccount("sign-in");
       } else if (target.matches('[data-automation-id="SignInWithEmailButton"]')) {
         window.fixtureAccount.emailMethodClicks += 1;
