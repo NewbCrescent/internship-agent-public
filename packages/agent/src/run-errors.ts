@@ -1,6 +1,12 @@
 /** Raised when an automatic run cannot fill anything useful; the job keeps its status and is not retried. */
 export class AutomaticRunStopped extends Error {}
 
+/** The site says the posting is closed: an automatic run skips the job as "Posting closed" and never retries it. */
+export class PostingClosed extends AutomaticRunStopped {}
+
+/** The Workday application did not open (a security check, or neither the application nor a closed-posting page); evidence is saved. */
+export class WorkdayEntryStopped extends AutomaticRunStopped {}
+
 /** Thrown when the site shows a sign-in form: the session is marked signed out and the pipeline waits. */
 export class WorkdaySignInRequired extends Error {}
 

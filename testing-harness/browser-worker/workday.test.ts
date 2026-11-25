@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   classifyWorkdayAccountMessage,
+  isWorkdayClosedPostingText,
   isWorkdayUploadStatus,
   markWorkdayResumeUpload,
   newWorkdayVerifyNotice,
@@ -149,6 +150,16 @@ describe("Workday career sites", () => {
     const many = workdayErrorPauses("My Information", FORM, Array.from({ length: 14 }, (_, index) => bannerError(`Unknown problem ${index + 1}.`)));
     expect(many).toHaveLength(10);
     expect(many.at(-1)?.fieldId).toBe("workday-error-10");
+  });
+
+  it("recognizes Workday's closed-posting text only", () => {
+    expect(isWorkdayClosedPostingText("The page you are looking for doesn't exist.")).toBe(true);
+    expect(isWorkdayClosedPostingText("The page you are looking for doesn’t exist.")).toBe(true);
+    expect(isWorkdayClosedPostingText("\n  The page you are\n looking for\tdoesn't   exist.\nSearch for Jobs")).toBe(true);
+    expect(isWorkdayClosedPostingText("This job posting is no longer available")).toBe(true);
+    expect(isWorkdayClosedPostingText("Something went wrong. Please try again.")).toBe(false);
+    expect(isWorkdayClosedPostingText("Search for Jobs")).toBe(false);
+    expect(isWorkdayClosedPostingText("")).toBe(false);
   });
 });
 

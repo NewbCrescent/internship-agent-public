@@ -39,8 +39,11 @@ import { redactNoticeText } from "./pass-notice";
  *
  * Workday stops are saved the same way: `workday-account` when the account
  * step held the host (before any run was saved, so the folder is the job's,
- * `<time>-workday-account`, with no run id) and `workday-errors` when Workday
- * would not save a step. `pnpm run:evidence --job` shows a job's evidence.
+ * `<time>-workday-account`, with no run id), `workday-errors` when Workday
+ * would not save a step, and `workday-entry` when the application did not
+ * open (a closed posting, a security check, or neither; the job's folder
+ * `<time>-workday-entry` when no run exists yet). `pnpm run:evidence --job`
+ * shows a job's evidence.
  * iCIMS stops are saved for the job too: `icims-account` when the account
  * step held the host and `icims-application` when the agent reached iCIMS's
  * application and stopped there (folder `<time>-<outcome>`, no run id).
@@ -138,7 +141,7 @@ export const submitEvidenceFileSchema = z.object({
   runId: z.string().min(1).nullable(),
   jobId: z.string().min(1),
   capturedAt: z.iso.datetime(),
-  outcome: z.enum(["field-errors", "refused", "challenged", "verification-code", "unknown", "workday-account", "workday-errors", "icims-account", "icims-application"]),
+  outcome: z.enum(["field-errors", "refused", "challenged", "verification-code", "unknown", "workday-account", "workday-errors", "workday-entry", "icims-account", "icims-application"]),
   url: z.string().max(2_000),
   invalidFields: z.array(z.object({
     ref: z.string().max(200).nullable(),
@@ -326,7 +329,7 @@ function scrubSecrets(text: string, secrets: string[]): string {
   return result;
 }
 
-const isWorkdayOutcome = (outcome: PostSubmitEvidence["outcome"]) => outcome === "workday-account" || outcome === "workday-errors";
+const isWorkdayOutcome = (outcome: PostSubmitEvidence["outcome"]) => outcome === "workday-account" || outcome === "workday-errors" || outcome === "workday-entry";
 const isIcimsOutcome = (outcome: PostSubmitEvidence["outcome"]) => outcome === "icims-account" || outcome === "icims-application";
 
 function evidenceEvent(outcome: PostSubmitEvidence["outcome"]): string {
@@ -417,8 +420,8 @@ export type SaveWorkdayEvidenceInput = {
   dataDir: string;
   run: { id: string | null; jobId: string };
   page: WorkdayPage;
-  outcome: "workday-account" | "workday-errors";
-  /** What happened, in the agent's words (the hold reason, or the step Workday would not save). */
+  outcome: "workday-account" | "workday-errors" | "workday-entry";
+  /** What happened, in the agent's words (the hold reason, the step Workday would not save, or why the application did not open). */
   detail: string;
   /** Workday's errors when the walk already read them; otherwise they are read from the page. */
   errors?: WorkdayPageError[];
@@ -532,6 +535,7 @@ const OUTCOME_TEXT: Record<StoredSubmitEvidence["outcome"], string> = {
   unknown: "no confirmation was recognized",
   "workday-account": "the Workday account step stopped",
   "workday-errors": "Workday would not save a step",
+  "workday-entry": "the Workday application did not open",
   "icims-account": "the iCIMS account step stopped",
   "icims-application": "the agent reached iCIMS's application and stopped"
 };
@@ -654,7 +658,11 @@ export async function runEvidenceCommand(argv: string[], deps: Partial<RunEviden
     const shown = flags.all ? stored : stored.slice(0, 1);
     for (const [index, entry] of shown.entries()) {
       io.log(`Evidence ${index + 1} of ${stored.length}, captured ${entry.capturedAt}: ${entry.outcome} (${OUTCOME_TEXT[entry.outcome]})`);
-      if (byJob) io.log(entry.runId ? `Run: ${entry.runId.slice(0, 8)}` : "Run: none (the account step stopped before a run was saved)");
+      if (byJob) io.log(entry.runId
+        ? `Run: ${entry.runId.slice(0, 8)}`
+        : entry.outcome === "workday-entry"
+          ? "Run: none (the application did not open, so no run was saved)"
+          : "Run: none (the account step stopped before a run was saved)");
       io.log(`URL: ${entry.url || "(none)"}`);
       if (entry.detail !== null) io.log(`Detail: ${entry.detail}`);
       if (entry.invalidFields.length === 0) {

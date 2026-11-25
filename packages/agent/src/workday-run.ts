@@ -27,7 +27,7 @@ import {
 
 import { yearHoldMessage } from "./company-policy";
 import { answeredPauseDecision } from "./question-answers";
-import { AutomaticRunStopped, WorkdayAccountHeld, WorkdaySignInRequired } from "./run-errors";
+import { AutomaticRunStopped, PostingClosed, WorkdayAccountHeld, WorkdayEntryStopped, WorkdaySignInRequired } from "./run-errors";
 import { ensureWorkdayAccount, type WorkdayAccountRuntime } from "./workday-account-service";
 import type { VoiceDrafter } from "./voice-drafting";
 import { applyVoiceDrafts, draftSourcesFor } from "./voice-drafting";
@@ -110,9 +110,13 @@ export async function walkWorkday(
     return again;
   };
   let entered = await page.enterApplication();
+  // Workday's own closed-posting page: the job is closed, not waiting for the candidate.
+  if (entered === "closed") throw new PostingClosed(`${company}'s Workday says this posting no longer exists at ${applicationUrl}.`);
+  if (entered === "challenge") {
+    throw new WorkdayEntryStopped(`${company}'s Workday showed a security check instead of the application at ${applicationUrl}; the agent never solves or bypasses CAPTCHAs or bot checks. Open the posting in your own browser to apply.`);
+  }
   if (entered === "sign-in" || await page.signInRequired()) entered = await signIn();
-  // A missing Apply button usually means the posting closed: a real stop.
-  if (entered === "missing") throw new AutomaticRunStopped(`No Workday application opened at ${applicationUrl}; the posting may be closed.`);
+  if (entered === "missing") throw new WorkdayEntryStopped(`No Workday application opened at ${applicationUrl}: Workday showed neither the application nor its closed-posting page.`);
   const walk = () => walkWorkdayApplication(page, (step, form, state) => planWorkdayStep(step, form, context, state.transcript, location?.tenant ?? null), {
     mode, confirm, history: context.history ?? undefined, transcript: context.transcript
   });

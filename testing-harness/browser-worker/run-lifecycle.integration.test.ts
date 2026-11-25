@@ -12,6 +12,7 @@ import {
   registerGitHubRepository,
   reviewEvidenceClaim,
   listProjectEvidenceProfiles,
+  getDiscoverySkip,
   getFitInputVersion,
   getJobPosting,
   getRequirementLabelHold,
@@ -2354,6 +2355,82 @@ describe("retrying a browser run", () => {
       const pauses = getBrowserRuns(jobId, database).flatMap((run) => run.pauses);
       expect(pauses.filter((pause) => /password|email address/i.test(`${pause.label} ${pause.fieldId}`))).toEqual([]);
       database.close();
+    });
+
+    describe("when the application does not open (Track 28)", () => {
+      const eventDetails = (database: DatabaseSync, jobId: string) =>
+        (database.prepare("SELECT detail FROM application_events WHERE job_id = ? ORDER BY rowid").all(jobId) as Array<{ detail: string | null }>).map((row) => row.detail ?? "");
+      /** The job's one evidence folder: its name and evidence.json. */
+      const entryEvidence = (dataDir: string, jobId: string) => {
+        const root = submitEvidenceRoot(dataDir, jobId);
+        const folders = readdirSync(root);
+        expect(folders).toHaveLength(1);
+        return { folder: folders[0]!, stored: JSON.parse(readFileSync(join(root, folders[0]!, "evidence.json"), "utf8")) as Record<string, unknown> };
+      };
+      const entering = (entered: "closed" | "challenge" | "missing") => async () => ({ ...fakeWorkday(), enterApplication: async () => entered });
+
+      it("skips a posting Workday shows closed as \"Posting closed\", saves workday-entry evidence, and never runs it again", async () => {
+        const database = disposableDatabase();
+        const dataDir = disposableDataDir();
+        const jobId = workdayJob(database);
+        const report = await advancePipeline({ database, dataDir, settings: { minFit: 0, autoApply: true }, voiceDrafter: null, openPage: entering("closed") });
+        expect(report.stopped).toEqual([]);
+        expect(report.skipped).toEqual([{ jobId, reasons: [expect.stringMatching(/^Posting closed: .*no longer exists/)] }]);
+        expect(database.prepare("SELECT COUNT(*) AS count FROM browser_runs").get()).toEqual({ count: 0 });
+        expect(jobStatus(database, jobId)).toBe("READY_FOR_REVIEW");
+        expect(getDiscoverySkip(database, jobId)?.reason).toBe("Posting closed");
+        const details = eventDetails(database, jobId);
+        expect(details.some((detail) => detail.startsWith("Automatic browser run found the posting closed: "))).toBe(true);
+        expect(details.some((detail) => detail.startsWith("Automatic browser run needs you: "))).toBe(false);
+        const { folder, stored } = entryEvidence(dataDir, jobId);
+        expect(folder).toMatch(/-workday-entry$/);
+        expect(stored).toMatchObject({ runId: null, jobId, outcome: "workday-entry" });
+
+        const second = await advancePipeline({
+          database, dataDir, settings: { minFit: 0, autoApply: true }, voiceDrafter: null, openPage: async () => { throw new Error("must not run a closed posting"); }
+        });
+        expect(second.started).toEqual([]);
+        expect(second.stopped).toEqual([]);
+        expect(second.errors).toEqual([]);
+        expect(second.skipped.filter((entry) => entry.jobId === jobId)).toEqual([]);
+        database.close();
+      });
+
+      it("stops once with a security-check reason when Workday shows a check instead of the application", async () => {
+        const database = disposableDatabase();
+        const dataDir = disposableDataDir();
+        const jobId = workdayJob(database);
+        const report = await advancePipeline({ database, dataDir, settings: { minFit: 0, autoApply: true }, voiceDrafter: null, openPage: entering("challenge") });
+        expect(report.stopped).toHaveLength(1);
+        expect(report.stopped[0]!.reason).toContain("security check");
+        expect(report.stopped[0]!.reason).not.toContain("may be closed");
+        expect(eventDetails(database, jobId).some((detail) => detail.startsWith("Automatic browser run needs you: ") && detail.includes("security check"))).toBe(true);
+        expect(getDiscoverySkip(database, jobId)).toBeNull();
+        expect(entryEvidence(dataDir, jobId).stored).toMatchObject({ runId: null, jobId, outcome: "workday-entry" });
+
+        const second = await advancePipeline({
+          database, dataDir, settings: { minFit: 0, autoApply: true }, voiceDrafter: null, openPage: async () => { throw new Error("must not reopen a stopped posting"); }
+        });
+        expect(second.started).toEqual([]);
+        expect(second.stopped).toEqual([]);
+        expect(second.errors).toEqual([]);
+        database.close();
+      });
+
+      it("names an entry with no application without claiming the posting closed", async () => {
+        const database = disposableDatabase();
+        const dataDir = disposableDataDir();
+        const jobId = workdayJob(database);
+        const report = await advancePipeline({ database, dataDir, settings: { minFit: 0, autoApply: true }, voiceDrafter: null, openPage: entering("missing") });
+        expect(report.stopped).toHaveLength(1);
+        const reason = report.stopped[0]!.reason;
+        expect(reason).toContain("No Workday application opened");
+        expect(reason).toContain("neither the application nor its closed-posting page");
+        expect(reason).not.toContain("may be closed");
+        expect(entryEvidence(dataDir, jobId).stored).toMatchObject({ runId: null, jobId, outcome: "workday-entry" });
+        expect(getDiscoverySkip(database, jobId)).toBeNull();
+        database.close();
+      });
     });
 
     describe("with agent-created accounts", () => {

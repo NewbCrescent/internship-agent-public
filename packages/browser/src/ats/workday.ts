@@ -39,8 +39,12 @@ import {
 export type WorkdayStep = { index: number; total: number; name: string };
 
 export type WorkdayPage = BrowserPage & {
-  /** Opens the application (Apply → Apply Manually) unless it is already open. */
-  enterApplication(): Promise<"flow" | "sign-in" | "missing">;
+  /**
+   * Opens the application (Apply → Apply Manually) unless it is already open: `closed` when Workday shows its
+   * closed-posting page, `challenge` when a security check shows instead (never solved), `missing` when neither the
+   * application nor either page appeared.
+   */
+  enterApplication(): Promise<"flow" | "sign-in" | "missing" | "closed" | "challenge">;
   activeStep(): Promise<WorkdayStep | null>;
   /** A sign-in or create-account form is showing instead of the application. */
   signInRequired(): Promise<boolean>;
@@ -81,6 +85,15 @@ const ACTIVE_STEP = '[data-automation-id="progressBarActiveStep"]';
 const RESUME_UPLOAD = 'input[type="file"][data-automation-id="file-upload-input-ref"]';
 const BACK = '[data-automation-id="pageFooterBackButton"]';
 const ACCOUNT_BUTTONS = '[data-automation-id="SignInWithEmailButton"], [data-automation-id="createAccountSubmitButton"], [data-automation-id="signInSubmitButton"]';
+const APPLY_BUTTON = '[data-automation-id="adventureButton"]';
+/** Workday's own page for a job path that no longer exists (seen live 2026-11-25 on five closed postings). */
+const CLOSED_PAGE = '[data-automation-id="errorContainer"]';
+/** Workday's Cloudflare block page (seen live 2026-11-25 after Apply Manually on employer-a.wd115). */
+const SECURITY_CHECK = '[data-automation-id="cloudflare_error"]';
+/** Workday's words for a closed posting; the second phrase is not yet seen live. */
+export function isWorkdayClosedPostingText(text: string): boolean {
+  return /\bthe page you are looking for doesn['’]t exist\b|\bjob posting is no longer available\b/i.test(text.replace(/\s+/g, " "));
+}
 
 /**
  * Workday's own "Create Account/Sign In" step met inside the walk: the
@@ -108,6 +121,24 @@ async function waitForAccountForm(page: Page): Promise<void> {
     page.locator('input[type="password"]').first().waitFor({ state: "visible", timeout: 15_000 }),
     page.locator(ACCOUNT_BUTTONS).first().waitFor({ state: "visible", timeout: 15_000 })
   ]).catch(() => undefined);
+}
+
+/** Workday's own security-check (Cloudflare) page; read only, never clicked. */
+async function workdaySecurityPage(page: Page): Promise<boolean> {
+  return (await page.locator(SECURITY_CHECK).filter({ visible: true }).count().catch(() => 0)) > 0;
+}
+
+/** On the job page: Workday's security check, or a visible challenge challenge.ts recognizes; read only, never clicked. */
+async function workdaySecurityCheck(page: Page, base: BrowserPage): Promise<boolean> {
+  if (await workdaySecurityPage(page)) return true;
+  return Boolean(await (base.visibleChallenge?.() ?? Promise.resolve(null)).catch(() => null));
+}
+
+/** Workday's closed-posting page: its error container showing the closed text. */
+async function workdayClosedPage(page: Page): Promise<boolean> {
+  const box = page.locator(CLOSED_PAGE).filter({ visible: true }).first();
+  if (!(await box.count().catch(() => 0))) return false;
+  return isWorkdayClosedPostingText(await box.innerText({ timeout: 1_000 }).catch(() => ""));
 }
 
 /** Reads one step's fields, in the page, from Workday's field containers. */
@@ -361,13 +392,14 @@ export function workdayErrorPauses(stepName: string, form: RecognizedForm, error
 }
 
 /**
- * What the page shows at a Workday stop (the account step, or a step Workday
- * would not save), for the run's local evidence folder: fields with Workday's
- * errors become invalid fields, other errors the alert text. Never throws.
+ * What the page shows at a Workday stop (the account step, a step Workday
+ * would not save, or the application did not open), for the run's local
+ * evidence folder: fields with Workday's errors become invalid fields, other
+ * errors the alert text. Never throws.
  */
 export async function captureWorkdayEvidence(
   page: WorkdayPage,
-  outcome: "workday-account" | "workday-errors",
+  outcome: "workday-account" | "workday-errors" | "workday-entry",
   known: { detail: string; errors?: WorkdayPageError[] }
 ): Promise<PostSubmitEvidence> {
   let errors = known.errors;
@@ -506,8 +538,20 @@ export function createWorkdayPage(page: Page): WorkdayPage {
         if (await onAccountStep(page)) { await waitForAccountForm(page); return "sign-in"; }
         return "flow";
       }
-      const apply = page.locator('[data-automation-id="adventureButton"]').first();
-      if (!(await apply.waitFor({ state: "visible", timeout: 15_000 }).then(() => true, () => false))) return "missing";
+      const apply = page.locator(APPLY_BUTTON).first();
+      // The job page: Apply, Workday's closed-posting page (read twice in a row), or a security check, within 15 s.
+      const landingDeadline = Date.now() + 15_000;
+      let closedSightings = 0;
+      for (;;) {
+        if (await apply.isVisible().catch(() => false)) break;
+        if (await workdaySecurityCheck(page, base)) return "challenge";
+        if (await workdayClosedPage(page)) {
+          closedSightings += 1;
+          if (closedSightings >= 2) return "closed";
+        } else closedSightings = 0;
+        if (Date.now() >= landingDeadline) return "missing";
+        await page.waitForTimeout(500);
+      }
       await apply.click();
       const manual = page.locator('[data-automation-id="applyManually"]').first();
       const continueApplication = page.locator('[data-automation-id="continueButton"]').first();
@@ -518,11 +562,23 @@ export function createWorkdayPage(page: Page): WorkdayPage {
       ]).catch(() => undefined);
       if (await continueApplication.isVisible().catch(() => false)) await continueApplication.click();
       else if (await manual.isVisible().catch(() => false)) await manual.click();
+      // Only Workday's Cloudflare page counts here: a CAPTCHA on the account form stays the account service's hold.
+      let settled = false;
+      const securityPage = async (): Promise<"challenge"> => {
+        const deadline = Date.now() + 20_000;
+        while (!settled && Date.now() < deadline) {
+          if (await workdaySecurityPage(page)) return "challenge";
+          await page.waitForTimeout(500).catch(() => undefined);
+        }
+        throw new Error("No Workday security check appeared.");
+      };
       const reached = await Promise.race([
         page.locator(APPLY_FLOW).waitFor({ state: "visible", timeout: 20_000 }).then(() => "flow" as const),
         page.locator('input[type="password"]').first().waitFor({ state: "visible", timeout: 20_000 }).then(() => "sign-in" as const),
-        page.locator(ACCOUNT_BUTTONS).first().waitFor({ state: "visible", timeout: 20_000 }).then(() => "sign-in" as const)
+        page.locator(ACCOUNT_BUTTONS).first().waitFor({ state: "visible", timeout: 20_000 }).then(() => "sign-in" as const),
+        securityPage()
       ]).catch(() => "missing" as const);
+      settled = true;
       if (reached === "flow" && await onAccountStep(page)) { await waitForAccountForm(page); return "sign-in"; }
       return reached;
     },

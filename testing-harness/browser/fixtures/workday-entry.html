@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture Robotics Careers</title></head>
+<body>
+  <!--
+    A fictional Workday-style job page (Track 28). Markers mirror Workday's data-automation-id
+    attributes as seen live on 2026-11-25; every name, id, and address here is synthetic.
+    ?entry=open|closed|other-error|security|security-page
+      open (default): the job page with a cookie banner; Apply opens the chooser (Autofill with Resume,
+        Apply Manually, Use My Last Application, Apply with LinkedIn); Apply Manually opens the application.
+      closed: Workday's own closed-posting page (errorContainer, "The page you are looking for doesn't exist.").
+      other-error: an unrelated error box first, then after 1 s the open job page.
+      security: like open, but Apply Manually draws Workday's Cloudflare security-check page.
+      security-page: the job page itself is that security-check page.
+    The page is drawn by script after ~400 ms (Workday renders on the client); clicks redraw after ~300 ms.
+  -->
+  <header>
+    <button data-automation-id="utilityButtonSignIn">Sign In</button>
+  </header>
+  <main id="app"></main>
+  <script>
+    const mode = new URLSearchParams(location.search).get("entry") || "open";
+    const app = document.getElementById("app");
+    const draw = (html) => { app.innerHTML = html; };
+    const securityCheck = `
+      <div data-automation-id="cloudflare_error">
+        <h1>Security Check</h1>
+        <div>Verifying...</div>
+        <p>Support ID: 0000000000000000 – Client IP: 192.0.2.1</p>
+      </div>`;
+    const jobPage = `
+      <div data-automation-id="legalNotice">
+        <p>This site uses cookies.</p>
+        <button data-automation-id="legalNoticeDeclineButton">Decline</button>
+        <button data-automation-id="legalNoticeAcceptButton">Accept Cookies</button>
+      </div>
+      <section data-automation-id="jobPostingPage">
+        <h2>Robotics Software Intern</h2>
+        <a href="#" data-automation-id="adventureButton">Apply</a>
+        <p>job requisition id R0000001</p>
+      </section>`;
+    const chooser = `
+      <div role="dialog">
+        <h2>Start Your Application</h2>
+        <a href="#" data-automation-id="autofillWithResume">Autofill with Resume</a>
+        <a href="#" data-automation-id="applyManually">Apply Manually</a>
+        <a href="#" data-automation-id="useMyLastApplication">Use My Last Application</a>
+        <a href="#" data-automation-id="applyWithLinkedIn">Apply with LinkedIn</a>
+      </div>`;
+    const application = `
+      <div data-automation-id="applyFlowPage">
+        <ol data-automation-id="progressBar"><li data-automation-id="progressBarActiveStep">current step 1 of 5 My Information</li></ol>
+        <div data-automation-id="formField-legalName--firstName">
+          <label for="first-name">First Name</label>
+          <input id="first-name" type="text">
+        </div>
+      </div>`;
+    const closedPage = `
+      <div data-automation-id="errorContainer">
+        <div><span><img alt=""></span></div>
+        <h2 data-automation-id="errorMessage">The page you are looking for doesn't exist.</h2>
+        <button data-automation-id="searchForJobsButton">Search for Jobs</button>
+      </div>`;
+    const otherError = `
+      <div data-automation-id="errorContainer">
+        <h2 data-automation-id="errorMessage">Something went wrong. Please try again.</h2>
+      </div>`;
+
+    document.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target.closest("[data-automation-id]") : null;
+      if (!target) return;
+      event.preventDefault();
+      const id = target.getAttribute("data-automation-id");
+      if (id === "legalNoticeDeclineButton" || id === "legalNoticeAcceptButton") {
+        target.closest('[data-automation-id="legalNotice"]')?.remove();
+        return;
+      }
+      const next = id === "adventureButton" ? chooser
+        : id === "applyManually" ? (mode === "security" ? securityCheck : application)
+        : null;
+      if (next) setTimeout(() => draw(next), 300);
+    });
+
+    setTimeout(() => {
+      if (mode === "closed") draw(closedPage);
+      else if (mode === "security-page") draw(securityCheck);
+      else if (mode === "other-error") {
+        draw(otherError);
+        setTimeout(() => draw(jobPage), 1_000);
+      } else draw(jobPage);
+    }, 400);
+  </script>
+</body>
+</html>

@@ -21,16 +21,17 @@ import type { BrowserPage } from "./handshake-executor";
  *   else the run waits for the candidate.
  * - `unknown`: nothing recognizable; the run fails closed.
  *
- * Two outcomes are Workday stops, not submit clicks:
+ * Three outcomes are Workday stops, not submit clicks:
  * - `workday-account`: the Workday account step (sign-in or create account) held the host.
  * - `workday-errors`: Workday would not save an application step and showed errors.
+ * - `workday-entry`: the Workday application did not open (a closed posting, a security check, or neither).
  *
  * Two are iCIMS stops, not submit clicks either:
  * - `icims-account`: the iCIMS account step held the host.
  * - `icims-application`: the agent reached iCIMS's application after the account step and stopped there.
  */
 export type PostSubmitOutcome =
-  | "field-errors" | "refused" | "challenged" | "verification-code" | "unknown" | "workday-account" | "workday-errors"
+  | "field-errors" | "refused" | "challenged" | "verification-code" | "unknown" | "workday-account" | "workday-errors" | "workday-entry"
   | "icims-account" | "icims-application";
 
 /** A field the page marks invalid: the control's id (else name, else data-ia-control tag), its label, and the site's error text. */

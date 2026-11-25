@@ -123,7 +123,7 @@ import { greenhouseSecurityCodeLookup } from "./greenhouse-security-code";
 import { passOracleEmailStep, type OracleEmailStepSettings } from "./oracle-email-step";
 import { assertHandshakeSignedIn } from "./handshake-session-service";
 import { applyVoiceDrafts, createDefaultVoiceDrafter, draftSourcesFor, type VoiceDrafter } from "./voice-drafting";
-import { AutomaticRunStopped, IcimsAccountHeld, WorkdayAccountHeld } from "./run-errors";
+import { AutomaticRunStopped, IcimsAccountHeld, PostingClosed, WorkdayAccountHeld, WorkdayEntryStopped } from "./run-errors";
 import { postingLocationNames, postingQuestionContext, savedSelfIdentification } from "./saved-answers";
 import { saveIcimsEvidenceQuietly, savePostSubmitEvidenceQuietly, saveWorkdayEvidenceQuietly } from "./submit-evidence";
 import { ensureIcimsAccount, type IcimsAccountRuntime } from "./icims-account-service";
@@ -146,6 +146,7 @@ import type { VerificationMailboxFactory } from "./workday-verification-mail";
 export type PageFactory = (url: string) => Promise<BrowserPage>;
 
 export { AutomaticRunStopped } from "./run-errors";
+export { PostingClosed, WorkdayEntryStopped } from "./run-errors";
 export { WorkdayAccountHeld } from "./run-errors";
 export { IcimsAccountHeld } from "./run-errors";
 
@@ -1822,8 +1823,9 @@ function workdayAccountSecrets(account: WorkdayRunContext["account"], applicatio
 
 /**
  * walkWorkday that saves evidence when the account step holds the host
- * (WorkdayAccountHeld), with the page still open, then rethrows. A
- * candidate-started run that finds Workday signed out saves nothing.
+ * (WorkdayAccountHeld) or the application did not open (PostingClosed,
+ * WorkdayEntryStopped: `workday-entry`), with the page still open, then
+ * rethrows. A candidate-started run that finds Workday signed out saves nothing.
  */
 async function walkWorkdayWithEvidence(
   database: DatabaseSync,
@@ -1840,6 +1842,12 @@ async function walkWorkdayWithEvidence(
     if (error instanceof WorkdayAccountHeld) {
       await saveWorkdayEvidenceQuietly({
         database, dataDir: evidence.dataDir, run: evidence.run, page, outcome: "workday-account", detail: error.message,
+        secrets: workdayAccountSecrets(evidence.account, applicationUrl)
+      });
+    }
+    if (error instanceof PostingClosed || error instanceof WorkdayEntryStopped) {
+      await saveWorkdayEvidenceQuietly({
+        database, dataDir: evidence.dataDir, run: evidence.run, page, outcome: "workday-entry", detail: error.message,
         secrets: workdayAccountSecrets(evidence.account, applicationUrl)
       });
     }

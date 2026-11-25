@@ -19,6 +19,7 @@ import {
   LOCAL_CANDIDATE_ID,
   listApplicationEventsSince,
   logApplicationEvent,
+  saveDiscoverySkip,
   setJobStatus
 } from "@internship-agent/db";
 
@@ -26,7 +27,7 @@ import { prepareApplication } from "./application-orchestrator";
 import { unverifiedRequirements, type PursuedOnFit } from "./fit-pursuit";
 import { relabelHeldPostings } from "./requirement-relabel";
 import { getMatchReport, evaluateAndPersistMatch } from "./match-orchestrator";
-import { applicationUrlFor, approveRunSubmissionAutomatically, AutomaticRunStopped, IcimsAccountHeld, startBrowserRun, submitBrowserRun,
+import { applicationUrlFor, approveRunSubmissionAutomatically, AutomaticRunStopped, IcimsAccountHeld, PostingClosed, startBrowserRun, submitBrowserRun,
   WorkdayAccountHeld, type PageFactory, type PdfRenderer } from "./browser-orchestrator";
 import { resolveWorkdayAccounts, workdayAccountSettings, workdayAccountWait, type WorkdayAccountSettings } from "./workday-account-service";
 import { icimsAccountSettings, icimsAccountWait, resolveIcimsAccounts, type IcimsAccountSettings } from "./icims-account-service";
@@ -37,7 +38,7 @@ import type { VoiceDrafter } from "./voice-drafting";
 import type { VerificationMailboxFactory } from "./workday-verification-mail";
 import { AUTO_SUBMIT_EVENT, autoSubmitBlockers, autoSubmitSettings, combineTargetDecisions, manualOnly, parseWorkdayUrl,
   workdaySiteKey, type AutoSubmitSettings, type BrowserRun, type TargetDecision, type TargetTerm } from "@internship-agent/domain";
-import { COMPANY_CAP_PREFIX, companyCapReason, companyCapSetting, DEFAULT_COMPANY_CAP, standingConsentSettings } from "@internship-agent/domain";
+import { COMPANY_CAP_PREFIX, companyCapReason, companyCapSetting, DEFAULT_COMPANY_CAP, QUICK_SKIP_REASONS, standingConsentSettings } from "@internship-agent/domain";
 import { icimsHostOf, resolveDataDir, SubmissionHeld } from "@internship-agent/browser";
 import { reviewPursuit } from "@internship-agent/matching";
 
@@ -64,6 +65,8 @@ const AUTO_SUBMIT_FAILURE = "Automatic submission failed: ";
 
 /** A stop only the candidate can resolve (sign-in, no form): recorded once, never retried. */
 const AUTOMATIC_STOP = "Automatic browser run needs you: ";
+/** A posting the site shows closed: skipped as "Posting closed", never retried. */
+const AUTOMATIC_CLOSED = "Automatic browser run found the posting closed: ";
 /** An unexpected failure (a bug, a network error): recorded and retried on the next pass. */
 const AUTOMATIC_FAILURE = "Automatic browser run failed: ";
 /** An account step held for the candidate or a later pass: retried when the hold allows. */
@@ -368,8 +371,22 @@ export async function advancePipeline(options: {
       }
     } catch (error) {
       const reason = messageOf(error);
+      const closed = error instanceof PostingClosed;
       const icimsHeld = error instanceof IcimsAccountHeld;
       const waiting = error instanceof WorkdayAccountHeld || icimsHeld;
+      if (closed) {
+        // The site says the posting is closed: the candidate's "Posting closed" Quick Skip, reported as ruled out, never retried.
+        const detail = (AUTOMATIC_CLOSED + reason.replace(/\s+/g, " ").trim() + ' It is skipped as "Posting closed" and not retried.').slice(0, 600);
+        const status = getJobPosting(database, job.id)?.status;
+        if (status === "APPLYING" && listBrowserRuns(database, job.id).length === 0) {
+          setJobStatus(database, job.id, "APPLYING", "READY_FOR_REVIEW", detail);
+        } else {
+          logApplicationEvent(database, { jobId: job.id, fromStatus: "READY_FOR_REVIEW", toStatus: "READY_FOR_REVIEW", detail });
+        }
+        saveDiscoverySkip(database, { jobId: job.id, reason: QUICK_SKIP_REASONS.closed, preferenceNote: null });
+        report.skipped.push({ jobId: job.id, reasons: [`${QUICK_SKIP_REASONS.closed}: ${reason}`] });
+        continue;
+      }
       if (waiting && workday && !icimsHeld) report.waiting.push({ jobId: job.id, siteKey: workdaySiteKey(workday), reason: "workday-account", detail: reason });
       else if (icimsHeld) report.waiting.push({ jobId: job.id, siteKey: `icims:${icimsHost ?? "unknown"}`, reason: "icims-account", detail: reason });
       else report.stopped.push({ jobId: job.id, reason });

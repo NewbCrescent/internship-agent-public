@@ -536,6 +536,33 @@ describe("post-submit evidence files", () => {
     database.close();
   });
 
+  it("saves a Workday entry stop for the job when the application did not open", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    const detail = "Fixture Robotics's Workday says this posting no longer exists at https://fixture.wd5.myworkdayjobs.com/External/job/x.";
+    const saved = await savePostSubmitEvidence({
+      database, dataDir, run: { id: null, jobId: run.jobId }, page: stubPage(), now: new Date("2026-11-25T09:12:00.000Z"),
+      evidence: evidence({
+        outcome: "workday-entry", url: "https://fixture.wd5.myworkdayjobs.com/External/job/x", invalidFields: [], alertText: "",
+        bodyText: "The page you are looking for doesn't exist.", detail
+      })
+    });
+    expect(saved.relativeDir).toBe(`applications/${run.jobId}/submit-evidence/2026-11-25T09-12-00-000Z-workday-entry`);
+    const stored = submitEvidenceFileSchema.parse(JSON.parse(readFileSync(join(dataDir, saved.relativeDir, "evidence.json"), "utf8")));
+    expect(stored).toMatchObject({ runId: null, jobId: run.jobId, outcome: "workday-entry", detail });
+    expect(listApplicationEvents(database, run.jobId).map((event) => event.detail)).toEqual([
+      `Workday evidence saved (workday-entry): ${saved.relativeDir}; view it with pnpm run:evidence --job ${run.jobId.slice(0, 8)}.`
+    ]);
+    expect(readJobEvidence(dataDir, run.jobId).map((entry) => entry.outcome)).toEqual(["workday-entry"]);
+    const lines: string[] = [];
+    const io = { open: () => database, close: () => undefined, dataDir: () => dataDir, log: (line: string) => { lines.push(line); } };
+    expect(await runEvidenceCommand(["--job", run.jobId.slice(0, 8)], io)).toBe(0);
+    expect(lines).toContain("Evidence 1 of 1, captured 2026-11-25T09:12:00.000Z: workday-entry (the Workday application did not open)");
+    expect(lines).toContain("Run: none (the application did not open, so no run was saved)");
+    database.close();
+  });
+
   it("names the run on a Workday errors capture and reads old files without a detail", async () => {
     const database = disposableDatabase();
     const dataDir = disposableDirectory("internship-agent-evidence-data-");

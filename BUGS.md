@@ -746,6 +746,68 @@ but eligible" options never answer. Regressions: the U.S.-person cases in
 `testing-harness/domain/standard-answers.test.ts` (`pnpm test:domain`).
 Not verified live: both postings' forms after the change.
 
+### Closed Workday postings were reported as "needs you" and stayed in the review list
+
+Found 2026-11-25 on the real workspace: five automatic runs of 2026-11-24
+(Woodward <run id>, GDIT <run id>, DraftKings <run id>, CACI <run id>,
+Bread Financial <run id>) stopped "No Workday application opened at <url>;
+the posting may be closed". A read-only visit showed Workday's own page
+"The page you are looking for doesn't exist." (`errorContainer`), and the
+site's search for each requisition id found 0 jobs. Cause: entry waited
+15 s for Apply only and called anything else "missing". Entry now reads
+Workday's closed-posting page (its `errorContainer` with that text, twice in
+a row, no Apply) as `closed`: the run stops with `PostingClosed`, an
+automatic run logs "Automatic browser run found the posting closed: …",
+the job gets the "Posting closed" Quick Skip (no pass starts it again;
+`restoreDiscoveredJob` undoes it), and it is reported as ruled out, not as
+needing the candidate. An unrelated error box is not read as closed.
+Regressions: the fixture's `closed` and `other-error` modes
+(`testing-harness/browser/fixtures/workday-entry.html`,
+`pnpm test:browser:fixture`), the closed-posting case in
+`testing-harness/browser-worker/run-lifecycle.integration.test.ts`
+(`pnpm test:browser-worker:local`), and the closed-text case in
+`testing-harness/browser-worker/workday.test.ts`
+(`pnpm test:browser-worker:fast`). Not verified live: an automatic run on a
+closed posting after the change; the five keep their old event until
+retried or skipped.
+
+### Workday's security check after Apply Manually was reported as a possibly closed posting
+
+Found 2026-11-25 on the real workspace. Harbor <run id> (employer-a.wd115) is an
+open posting; on 2026-11-25 a fresh disposable Chromium got Workday's
+Cloudflare "Security Check" page (`cloudflare_error`, a Turnstile
+"Verifying..." widget) after Apply Manually, and the old entry waited 20 s
+and said "the posting may be closed". Cause: entry waited only for the
+flow or the account form after Apply Manually. Entry now reads Workday's
+`cloudflare_error` page (on the job page, also a visible challenge
+`challenge.ts` recognizes) as a security check: the run stops as "needs
+you" with that reason, and the check is never solved or bypassed; a
+CAPTCHA on Workday's account form stays the account service's hold.
+Regressions: the fixture's `security` and `security-page` modes
+(`pnpm test:browser:fixture`) and the security-check case in
+`run-lifecycle.integration.test.ts` (`pnpm test:browser-worker:local`).
+Not verified live: an automatic run on Harbor after the change.
+
+### Workday entry stops left no evidence
+
+Found 2026-11-25 on the real workspace. The eight stops of 2026-11-21
+08:24 UTC (PTC, National Interstate, Jabil, Example Nonprofit,
+Example Brands, NVIDIA, KLA, Granite Dynamics) came about 18 s apart
+(the 15 s Apply wait expiring) and saved nothing; on 2026-11-25 all eight
+postings were open and the unchanged entry reached Workday's Create
+Account/Sign In step in a fresh profile within about 6 s, so their
+2026-11-21 cause cannot be determined. Cause: only account-step and
+step-error stops saved Workday evidence. Every entry stop (a closed
+posting, a security check, or neither) now saves `workday-entry` evidence
+(screenshot, redacted text, URL, the agent's detail), and the message no
+longer claims the posting may be closed ("No Workday application opened at
+<url>: Workday showed neither the application nor its closed-posting
+page."). Regressions: the workday-entry case in
+`testing-harness/agent/submit-evidence.integration.test.ts`
+(`pnpm test:agent:evidence`) and the entry cases in
+`run-lifecycle.integration.test.ts` (`pnpm test:browser-worker:local`).
+Not verified: the 2026-11-21 cause.
+
 ### Previous-employment questions naming the employer's group or using "did you work here" were not answered
 
 Found 2026-11-25 on the real workspace. "Have you previously been employed
