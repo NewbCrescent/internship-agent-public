@@ -61,7 +61,13 @@
  * recognitions; its Yes/No button pairs are radio questions with a `_required`
  * title read as required and clicked by their button; its fieldset radio
  * question takes its question title as label and pauses ("work from this
- * location" is never answered from a saved fact).
+ * location" is never answered from a saved fact). Ashby's text-message consent
+ * (fixtures/ashby-texting-consent.html, derived from Ashby's public bundle and
+ * checked against a read-only 2026-11-24 capture): the communicationConsent
+ * radios inside the phone field's entry take the consent text as their label
+ * (never their name or the phone's title, and not required by the phone's
+ * `_required`), the candidate's text-message rule answers Yes and the radio is
+ * checked, and a fieldset checkbox group with no legend takes its title.
  * Posting pages behind an Apply link (fixtures derived from the 2026-11-20
  * read-only Jobvite and iCIMS captures): a careers posting's own "Apply for
  * this job" link is followed to its form, never "Apply with LinkedIn",
@@ -128,6 +134,7 @@ const ORACLE = "https://fixture.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience
 const SMARTRECRUITERS = "https://jobs.smartrecruiters.com/FixtureRobotics/744000000000001-robotics-software-intern";
 const SMARTRECRUITERS_APPLY = "https://jobs.smartrecruiters.com/oneclick-ui/company/FixtureRobotics/publication/00000000-0000-4000-8000-000000000000";
 const ASHBY = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a1/application";
+const ASHBY_TEXTING = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a2/application";
 const LEVER = "https://jobs.lever.co/fixturerobotics/00000000-0000-4000-8000-0000000000b1/apply";
 /** Where app.dover.io application links land (they redirect to jobs.dover.com/job/<id>). */
 const DOVER = "https://jobs.dover.com/job/00000000-0000-4000-8000-0000000000d1";
@@ -185,6 +192,7 @@ async function main(): Promise<void> {
       "careers.fixturerobotics.com/jobs/1002": fixture("aggregator-posting.html"),
       "jobs.jobvite.com/fixturerobotics/job/oFixture1": fixture("jobvite-posting.html"),
       "jobs.jobvite.com/fixturerobotics/job/oFixture1/apply": fixture("jobvite-consent.html"),
+      "jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a2/application": fixture("ashby-texting-consent.html"),
       // Post-submit confirmation pages.
       "job-boards.greenhouse.io/fixturerobotics/jobs/1000001/confirmation": fixture("greenhouse-confirmation.html"),
       "jobs.lever.co/fixturerobotics/00000000-0000-4000-8000-0000000000b1/thanks": fixture("lever-thanks.html")
@@ -536,6 +544,34 @@ async function main(): Promise<void> {
       check(nowhere.unfilled.length === 1 && nowhere.unfilled[0]!.reason === 'no suggestion matched "Atlantis"', `Ashby no-match: ${JSON.stringify(nowhere.unfilled)}`);
       check(await ashbyTab.inputValue(".ashby-application-form-input-autocomplete") === "", "Ashby: the unmatched typed text was left in the box");
       await ashbyTab.close();
+    }
+
+    // Ashby's text-message consent (fixtures/ashby-texting-consent.html): the radios inside the phone field's entry take the
+    // consent text as their question (never their name or the phone's title, and not required by the phone's `_required`),
+    // the candidate's text rule answers Yes and the radio is checked; a fieldset checkbox group with no legend takes its title.
+    {
+      const textingTab = await open(ASHBY_TEXTING);
+      const texting = createPlaywrightPage(textingTab);
+      const textingForm = await recognizeCurrentForm(texting);
+      const CONSENT = "Check Yes or No to indicate your agreement to receive text message updates from Fixture Robotics Inc. regarding your job application. Frequency may vary. Message and data rates may apply. Reply STOP to opt out of future messaging.";
+      const YES = "Yes - I consent to receiving text messages";
+      const NO = "No - I do not consent to receiving text messages";
+      const TOOLS = "Which of these tools have you used?";
+      const textingLabels = textingForm.fields.map((field) => field.label);
+      check(textingLabels.join("|") === ["Name", "Email", "Phone Number", CONSENT, TOOLS].join("|"), `Ashby texting labels: ${textingLabels.join("|")}`);
+      const consent = textingForm.fields.find((field) => field.id === "communicationConsent");
+      check(consent?.kind === "radio" && consent.label === CONSENT && consent.options?.join("|") === `${YES}|${NO}` && !consent.required, `Ashby texting consent: ${JSON.stringify(consent)}`);
+      const tools = textingForm.fields.find((field) => field.label === TOOLS);
+      check(tools?.kind === "checkbox" && tools.options?.join("|") === "ROS|Git|Docker", `Ashby checkbox group: ${JSON.stringify(tools)}`);
+      const textingPlan = planAutofill(textingForm, { profile: PROFILE, resolutions: new Map(), packageAnswers: [], variantId: VARIANT_ID });
+      const consentDecision = textingPlan.decisions.find((decision) => decision.fieldId === "communicationConsent");
+      check(consentDecision?.action === "choose" && consentDecision.value === YES && consentDecision.basis === null, `Ashby texting consent decision: ${JSON.stringify(consentDecision)}`);
+      check(!textingPlan.pauses.some((pause) => pause.fieldId === "communicationConsent"), `Ashby texting consent paused: ${JSON.stringify(textingPlan.pauses.map((pause) => pause.label))}`);
+      const textingResult = await applyDecisions(texting, textingForm, textingPlan.decisions.filter((decision) => decision.fieldId === "communicationConsent"));
+      check(textingResult.unfilled.length === 0, `Ashby texting consent unfilled: ${JSON.stringify(textingResult.unfilled)}`);
+      const textingState = await textingTab.evaluate(() => (window as unknown as { fixture: { consent: string | null } }).fixture);
+      check(textingState.consent === "given", `Ashby texting consent chosen: ${textingState.consent}`);
+      await textingTab.close();
     }
 
     // Ashby's success container after the click is a confirmation, with its default or a custom message; nothing shown fails closed.

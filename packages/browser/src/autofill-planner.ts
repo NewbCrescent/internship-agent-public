@@ -10,7 +10,7 @@ import { classifyFieldRole, classifyUploadRole, isSensitiveRole } from "./ats/fi
 import { isHearAboutQuestion, pickHearAboutOption } from "./ats/hear-about";
 import { usStateAlternate } from "./ats/us-states";
 import { isSafeguardField, stripRequiredMarker } from "./form-recognition";
-import { standingFieldDecision, type StandingInputs } from "./standing-fields";
+import { standingFieldDecision, textMessageConsentDecision, type StandingInputs } from "./standing-fields";
 
 export type FieldResolution =
   | { status: "RESOLVED"; key: string; scope: string; display: string; value: boolean | string }
@@ -96,6 +96,15 @@ export function planAutofill(form: RecognizedForm, inputs: PlannerInputs): Autof
       continue;
     }
     const role = classifyFieldRole(field);
+    // The candidate's text-message rule (standing-fields.ts) comes before the standing settings, which count every text opt-in as marketing.
+    if (!isSensitiveRole(role)) {
+      const texts = textMessageConsentDecision(field);
+      if (texts) {
+        decisions.push(texts);
+        if (texts.action === "pause" && texts.pause) pauses.push(pauseRecord(field, texts, false));
+        continue;
+      }
+    }
     // Consent, attestation, and signature fields under the candidate's standing
     // settings (standing-fields.ts). A sensitive list or radio set never reaches
     // them; a single checkbox (an EEO acknowledgment) may.

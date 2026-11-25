@@ -122,7 +122,10 @@ const FACT_GROUPS: ReadonlyArray<{ group: FactGroup; pattern: RegExp }> = [
   }
 ];
 
-/** Marketing, newsletter, and talent-pool opt-ins: never accepted (left unchecked when optional). */
+/**
+ * Marketing, newsletter, and talent-pool opt-ins: never accepted (left unchecked when optional).
+ * Text-message opt-ins are never accepted here; the candidate's text rule is `textMessageTopic`.
+ */
 const MARKETING = /\bnewsletters?\b|\bmarketing\b|\bpromotional\b|\bjob alerts?\b|\btalent (?:community|network|pool)\b|\bfuture (?:job |career )?(?:opportunities|openings|roles|positions)\b|\btext messages?\b|\bsms\b|\bwhatsapp\b|\bsubscribe\b|\bmailing list\b/i;
 
 const DATA_RETENTION = /\b(?:consent|agree|authori[sz]e|permit|allow)\b[^.]{0,160}\b(?:retain|retention|store|storing|stored|keep|keeping|hold|holding)\b[^.]{0,100}\b(?:data|information|details|application|cv|resume)\b|\bretain(?:s|ing)? my (?:personal )?(?:data|information|application)\b|\bhas my consent to retain\b/i;
@@ -143,6 +146,35 @@ const ARBITRATION = /\barbitrat\w*/i;
 const ARBITRATION_VERB = /\b(?:agree|acknowledge|accept|consent|understand)\b/i;
 
 const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
+
+/**
+ * The candidate's text-message rule (2026-11-20, verbatim: "Texts yes about my application status").
+ * Which texts a consent question asks about, read from its label and options together: "application"
+ * when it names only texts about this application (its status, the hiring process, interviews),
+ * "marketing" when it names only marketing, job alerts, other openings, newsletters, events, or a
+ * talent community, and "unclear" when it names both, another channel (WhatsApp, calls, email),
+ * neither, or its label was clipped ("…"). Null when it is not a consent question about texts.
+ * Deterministic; no model participates. The standing settings never accept texts (MARKETING above);
+ * the planner applies this rule first (textMessageConsentDecision, packages/browser/src/standing-fields.ts).
+ */
+export type TextMessageTopic = "application" | "marketing" | "unclear";
+
+const TEXTS = /\btext[- ]?messag\w*|\btexting\b|\btexts\b|\btext (?:you|me)\b|\bsms\b|\bmms\b|\bwhatsapp\b/i;
+const TEXT_CONSENT = /\bconsent\w*|\bagree\w*|\bopt(?:[- ]?(?:in|out)|s? in)\b|\breceiv\w*|\bpermission\b|\bauthori[sz]\w*|\bmay (?:we|i)\b|\bcan we\b|\bok(?:ay)? (?:to|for)\b|\ballow\w*|\bsign (?:me )?up\b|\bsubscri\w*|\bsend (?:you|me)\b|\bwould you like\b/i;
+const OTHER_CHANNEL = /\bwhatsapp\b|\bauto[- ]?dial\w*|\bpre-?recorded\b|\bartificial voice\b|\bcalls?\b|\bvoicemails?\b|\be-?mails?\b/i;
+const APPLICATION_TEXTS = /\b(?:your|my|this|the) (?:job |internship )?application\b|\bapplication (?:status|updates?|process|progress)\b|\b(?:job|internship) application\b|\bcandidacy\b|\binterview\w*|\bhiring process\b|\brecruit(?:ing|ment) process\b/i;
+const MARKETING_TEXTS = /\bmarketing\b|\bpromotion(?:al|s)?\b|\bnewsletters?\b|\bnews\b|\b(?:job|career) alerts?\b|\bjob (?:recommendations?|matches|openings?|postings?)\b|\b(?:future|other|new|similar|relevant|additional|upcoming) (?:job |career |employment )?(?:opportunit(?:y|ies)|openings?|roles?|positions?|jobs|vacancies)\b|\btalent (?:community|network|pool)\b|\b(?:recruiting|career|hiring|company) events?\b|\bspecial offers?\b|\bdeals?\b|\bsurveys?\b|\bsubscri\w*/i;
+
+export function textMessageTopic(question: string, options: readonly string[] = []): TextMessageTopic | null {
+  const label = normalize(question);
+  const text = normalize([label, ...options].join(" "));
+  if (!TEXTS.test(text) || !TEXT_CONSENT.test(text)) return null;
+  if (label.endsWith("…") || OTHER_CHANNEL.test(text)) return "unclear";
+  const application = APPLICATION_TEXTS.test(text);
+  const marketing = MARKETING_TEXTS.test(text);
+  if (application && marketing) return "unclear";
+  return application ? "application" : marketing ? "marketing" : "unclear";
+}
 
 /** Every fact group whose pattern a statement matches, in list order. */
 export function factGroupsOf(text: string): FactGroup[] {

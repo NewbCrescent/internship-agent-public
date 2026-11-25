@@ -9,7 +9,8 @@ import {
   isSignatureLabel,
   signatureDateValue,
   standingConsentSettings,
-  standingStatementDecision
+  standingStatementDecision,
+  textMessageTopic
 } from "@internship-agent/domain";
 
 /** Fictional statements; Fixture Robotics is not a real employer. */
@@ -240,6 +241,46 @@ describe("marketing opt-ins", () => {
     "I consent to Fixture Robotics storing my data to contact me about future opportunities"
   ])("never accepts %s", (statement) => {
     expect(standingStatementDecision(statement, BOTH)).toEqual({ verdict: "marketing" });
+  });
+});
+
+describe("the candidate's text-message rule (textMessageTopic)", () => {
+  const CONSENT = "Check Yes or No to indicate your agreement to receive text message updates from Fixture Robotics Inc. regarding your job application. Frequency may vary. Message and data rates may apply. Reply STOP to opt out of future messaging.";
+  const YES = "Yes - I consent to receiving text messages";
+  const NO = "No - I do not consent to receiving text messages";
+
+  it.each<[string, string[]]>([
+    [CONSENT, [YES, NO]],
+    ["Can we text you about the status of your application?", ["Yes", "No"]],
+    ["I agree to receive text messages about my application", []]
+  ])("reads %s as texts about this application", (question, options) => {
+    expect(textMessageTopic(question, options)).toBe("application");
+  });
+
+  it.each([
+    "I agree to receive text messages about future job opportunities at Fixture Robotics",
+    "Sign me up for SMS job alerts"
+  ])("reads %s as marketing texts", (question) => {
+    expect(textMessageTopic(question)).toBe("marketing");
+  });
+
+  it.each<[string, string[]]>([
+    ["I agree to receive text messages about my application and future job opportunities", []],
+    ["Check Yes or No to indicate your agreement to receive text message updates via SMS and/or WhatsApp from Fixture Robotics Inc. regarding your job application. Frequency may vary. Message and data rates may apply.", [YES, NO]],
+    ["May we send you text messages?", ["Yes", "No"]],
+    ["I consent to calls and text messages about my application", []],
+    ["I agree to receive text messages about my applic…", []],
+    ["communicationConsent", [YES, NO]]
+  ])("reads %s as unclear", (question, options) => {
+    expect(textMessageTopic(question, options)).toBe("unclear");
+  });
+
+  it.each<[string, string[]]>([
+    ["Phone number", []],
+    ["Do you have experience with SMS gateways?", ["Yes", "No"]],
+    ["Send me marketing emails and job alerts.", []]
+  ])("leaves %s alone", (question, options) => {
+    expect(textMessageTopic(question, options)).toBe(null);
   });
 });
 

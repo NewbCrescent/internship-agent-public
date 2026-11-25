@@ -10,6 +10,7 @@ import {
   MARKETING_QUESTION,
   planAutofill,
   SIGNATURE_QUESTION,
+  TEXT_MESSAGE_QUESTION,
   type FieldResolution,
   type StandingInputs
 } from "@internship-agent/browser";
@@ -157,6 +158,47 @@ describe("marketing opt-ins", () => {
       action: "pause", pause: { question: MARKETING_QUESTION }
     });
     expect(decisionOf(form(box("news", "Send me marketing emails and job alerts.", false)), "news", undefined).action).toBe("skip");
+  });
+});
+
+describe("the text-message rule in the planner", () => {
+  const CONSENT = "Check Yes or No to indicate your agreement to receive text message updates from Fixture Robotics Inc. regarding your job application. Frequency may vary. Message and data rates may apply. Reply STOP to opt out of future messaging.";
+  const YES = "Yes - I consent to receiving text messages";
+  const NO = "No - I do not consent to receiving text messages";
+  const radio = (label: string): BrowserField => ({ id: "communicationConsent", label, kind: "radio", required: false, options: [YES, NO] });
+
+  it("chooses Yes for texts about this application, whatever the standing settings", () => {
+    for (const standing of [undefined, ALL_OFF, BOTH_ON]) {
+      const result = plan(form(radio(CONSENT)), standing);
+      expect(result.decisions.find((decision) => decision.fieldId === "communicationConsent")).toMatchObject({ action: "choose", value: YES, basis: null });
+      expect(result.pauses).toEqual([]);
+    }
+  });
+
+  it("chooses No for job-alert texts", () => {
+    const label = "Check Yes or No to indicate your agreement to receive text messages from Fixture Robotics Inc. about job alerts and future openings.";
+    expect(decisionOf(form(radio(label)), "communicationConsent")).toMatchObject({ action: "choose", value: NO });
+  });
+
+  it("pauses a mixed question with its readable label", () => {
+    const label = "Check Yes or No to indicate your agreement to receive text messages from Fixture Robotics Inc. about your application and future job opportunities.";
+    const result = plan(form(radio(label)));
+    expect(result.decisions[0]).toMatchObject({ action: "pause", pause: { question: TEXT_MESSAGE_QUESTION } });
+    expect(result.pauses[0]!.label).toBe(label);
+  });
+
+  it("never answers Yes for a radio set read only by its name", () => {
+    expect(decisionOf(form(radio("communicationConsent")), "communicationConsent")).toMatchObject({ action: "pause", pause: { question: TEXT_MESSAGE_QUESTION } });
+  });
+
+  it("checks a single box for texts about this application, without standing settings", () => {
+    expect(decisionOf(form(box("texts", "I agree to receive text messages about my application", false)), "texts")).toMatchObject({ action: "check", value: "true" });
+  });
+
+  it("leaves an optional marketing-texts box unchecked and pauses a required one", () => {
+    const label = "I agree to receive texts about future openings at Fixture Robotics";
+    expect(decisionOf(form(box("texts", label, false)), "texts")).toMatchObject({ action: "skip" });
+    expect(decisionOf(form(box("texts", label, true)), "texts")).toMatchObject({ action: "pause", pause: { question: MARKETING_QUESTION } });
   });
 });
 

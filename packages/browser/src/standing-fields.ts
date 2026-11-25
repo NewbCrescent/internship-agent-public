@@ -1,13 +1,15 @@
 import type { BrowserField, FillDecision, RecognizedForm } from "@internship-agent/domain";
 import {
   affirmativeOption,
+  booleanOption,
   classifyStandingStatement,
   isSignatureDateLabel,
   isSignatureLabel,
   signatureDateValue,
   standingStatementDecision,
   type StandingBasisSetting,
-  type StandingConsentSettings
+  type StandingConsentSettings,
+  textMessageTopic
 } from "@internship-agent/domain";
 
 /**
@@ -22,6 +24,10 @@ export type StandingInputs = StandingConsentSettings & { signatureName?: string;
 export const SIGNATURE_QUESTION = "electronic signature: needs your OK";
 /** The plain reason a required marketing or newsletter opt-in waits for the candidate. */
 export const MARKETING_QUESTION = "marketing opt-in: needs your OK";
+/** The plain reason a text-message consent question waits for the candidate: mixed, another channel, no topic, or a clipped label. */
+export const TEXT_MESSAGE_QUESTION = "text messages: this does not ask only about texts on this application (your rule: Yes to texts about your application, No to marketing or job alerts). Please answer it yourself.";
+const TEXTS_YES = "Your text-message rule (2026-11-20): Yes to texts about this application.";
+const TEXTS_NO = "Your text-message rule (2026-11-20): No to marketing or job-alert texts.";
 const SIGNATURE_NO_NAME = "electronic signature: add your legal first and last name (or full name) on the profile page";
 
 /** Marketing, newsletter, and talent-pool opt-ins a list or radio set declines (domain MARKETING without the text-message terms). */
@@ -133,4 +139,32 @@ export function standingFieldDecision(field: BrowserField, form: RecognizedForm,
     return null;
   }
   return null;
+}
+
+/**
+ * The candidate's text-message rule for a consent question about texts (textMessageTopic), whatever
+ * the standing settings: texts about this application take the Yes option (a single box is checked);
+ * marketing or job-alert texts take the No option (an optional box or list with no No stays empty, a
+ * required one pauses); a mixed or unclear question pauses. Never accepts marketing. Null for anything
+ * else (left to the usual rules), including text boxes and checkbox groups.
+ */
+export function textMessageConsentDecision(field: BrowserField): FillDecision | null {
+  const options = field.options ?? [];
+  const list = (field.kind === "radio" || field.kind === "select") && options.length >= 2;
+  const box = field.kind === "checkbox" && options.length < 2;
+  if (!list && !box) return null;
+  const topic = textMessageTopic(field.label, options);
+  if (topic === null) return null;
+  if (topic === "application") {
+    if (box) return { fieldId: field.id, action: "check", value: "true", basis: null, reason: TEXTS_YES, pause: null };
+    const option = booleanOption(true, options) ?? affirmativeOption(options);
+    return option ? { fieldId: field.id, action: "choose", value: option, basis: null, reason: TEXTS_YES, pause: null } : pause(field, TEXT_MESSAGE_QUESTION);
+  }
+  if (topic === "marketing") {
+    const option = list ? booleanOption(false, options) : null;
+    if (option) return { fieldId: field.id, action: "choose", value: option, basis: null, reason: TEXTS_NO, pause: null };
+    if (!field.required) return { fieldId: field.id, action: "skip", value: null, basis: null, reason: `${TEXTS_NO} Left unanswered.`, pause: null };
+    return pause(field, box ? MARKETING_QUESTION : TEXT_MESSAGE_QUESTION);
+  }
+  return pause(field, TEXT_MESSAGE_QUESTION);
 }

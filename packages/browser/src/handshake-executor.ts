@@ -1110,7 +1110,12 @@ export function attachedNamesFromText(text: string): string[] {
  * says "autofill", as Dover's), and the CAPTCHA token field are not controls. Ashby's Yes/No button
  * pairs are read as one radio question, its `_required` question-title class
  * marks a question required, and a fieldset's question-title label (not one
- * for its radios) labels the radio group. A short Greenhouse question label
+ * for its radios) labels the radio group. Ashby's text-message consent radios
+ * (in `.ashby-application-form-texting-consent-description`, inside the phone
+ * field's entry) take the consent text as their question (a channel heading in
+ * front), never the radio name or the phone's title, and do not inherit the
+ * phone title's `_required`; a fieldset checkbox group with no legend takes its
+ * question-title label (Ashby's checkbox groups), never an option's label. A short Greenhouse question label
  * with no "?" takes its `<id>-description` question as well ("HISTORY WITH
  * IRONVALE: Have you previously applied to a position at Ironvale?"). A control
  * with neither id nor name is tagged `data-ia-control="ia-control-<n>"` and
@@ -1154,7 +1159,7 @@ export function collectControlsIn(root: Element): RawControl[] {
   };
   const unstar = (text: string): string => text.replace(MARKER, "").trim();
   /** Visible text of a label: nested controls, live regions, status/listbox widgets, and hidden elements are skipped. */
-  const textOf = (element: Element | null | undefined): string => {
+  const textOf = (element: Element | null | undefined, skip?: (child: Element) => boolean): string => {
     if (!element) return "";
     const parts: string[] = [];
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
@@ -1162,6 +1167,7 @@ export function collectControlsIn(root: Element): RawControl[] {
         if (node.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
         const child = node as Element;
         if (child.matches("input, textarea, select, button, option, script, style")) return NodeFilter.FILTER_REJECT;
+        if (skip?.(child)) return NodeFilter.FILTER_REJECT;
         if (child.hasAttribute("aria-live") || SKIPPED_ROLE.test(child.getAttribute("role") ?? "")) return NodeFilter.FILTER_REJECT;
         const style = getComputedStyle(child);
         if (style.display === "none" || style.visibility === "hidden") return NodeFilter.FILTER_REJECT;
@@ -1285,6 +1291,28 @@ export function collectControlsIn(root: Element): RawControl[] {
     const title = element.closest(".ashby-application-form-field-entry")?.querySelector(".ashby-application-form-question-title");
     return Boolean(title && Array.from(title.classList).some((name) => /^_required(?:_|$)/.test(name)));
   };
+  /** Ashby's text-message consent block, drawn inside the phone field's entry: its radios are not the phone question. */
+  const TEXTING_CONSENT = ".ashby-application-form-texting-consent-description";
+  const isOptionLabel = (element: Element): boolean => element.tagName === "LABEL" && Boolean(element.querySelector('input[type="radio"], input[type="checkbox"]'));
+  /**
+   * The question of Ashby's text-message consent radios (`communicationConsent`; `smsConsent` and
+   * `whatsAppConsent` when both channels are asked): the consent body's first paragraph outside the
+   * option labels and channel items, else the block's text without its option labels; a channel
+   * item's own heading ("SMS", "WhatsApp") goes in front. Empty outside the block.
+   */
+  const textingConsentQuestion = (input: Element): string => {
+    const block = input.closest(TEXTING_CONSENT);
+    if (!block) return "";
+    const paragraph = Array.from(block.querySelectorAll("p"))
+      .filter((p) => !p.closest("label") && !p.closest("li"))
+      .map((p) => textOf(p)).find(Boolean);
+    const body = paragraph || textOf(block, isOptionLabel);
+    const item = input.closest("li");
+    const channel = item && block.contains(item)
+      ? Array.from(item.querySelectorAll("p")).filter((p) => !p.closest("label")).map((p) => textOf(p)).find(Boolean) ?? ""
+      : "";
+    return collapse(channel && body ? `${channel}: ${body}` : body);
+  };
   const requiredOf = (element: Element, label: string | undefined): boolean => {
     if ((element as HTMLInputElement).required || element.getAttribute("aria-required") === "true") return true;
     if (element.closest('[role="group"], [role="radiogroup"], fieldset')?.getAttribute("aria-required") === "true") return true;
@@ -1372,11 +1400,13 @@ export function collectControlsIn(root: Element): RawControl[] {
       namesDone.add(`radio:${input.name}`);
       const radios = named("radio", input.name);
       const group = input.closest('fieldset, [role="radiogroup"]');
+      const consentBlock = input.closest(TEXTING_CONSENT);
       // Ashby's question title: a label inside the group that holds no control and is not one of its radios' labels.
       const radioIds = new Set(radios.map((radio) => radio.id).filter(Boolean));
       const titleLabel = group ? Array.from(group.querySelectorAll("label")).find((label) =>
         !label.querySelector(CONTROL) && !radioIds.has(label.getAttribute("for") ?? "")) : undefined;
-      const rawLabel = (group ? textOf(group.querySelector("legend")) || byIds(group.getAttribute("aria-labelledby")) || collapse(group.getAttribute("aria-label")) || textOf(titleLabel) || "" : "")
+      const rawLabel = textingConsentQuestion(input)
+        || (group ? textOf(group.querySelector("legend")) || byIds(group.getAttribute("aria-labelledby")) || collapse(group.getAttribute("aria-label")) || textOf(titleLabel) || "" : "")
         || questionLabelNear(input) || nameLabel(input.name);
       const checked = radios.find((radio) => radio.checked);
       const options = radios.map((radio) => {
@@ -1390,7 +1420,7 @@ export function collectControlsIn(root: Element): RawControl[] {
         id: input.name,
         name: input.name,
         label: unstar(rawLabel) || undefined,
-        required: radios.some((radio) => radio.required) || group?.getAttribute("aria-required") === "true" || ashbyRequired(input) || MARKER.test(rawLabel),
+        required: radios.some((radio) => radio.required) || group?.getAttribute("aria-required") === "true" || (!consentBlock && ashbyRequired(input)) || MARKER.test(rawLabel),
         options: options.filter(Boolean),
         value: checked ? optionLabel(checked) || undefined : undefined
       });
@@ -1420,8 +1450,10 @@ export function collectControlsIn(root: Element): RawControl[] {
         if (groupsDone.has(group)) continue;
         groupsDone.add(group);
         const boxes = Array.from(group.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+        const boxIds = new Set(boxes.map((box) => box.id).filter(Boolean));
+        const titleLabel = Array.from(group.querySelectorAll("label")).find((label) => !label.querySelector(CONTROL) && !boxIds.has(label.getAttribute("for") ?? "") && textOf(label));
         const legend = group.querySelector("legend");
-        const rawLabel = textOf(legend) || byIds(group.getAttribute("aria-labelledby")) || collapse(group.getAttribute("aria-label")) || "";
+        const rawLabel = textOf(legend) || byIds(group.getAttribute("aria-labelledby")) || collapse(group.getAttribute("aria-label")) || textOf(titleLabel) || "";
         const checked = boxes.filter((box) => box.checked).map(optionLabel).filter(Boolean);
         controls.push({
           tag: "input",
