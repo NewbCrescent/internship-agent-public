@@ -5,6 +5,7 @@ import {
   fitSkipLine,
   judgeFit,
   judgeLocation,
+  judgePay,
   judgeRole,
   judgeSource,
   judgeTargetPosting,
@@ -106,6 +107,89 @@ describe("source", () => {
     expect(judgeTargetPosting({ ...posting, onHandshake: false }, summer)).toEqual({ outcome: "apply", reasons: [] });
     expect(judgeTargetPosting({ ...posting, onHandshake: true }, summer))
       .toEqual({ outcome: "skip", reasons: ["Source: Handshake is out of scope (GitHub lists only)."] });
+  });
+});
+
+describe("pay", () => {
+  // The candidate's rule (2026-11-24): "unpaid inter ships should be ruled out". Fictional postings.
+  const unpaid = { outcome: "skip", reasons: ["Pay: the posting says the internship is unpaid."] };
+  const pass = { outcome: "apply", reasons: [] };
+  const body = (text: string, compensation: Parameters<typeof judgePay>[0]["compensation"] = null) =>
+    judgePay({ title: "Software Engineering Intern", text, compensation });
+  const hourly = { minimum: 25, maximum: 32, period: "HOUR" } as const;
+
+  it.each([
+    "Lakeshore Rides — Software Engineering Internship (UNPAID)",
+    "Software Engineering Intern [Unpaid]",
+    "Unpaid Software Engineering Intern",
+    "Software Developer Internship - Unpaid",
+    "Web Developer Intern (Volunteer)"
+  ])("skips the unpaid title %s", (title) => {
+    expect(judgePay({ title, text: "We build software.", compensation: null })).toEqual(unpaid);
+  });
+
+  it.each([
+    "This is an unpaid internship for students interested in web development.",
+    "The internship is unpaid and offers academic credit.",
+    "This position is unpaid.",
+    "Join us for an unpaid summer internship building our booking app.",
+    "No compensation will be provided for this internship.",
+    "There is no compensation for this internship.",
+    "This is a volunteer position supporting our engineering team.",
+    "Internship (unpaid), 10 hours per week."
+  ])("skips the unpaid description %s", (text) => {
+    expect(body(text)).toEqual(unpaid);
+  });
+
+  it("skips an extracted pay of exactly zero", () => {
+    expect(body("Pay: $0 per hour.", { minimum: 0, maximum: null, period: "HOUR" }))
+      .toEqual({ outcome: "skip", reasons: ["Pay: the posting states zero pay."] });
+    expect(body("Pay: $0 - $0 per hour.", { minimum: 0, maximum: 0, period: "HOUR" }).outcome).toBe("skip");
+  });
+
+  it.each([
+    "We build software. The internship includes mentorship.",
+    "This is a paid internship.",
+    "Interns receive a competitive stipend.",
+    "The hourly pay for this internship is $28 to $34.",
+    "You will automate the reconciliation of unpaid invoices.",
+    "Build dashboards that track unpaid balances for our finance team.",
+    "We offer both paid and unpaid internships across departments.",
+    "This role may be a paid or unpaid internship depending on the team.",
+    "This is not an unpaid internship.",
+    "We never offer unpaid internships.",
+    "There is no compensation for travel; the role is remote.",
+    "No compensation decisions are based on protected characteristics.",
+    "Employees enjoy paid volunteer opportunities.",
+    "Volunteer work counts as experience."
+  ])("passes %s", (text) => {
+    expect(body(text)).toEqual(pass);
+  });
+
+  it.each([
+    "Accounts Receivable Software Intern - Unpaid Invoices Automation",
+    "Software Engineering Intern (Paid or Unpaid)",
+    "Software Engineering Intern (Paid)",
+    "Volunteer Management Systems Software Intern"
+  ])("passes the title %s", (title) => {
+    expect(judgePay({ title, text: "We build software.", compensation: null })).toEqual(pass);
+  });
+
+  it("passes stated pay and silence, and holds a description that says unpaid beside a positive figure", () => {
+    expect(body("The hourly pay is $25 to $32.", hourly)).toEqual(pass);
+    expect(body("Interns receive a stipend.", { minimum: null, maximum: null, period: "STIPEND" })).toEqual(pass);
+    expect(body("This is an unpaid internship. No stipend is provided.", { minimum: null, maximum: null, period: "STIPEND" })).toEqual(unpaid);
+    expect(body("This is an unpaid internship. Travel is reimbursed at $25 per hour.", hourly))
+      .toEqual({ outcome: "review", reasons: ["Pay: the description calls the internship unpaid but also states pay."] });
+  });
+
+  it("rules an unpaid posting out of the combined target decision, alone among the reasons", () => {
+    const posting = { text: "We build software.", employmentType: "INTERNSHIP" as const, countryCodes: ["US"], onHandshake: false };
+    expect(judgeTargetPosting({ ...posting, title: "Software Engineering Intern (UNPAID)" }, summer)).toEqual(unpaid);
+    expect(judgeTargetPosting({ ...posting, title: "Software Engineering Intern", text: "This is an unpaid internship." }, summer)).toEqual(unpaid);
+    expect(judgeTargetPosting({ ...posting, title: "Software Engineering Intern", compensation: { minimum: 0, maximum: 0, period: "HOUR" } }, summer))
+      .toEqual({ outcome: "skip", reasons: ["Pay: the posting states zero pay."] });
+    expect(judgeTargetPosting({ ...posting, title: "Software Engineering Intern", compensation: hourly }, summer)).toEqual(pass);
   });
 });
 

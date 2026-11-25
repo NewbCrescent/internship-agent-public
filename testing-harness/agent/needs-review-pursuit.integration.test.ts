@@ -29,7 +29,7 @@ import {
   saveSemanticFit,
   seedDevelopmentData
 } from "@internship-agent/db";
-import type { BrowserField, BrowserRun, JobRequirement, SemanticFitAssessment } from "@internship-agent/domain";
+import type { BrowserField, BrowserRun, JobCompensation, JobRequirement, SemanticFitAssessment } from "@internship-agent/domain";
 import { companyCapReason } from "@internship-agent/domain";
 import type { BrowserPage, RawControl } from "@internship-agent/browser";
 import { DOCTORAL_STUDY_REVIEW_REASON, MASTER_STUDY_REVIEW_REASON } from "@internship-agent/matching";
@@ -154,7 +154,7 @@ let cloneCount = 0;
  * withdrawn first so only the copy moves through the pipeline.
  */
 function postingWith(database: DatabaseSync, seededId: string, input: {
-  extra?: Extra; title?: string; companyName?: string; sourceUrl?: string; locations?: [];
+  extra?: Extra; title?: string; companyName?: string; sourceUrl?: string; locations?: []; compensation?: JobCompensation | null;
 }): string {
   const posting = getJobPosting(database, seededId)!;
   database.prepare("UPDATE jobs SET status = 'WITHDRAWN' WHERE id = ?").run(seededId);
@@ -168,7 +168,7 @@ function postingWith(database: DatabaseSync, seededId: string, input: {
     externalApplicationUrl: null, companyCareersUrl: null,
     contentHash: `${posting.snapshot.contentHash}-pursuit-${cloneCount}`, normalizedText,
     locations: input.locations ?? posting.locations.map(({ jobId: _jobId, ...location }) => location),
-    compensation: posting.compensation,
+    compensation: input.compensation === undefined ? posting.compensation : input.compensation,
     requirements: [
       ...posting.requirements.map(({ id: _id, jobId: _jobId, ...requirement }) => requirement),
       ...(extra ? [{
@@ -468,6 +468,41 @@ describe("needs-review postings pursued on AI fit", () => {
       .find((event) => event.detail?.startsWith("Submission approved automatically by your auto-submit policy"));
     expect(approval?.detail).toContain("Experience with Elixir");
     expect(approval?.detail).toContain("2026-11-24");
+    database.close();
+  });
+});
+
+describe("unpaid postings under a target", () => {
+  // The candidate's rule (2026-11-24): "unpaid inter ships should be ruled out". Fictional postings.
+  it("rules out an unpaid title and a zero pay once, before preparing them, and still prepares a paid posting", async () => {
+    const database = disposableDatabase();
+    const seededId = seededJob(database);
+    const seededPay = getJobPosting(database, seededId)!.compensation!;
+    const unpaidJob = postingWith(database, seededId, { title: "Software Engineering Intern (UNPAID)", companyName: "Lakeshore Rides" });
+    const zeroJob = postingWith(database, seededId, { companyName: "Harbor Point", compensation: { ...seededPay, minimum: 0, maximum: 0 } });
+    const paidJob = postingWith(database, seededId, { companyName: "Eastgate Works" });
+    for (const jobId of [unpaidJob, zeroJob, paidJob]) {
+      expect(getJobMatch(database, jobId)?.verdict).toBe("QUALIFIED");
+      fit(database, jobId, 86);
+    }
+    expect(postingTargetDecision(database, unpaidJob, target))
+      .toEqual({ outcome: "skip", reasons: ["Pay: the posting says the internship is unpaid."] });
+    expect(postingTargetDecision(database, zeroJob, target)).toEqual({ outcome: "skip", reasons: ["Pay: the posting states zero pay."] });
+    expect(postingTargetDecision(database, paidJob, target)).toEqual({ outcome: "apply", reasons: [] });
+
+    const first = await pass(database, disposableDataDir(), policy);
+    expect(first.prepared.map((entry) => entry.jobId)).toEqual([paidJob]);
+    expect(first.skipped).toEqual(expect.arrayContaining([
+      { jobId: unpaidJob, reasons: ["Pay: the posting says the internship is unpaid."] },
+      { jobId: zeroJob, reasons: ["Pay: the posting states zero pay."] }
+    ]));
+    await pass(database, disposableDataDir(), policy);
+    const skips = (jobId: string) => listApplicationEvents(database, jobId)
+      .map((event) => event.detail).filter((detail) => detail?.startsWith("Not pursued for your target: "));
+    expect(skips(unpaidJob)).toEqual(["Not pursued for your target: Pay: the posting says the internship is unpaid."]);
+    expect(skips(zeroJob)).toEqual(["Not pursued for your target: Pay: the posting states zero pay."]);
+    expect(skips(paidJob)).toEqual([]);
+    expect(statusOf(database, unpaidJob)).toBe("QUALIFIED");
     database.close();
   });
 });

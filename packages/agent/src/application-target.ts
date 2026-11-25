@@ -9,7 +9,7 @@ export function targetTerm(env: Record<string, string | undefined> = process.env
   return parseTargetTerm(env.INTERNSHIP_AGENT_TARGET_TERM);
 }
 
-/** The text-only target steps (source, term, role, location) for a stored posting. */
+/** The text-only target steps (source, term, role, location, pay) for a stored posting. */
 export function postingTargetDecision(database: DatabaseSync, jobId: string, term: TargetTerm): TargetDecision {
   const posting = getJobPosting(database, jobId);
   if (!posting) return { outcome: "skip", reasons: ["The posting is unknown."] };
@@ -18,6 +18,7 @@ export function postingTargetDecision(database: DatabaseSync, jobId: string, ter
     text: posting.snapshot.normalizedText,
     employmentType: posting.employmentType,
     countryCodes: posting.locations.map((location) => location.countryCode).filter((code): code is string => Boolean(code)),
+    compensation: posting.compensation,
     onHandshake: posting.source.applicationType === "HANDSHAKE_INTERNAL" ||
       [posting.source.sourceUrl, posting.source.externalApplicationUrl].some((url) => url !== null && isHandshakeHost(url))
   }, term);

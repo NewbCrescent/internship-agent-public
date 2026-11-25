@@ -1,10 +1,11 @@
+import type { JobCompensation } from "./job-posting";
 import type { SemanticFitAssessment } from "./matching";
 import { AUTO_SUBMIT_MIN_FIT_FLOOR } from "./submission-mode";
 
 /**
  * Which postings the automatic pipeline pursues for the candidate's stated
  * target (INTERNSHIP_AGENT_TARGET_TERM, for example summer-2027): the right
- * term, a software or adjacent role, a US location, and a current AI
+ * term, a software or adjacent role, a US location, not stated as unpaid, and a current AI
  * judgment at or above the candidate's bar. Every step reads only stated
  * text; silence is never a pass for the location and AI steps, so an unknown
  * sends the posting to the candidate instead of out the door.
@@ -29,6 +30,8 @@ export type TargetPosting = {
   countryCodes: string[];
   /** The posting lives on Handshake or applies through it (the caller classifies its URLs). */
   onHandshake: boolean;
+  /** The extracted pay, when one was found; absent or null means the posting is silent on pay. */
+  compensation?: Pick<JobCompensation, "minimum" | "maximum" | "period"> | null;
 };
 
 const RANK: Record<TargetOutcome, number> = { apply: 0, review: 1, skip: 2 };
@@ -114,9 +117,60 @@ export function judgeSource(onHandshake: boolean): TargetDecision {
     : { outcome: "apply", reasons: [] };
 }
 
+// Only explicit statements count; a posting silent on pay, or one naming pay, a
+// stipend, or an hourly rate, is never read as unpaid. "Paid or unpaid
+// internship", "not an unpaid internship", and "we never offer unpaid
+// internships" (a plural is about internships in general) are not statements
+// that this one is.
+const NOT_THIS_ONE = String.raw`(?<!\bpaid\s*(?:or|and|\/)\s*)(?<!\b(?:not|never)\s+(?:an?\s+)?)`;
+const UNPAID_STATEMENTS = [
+  /[([]\s*unpaid\s*[)\]]/i,
+  new RegExp(NOT_THIS_ONE + String.raw`\bunpaid\s+(?:(?:summer|part[- ]time|full[- ]time|remote|virtual)\s+)?(?:intern(?:ship)?|position|role|opportunity|placement|program|externship|fellowship)\b`, "i"),
+  /\b(?:intern(?:ship)?|position|role|opportunity|placement|program)\s+(?:is|will be)\s+(?:an?\s+)?unpaid\b/i,
+  // "No compensation will be provided", not "no compensation for travel" or "no compensation decisions".
+  /\bno\s+(?:monetary\s+|financial\s+)?compensation\b(?!\s+(?:(?:for|of)\s+(?:travel|relocation|housing|expenses?|mileage|parking|commuting|overtime|meals?)|decisions?|discrimination|history|data|information|structure|philosophy|questions?)\b)/i,
+  /\b(?:this|it)\s+(?:is|will be)\s+an?\s+(?:unpaid\s+)?volunteer\s+(?:position|role|internship|opportunity)\b/i
+];
+// In a title, "unpaid" alone ("Internship - Unpaid") or "(Volunteer)" also
+// counts, unless "unpaid" names something other than the internship ("Unpaid Invoices").
+const UNPAID_TITLE = [
+  new RegExp(NOT_THIS_ONE + String.raw`\bunpaid\b(?!\s+(?:invoices?|balances?|bills?|claims?|leave|accounts?|debts?|wages?|taxes|time)\b)`, "i"),
+  /[([]\s*volunteer\s*[)\]]/i
+];
+
+function statesUnpaid(text: string): boolean {
+  return UNPAID_STATEMENTS.some((pattern) => pattern.test(text));
+}
+
+/**
+ * Unpaid internships are not pursued (the candidate's rule, 2026-11-24:
+ * "unpaid inter ships should be ruled out"). A title or description that
+ * states the internship is unpaid, or an extracted pay of exactly zero, skips;
+ * a description that says unpaid while a positive figure was extracted goes to
+ * the candidate. Silence on pay passes.
+ */
+export function judgePay(posting: Pick<TargetPosting, "title" | "text" | "compensation">): TargetDecision {
+  const pay = posting.compensation ?? null;
+  const figures = pay ? [pay.minimum, pay.maximum].filter((value): value is number => value !== null) : [];
+  if (figures.length > 0 && figures.every((value) => value === 0)) {
+    return { outcome: "skip", reasons: ["Pay: the posting states zero pay."] };
+  }
+  if (UNPAID_TITLE.some((pattern) => pattern.test(posting.title)) || statesUnpaid(posting.title)) {
+    return { outcome: "skip", reasons: ["Pay: the posting says the internship is unpaid."] };
+  }
+  if (statesUnpaid(posting.text)) {
+    return figures.some((value) => value > 0)
+      ? { outcome: "review", reasons: ["Pay: the description calls the internship unpaid but also states pay."] }
+      : { outcome: "skip", reasons: ["Pay: the posting says the internship is unpaid."] };
+  }
+  return { outcome: "apply", reasons: [] };
+}
+
 /** The cheap, text-only steps; they run before any model call. */
 export function judgeTargetPosting(posting: TargetPosting, term: TargetTerm): TargetDecision {
-  return combineTargetDecisions(judgeSource(posting.onHandshake), judgeTerm(posting, term), judgeRole(posting.title), judgeLocation(posting.countryCodes));
+  return combineTargetDecisions(
+    judgeSource(posting.onHandshake), judgeTerm(posting, term), judgeRole(posting.title), judgeLocation(posting.countryCodes), judgePay(posting)
+  );
 }
 
 const LEVEL_GAP = /\b(?:master'?s|ph\.?\s?d|doctoral|doctorate|graduate (?:student|degree|program|level)|mba|post-?graduate|class standing|year of study)\b/i;
