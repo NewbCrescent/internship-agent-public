@@ -201,7 +201,7 @@ describe("saved voluntary self-identification answers in browser runs", () => {
     expect(page.filled.get("race")).toBe("Asian");
     expect(page.filled.get("veteran")).toBe(PROTECTED_OPTION);
     expect(page.filled.get("disability")).toBe(HAS_DISABILITY_OPTION);
-    expect(page.filled.get("start")).toBe("2030-01-15");
+    expect(page.filled.get("start")).toBe("01/15/2030");
     expect(decision(run, "gender")).toMatchObject({ action: "choose", basis: { kind: "fact", key: "eeo_gender" } });
     for (const entry of run.decisions) {
       for (const option of ["Female", "Asian", PROTECTED_OPTION, HAS_DISABILITY_OPTION]) expect(entry.reason).not.toContain(option);

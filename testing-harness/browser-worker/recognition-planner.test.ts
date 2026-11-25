@@ -1804,6 +1804,59 @@ describe("Ashby's answer saves and submit feedback", () => {
   });
 });
 
+describe("known-answer gaps from the 2026-11-25 pass", () => {
+  const phoneTypePlan = (phoneType: string, options: string[]) => planAutofill(recognizeForm("https://example.test/apply", "Apply", [
+    control({ tag: "select", id: "phone-type", label: "Phone Device Type*", required: true, options })
+  ]), { profile: { phoneType }, resolutions: new Map(), packageAnswers: [], variantId: null }).decisions[0]!;
+
+  it("picks the one personal or home mobile option for a saved \"Mobile\" phone type (Workday tenants)", () => {
+    const rows: Array<[string[], string]> = [
+      [["Select One", "Home Mobile", "Home Phone", "Work Mobile", "Work Phone"], "Home Mobile"],
+      [["Select One", "Corporate Mobile", "Fax", "Landline", "Personal Mobile", "TTY"], "Personal Mobile"],
+      [["Select One", "Personal Landline", "Personal Mobile Phone"], "Personal Mobile Phone"],
+      [["Select One", "Home", "Mobile - Personal", "Mobile - Work", "Work"], "Mobile - Personal"],
+      [["Personal Mobile", "Corporate Mobile", "Work Mobile"], "Personal Mobile"]
+    ];
+    for (const [options, expected] of rows) {
+      expect(phoneTypePlan("Mobile", options), options.join(", ")).toMatchObject({
+        action: "choose", value: expected, basis: { kind: "profile", field: "phoneType" }, reason: "Contact details from your profile."
+      });
+    }
+  });
+
+  it("never picks a work mobile, and pauses a saved \"Home\" phone type with no exact option", () => {
+    expect(phoneTypePlan("Home", ["Home Mobile", "Work Mobile"])).toMatchObject({ action: "pause" });
+    expect(phoneTypePlan("Mobile", ["Work Mobile", "Corporate Mobile"])).toMatchObject({ action: "pause" });
+    expect(phoneTypePlan("Mobile", ["Home Mobile", "Personal Mobile"])).toMatchObject({ action: "pause" });
+  });
+
+  it("types the saved start date in the format the field takes (synthetic date)", () => {
+    const start: FieldResolution = { status: "RESOLVED", key: "available_start_date", scope: "global", display: "2027-06-01", value: "2027-06-01" };
+    const form = recognizeForm("https://example.test/apply", "Apply", [
+      control({ tag: "input", type: "text", id: "text", label: "What is your available start date?", required: true }),
+      control({ tag: "input", type: "text", id: "dmy", label: "Start date (DD/MM/YYYY)", required: true }),
+      control({ tag: "input", type: "date", id: "date", label: "Available start date", required: true }),
+      control({ tag: "input", type: "workday-date", id: "formField-earliestStart", label: "What is the earliest date you can start employment?", required: true }),
+      control({ tag: "input", type: "number", id: "number", label: "Start date", required: true })
+    ]);
+    expect(form.fields.map((field) => field.kind)).toEqual(["text", "text", "date", "date", "number"]);
+    const plan = planAutofill(form, {
+      profile: {},
+      resolutions: new Map(form.fields.map((field) => [field.id, start])),
+      packageAnswers: [],
+      variantId: null
+    });
+    expect(plan.decisions.map((decision) => [decision.fieldId, decision.action, decision.value])).toEqual([
+      ["text", "fill", "06/01/2027"],
+      ["dmy", "fill", "01/06/2027"],
+      ["date", "fill", "2027-06-01"],
+      ["formField-earliestStart", "fill", "2027-06-01"],
+      ["number", "pause", null]
+    ]);
+    expect(plan.decisions[0]!.basis).toEqual({ kind: "fact", key: "available_start_date", scope: "global" });
+  });
+});
+
 describe("Ashby's submit on the network (Track 22)", () => {
   const FAST = { timeoutMs: 50, pollMs: 1 };
   const ENTRY = "9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2";

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { classifyWorkdayAccountMessage, newWorkdayVerifyNotice, workdayErrorPauses, type WorkdayPageError } from "@internship-agent/browser";
+import { classifyWorkdayAccountMessage, markWorkdayResumeUpload, newWorkdayVerifyNotice, planAutofill, workdayErrorPauses, type WorkdayPageError } from "@internship-agent/browser";
 import { browserSessionSchema, parseWorkdayUrl, workdaySiteKey, type RecognizedForm } from "@internship-agent/domain";
 
 const FORM: RecognizedForm = {
@@ -140,5 +140,32 @@ describe("Workday career sites", () => {
     const many = workdayErrorPauses("My Information", FORM, Array.from({ length: 14 }, (_, index) => bannerError(`Unknown problem ${index + 1}.`)));
     expect(many).toHaveLength(10);
     expect(many.at(-1)?.fieldId).toBe("workday-error-10");
+  });
+});
+
+describe("Workday's My Experience resume upload with a generic label (littelfuse.wd1, zoll.wd5, 2026-11-25)", () => {
+  const upload = (id: string, label: string, required = true) => ({ id, label, kind: "file" as const, required });
+  const form = (...fields: RecognizedForm["fields"]): RecognizedForm => ({ url: FORM.url, title: "Apply", fields });
+
+  it("reads the one generic upload on My Experience as the resume upload, which receives the resume", () => {
+    const marked = markWorkdayResumeUpload("My Experience", form(upload("formField-", "Upload a file (5MB max)")));
+    expect(marked.fields[0]).toMatchObject({ id: "formField-", label: "Resume/CV", kind: "file", required: true });
+    const plan = planAutofill(marked, { profile: {}, resolutions: new Map(), packageAnswers: [], variantId: "variant-1" });
+    expect(plan.decisions[0]).toMatchObject({ fieldId: "formField-", action: "upload", basis: { kind: "variant", variantId: "variant-1" } });
+    expect(plan.pauses).toEqual([]);
+  });
+
+  it("leaves other steps, two generic uploads, named documents, and an existing resume upload as read", () => {
+    const generic = upload("formField-", "Upload a file (5MB max)");
+    const other = form(generic);
+    expect(markWorkdayResumeUpload("Application Questions", other)).toBe(other);
+    const two = form(generic, upload("formField-other", "Upload files"));
+    expect(markWorkdayResumeUpload("My Experience", two)).toBe(two);
+    for (const label of ["Cover Letter", "Upload your transcript"]) {
+      const named = form(upload("formField-", label));
+      expect(markWorkdayResumeUpload("My Experience", named), label).toBe(named);
+    }
+    const withResume = form(upload("file-upload-input-ref", "Resume/CV", false), generic);
+    expect(markWorkdayResumeUpload("My Experience", withResume)).toBe(withResume);
   });
 });

@@ -427,6 +427,121 @@ Device Type and State. Not verified live: the real tenants' list markup
 (no form-step DOM was captured); a tenant that names the phone type other
 than "Mobile" still pauses.
 
+### Sponsorship questions that mention work authorization were answered as work authorization
+
+Found 2026-11-25 on the real workspace, in manual pass 5. ITW's "Will you
+now or in the future require sponsorship for an employment visa status
+(e.g., H-1B, E-3, TN, O-1, STEM OPT), or any immigration work
+authorization requiring a written submission from the company to a
+government agency)?" (<run id>, <run id>) was answered "Yes" from the
+saved work-authorization answer, so the required "Please explain"
+follow-up appeared and the run paused on it; the saved sponsorship answer
+would have answered No. No submitted run had this pattern. Cause: the
+mapper tested "work authorization" before the sponsorship wording, so any
+question naming both became a work-authorization question. Now, when a
+question names both, the one asked first decides: a sponsorship question
+that mentions work authorization maps to the sponsorship answer, and "Are
+you legally authorized to work … without the need for sponsorship?" stays
+a work-authorization question. Regression: the sponsorship cases in
+`testing-harness/agent/question-mapper.test.ts` (`pnpm test:agent`). Not
+verified live: ITW's "Please explain" follow-up is assumed to show only
+after a Yes.
+
+### Workday phone types other than "Mobile" paused
+
+Found 2026-11-25 on the real workspace, in manual pass 5. "Phone Device
+Type" paused on xboxgaming.wd1 (<run id>), micron.wd1 (<run id>),
+rockwellautomation.wd1 (<run id>, <run id>) and highmarkhealth.wd1
+(<run id>): the profile's phone type "Mobile" was "not one of its
+options", which were "Home Mobile", "Personal Mobile", "Personal Mobile
+Phone" and "Mobile - Personal". Cause: the planner chose a phone type only
+when an option equalled the profile's value. A saved "Mobile" (or "Cell")
+phone type now picks the one option naming a mobile or cell phone that is
+not a work, business, corporate, office or company phone; a work or
+corporate mobile is never picked, and two personal mobile options, or a
+saved "Home" or "Work" type with no equal option, still pause. Regression:
+the phone-type cases in
+`testing-harness/browser-worker/recognition-planner.test.ts` (`pnpm
+test:browser-worker:fast`) and the `?gaps=1` scenario of
+`testing-harness/browser/fixture-run.ts` (`xvfb-run -a pnpm
+test:browser:fixture`). Not verified live: the tenants' list markup.
+
+### Workday's My Experience resume upload labelled "Upload a file" was not attached
+
+Found 2026-11-25 on the real workspace, in manual pass 5. My Experience on
+littelfuse.wd1 (<run id>) and zoll.wd5 (<run id>) paused on
+"`formField-`": "Upload a file (5MB max)" asks for a document the agent
+does not upload. Cause: the resume input sat inside a Workday `formField-`
+container with an empty suffix, so the collector read it with that
+container's generic label; the fallback that names the upload "Resume/CV"
+runs only when no upload was read, and a required upload with a generic
+label is a document the candidate attaches. On My Experience, the one
+upload whose label is generic upload wording ("Upload a file", "Attach
+files", "Drop files here or select", with or without a size hint) is now
+the resume upload: it is relabelled "Resume/CV", receives the resume, and
+a resume already attached is replaced, as for Workday's usual input. Two
+generic uploads, a named document (cover letter, transcript), another
+step, or a step that already has a resume upload are left as read.
+Regression: the `markWorkdayResumeUpload` cases in
+`testing-harness/browser-worker/workday.test.ts` (`pnpm
+test:browser-worker:fast`) and the `?gaps=1` scenario of
+`testing-harness/browser/fixture-run.ts` (`xvfb-run -a pnpm
+test:browser:fixture`). Not verified live: the tenants' markup (no
+form-step DOM was captured; the fixture's upload is modeled on the pause
+record).
+
+### Start-date questions in other words were not answered, and Workday date fields were not typed
+
+Found 2026-11-25 on the real workspace, in manual pass 5. Neogen's
+"earliest date you can start" question (neogen.wd5, <run id>, a Workday
+date field), Neros's (<run id>) and Contoro's (<run id>, which the
+candidate answered by hand) paused unmapped although the candidate's saved
+available start date answers them. Cause: the mapper knew only "available
+… start" and "start date"; Workday's split Month, Day and Year boxes were
+read as an unknown field and, when answered, typed as one string into the
+month box. The mapper now also reads "earliest/soonest … start or begin",
+"when can (could, would, will) you (be able to) start or begin" and
+"timeline for starting", never a full-time or after-graduation start or a
+yes/no question ("Are you able to start …?"). The saved date is typed as
+the field takes it: a date input YYYY-MM-DD; a text box the format its
+label names (DD/MM/YYYY, YYYY-MM-DD, MM-DD-YYYY), else MM/DD/YYYY (the
+form of the candidate's own answer on Contoro; earlier runs typed
+YYYY-MM-DD); a number box, list, radio set or type-ahead is unchanged.
+Workday's split boxes are now a date field typed month, day and year from
+YYYY-MM-DD or MM/DD/YYYY; another format is a field the page would not
+take, which pauses. Regression: the start-date cases in
+`testing-harness/agent/question-mapper.test.ts` (`pnpm test:agent`) and
+`testing-harness/browser-worker/recognition-planner.test.ts` (`pnpm
+test:browser-worker:fast`), the lifecycle expectations in
+`testing-harness/browser-worker/run-lifecycle.integration.test.ts` and
+`self-identification.integration.test.ts` (`pnpm
+test:browser-worker:local`), and the `?gaps=1` scenario of
+`testing-harness/browser/fixture-run.ts` (`xvfb-run -a pnpm
+test:browser:fixture`). Not verified live: Neogen's date markup (the pause
+read the field as unknown; no form-step DOM was captured).
+
+### U.S. person questions after a statement, and "I am currently a U.S. Person" options, were not answered
+
+Found 2026-11-25 on the real workspace, in manual pass 5. Apex's "You must
+be a U.S. Person because this position requires access to information that
+is subject to U.S export controls. Are you a US Person? (Citizen, Green
+Card holder, etc.)" (<run id>, a Yes/No radio) and Neros's export
+compliance list (<run id>, options "I am currently a "U.S. Person"", "I
+will soon become a "U.S. Person" …" and "I am not a "U.S. Person," but I am
+eligible for licensing …") paused "The saved answer is not among the
+options". Cause: a question that does not start with a yes/no word was read
+as a choice of the saved export-control status, which a Yes/No radio does
+not offer; and the status matched only options naming a category
+(citizen, permanent resident, refugee, asylee, protected individual,
+none). An embedded "Are you a U.S. person?" sentence now maps to the
+derived U.S.-person Yes/No answer, and a saved status naming a U.S.-person
+category picks the one option saying the candidate is a U.S. person now; a
+saved "none" status, two such options, and "will soon become" or "not …
+but eligible" options never answer. Regressions: the U.S.-person cases in
+`testing-harness/agent/question-mapper.test.ts` (`pnpm test:agent`) and
+`testing-harness/domain/standard-answers.test.ts` (`pnpm test:domain`).
+Not verified live: both postings' forms after the change.
+
 ### Previous-employment questions naming the employer's group or using "did you work here" were not answered
 
 Found 2026-11-25 on the real workspace. "Have you previously been employed

@@ -2,7 +2,10 @@
  * Export-control status ("U.S. person" under ITAR/EAR) as categories, so a
  * saved status text can pick the one matching option of a "which describes
  * you" list. Deterministic: an option with no recognized category, or one
- * naming several ("Refugee or asylee"), is never chosen.
+ * naming several ("Refugee or asylee"), is never chosen. A list whose options
+ * name no category ("I am currently a "U.S. Person"", "I will soon become …")
+ * picks the one option saying the candidate is a U.S. person now, for a saved
+ * status naming a U.S.-person category (usPersonOption).
  */
 export const exportControlCategories = [
   "citizen_or_national",
@@ -66,5 +69,24 @@ export function usCitizenOption(options: readonly string[]): string | null {
   const matches = options.filter((option) =>
     only(exportControlCategoriesOf(option), "citizen_or_national") && /\bcitizen\b/.test(normalize(option))
   );
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+// Quotes, apostrophes and parentheses are removed before these run, so "I'm" reads "im".
+const US_PERSON_NOW = /^(?:yes,? )?(?:i am|i'?m) (?:currently )?(?:a )?us person$|^(?:yes,? )?(?:currently )?(?:a )?us person$/;
+const NOT_NOW = /\bnot\b|\bnon[- ]?us\b|\bwill\b|\bsoon\b|\bbecom\w*|\bfuture\b|\bpending\b|\bprocess\b|\bexpect\w*|\beligib\w*|\blicens\w*|\bexplanation\b/;
+
+/**
+ * The one option saying the candidate is a U.S. person now ("I am currently a "U.S. Person""), for a saved status
+ * that names a U.S.-person category (citizen or national, permanent resident, refugee, asylee, protected individual).
+ * Null for a saved "none" status, or when no option or several say so; "will soon become" and "not … but eligible" never count.
+ */
+export function usPersonOption(saved: string, options: readonly string[]): string | null {
+  const category = exportControlCategory(saved);
+  if (!category || category === "none") return null;
+  const matches = options.filter((option) => {
+    const key = normalize(option).replace(/["'“”‘’()]/g, "").replace(/[,;]$/, "").replace(/\s+/g, " ").trim();
+    return US_PERSON_NOW.test(key) && !NOT_NOW.test(key);
+  });
   return matches.length === 1 ? matches[0]! : null;
 }

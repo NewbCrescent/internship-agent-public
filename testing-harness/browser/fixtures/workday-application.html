@@ -52,6 +52,12 @@
     // list shows 600 ms after its input is clicked and a category's sub-list 900 ms after the category is
     // clicked; each date section draws its dateSection…-display over the spinbutton input, which takes no click.
     const realWidgets = params.get("widgets") === "real";
+    // ?gaps=1: Synthetic, modeled on the 2026-11-25 real pauses (no form-step DOM was captured). Phone Device Type
+    // offers Workday's "Home Mobile" style options (xboxgaming.wd1); My Experience's resume input sits in a
+    // formField container with an empty suffix labelled "Upload a file (5MB max)" (littelfuse.wd1, zoll.wd5);
+    // Application Questions adds a required start date drawn as Month, Day and Year sections (neogen.wd5),
+    // recorded as state.values["formField-earliestStart"] = "MM/DD/YYYY".
+    const gaps = params.get("gaps") === "1";
     const ACCOUNTS_KEY = "fixture-workday-accounts";
     const SESSION_KEY = "fixture-workday-session";
     const readAccounts = () => JSON.parse(localStorage.getItem(ACCOUNTS_KEY) || "{}");
@@ -127,7 +133,7 @@
         ${listbox("formField-countryRegion", "State*", ["Oregon", "Washington"], state.values["formField-countryRegion"])}
         ${text("formField-city", "City*")}
         ${prompt("formField-source", "How Did You Hear About Us?*", state.values["formField-source"])}
-        ${listbox("formField-phoneType", "Phone Device Type*", ["Home", "Mobile", "Work"], state.values["formField-phoneType"])}
+        ${listbox("formField-phoneType", "Phone Device Type*", gaps ? ["Home Mobile", "Home Phone", "Work Mobile", "Work Phone"] : ["Home", "Mobile", "Work"], state.values["formField-phoneType"])}
         ${prompt("formField-countryPhoneCode", "Country Phone Code*", "United States of America (+1)")}
         <div data-automation-id="formField-candidateIsPreviousWorker">
           <label>Have you previously worked for Fixture Aerospace?*</label>
@@ -146,11 +152,15 @@
           <button type="button" data-add="education">Add Another</button>
         </section>
         <h3>Resume/CV</h3>
-        <input type="file" data-automation-id="file-upload-input-ref" style="display:none">
-        ${resumeStatus()}`,
+        ${gaps
+          ? `<div data-automation-id="formField-"><label>Upload a file (5MB max)</label><input type="file" data-automation-id="file-upload-input-ref" aria-required="true" style="display:none">${resumeStatus()}</div>`
+          : `<input type="file" data-automation-id="file-upload-input-ref" style="display:none">
+        ${resumeStatus()}`}`,
       () => `
         <div data-automation-id="formField-whyUs"><label for="why">Why do you want to work at Fixture Aerospace?*</label><textarea id="why"></textarea></div>
         ${text("formField-gradYear", "Graduation year*", "number")}
+        ${gaps ? `<div data-automation-id="formField-earliestStart"><label>What is the earliest date you can start employment?*</label>
+          ${["Month", "Day", "Year"].map((part) => `<input data-automation-id="dateSection${part}-input" aria-label="${part}" data-start="${part}" value="${(state.values["formField-earliestStart"] || "").split("/")[["Month", "Day", "Year"].indexOf(part)] || ""}">`).join("")}</div>` : ""}
         ${params.get("transcript") === "1" ? `<div data-automation-id="formField-transcript"><label for="transcript">Unofficial Transcript*</label><input type="file" id="transcript"></div>` : ""}`,
       () => `
         ${listbox("formField-gender", "Gender*", ["Female", "Male", "Decline to self-identify"], null)}
@@ -581,10 +591,17 @@
           state.values[input.closest("[data-automation-id]").getAttribute("data-automation-id")] = input.value;
         }
         syncHistory();
+        // ?gaps=1: the start date's three sections are recorded together, and it is missing unless all three are filled.
+        const startParts = [...document.querySelectorAll("#fields input[data-start]")].map((input) => input.value);
+        if (startParts.length) state.values["formField-earliestStart"] = startParts.every(Boolean) ? startParts.join("/") : "";
         for (const earlier of document.querySelectorAll("[data-fixture-error]")) earlier.remove();
         const missing = missingRequired();
         if (state.step === 1) missing.push(...historyMissing().map((label) => ({ label, container: null })));
         if (state.step === 1 && state.resumes.length === 0) missing.push({ label: "Resume/CV", container: null });
+        if (startParts.length && !state.values["formField-earliestStart"]) {
+          for (const entry of missing.filter((item) => item.container?.getAttribute("data-automation-id") === "formField-earliestStart")) missing.splice(missing.indexOf(entry), 1);
+          missing.push({ label: "What is the earliest date you can start employment?", container: document.querySelector('[data-automation-id="formField-earliestStart"]') });
+        }
         if (missing.length) {
           const required = (label) => `The field ${label} is required and must have a value.`;
           const inline = missing.filter((entry) => entry.container);

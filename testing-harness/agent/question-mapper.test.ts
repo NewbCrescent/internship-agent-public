@@ -489,3 +489,51 @@ describe("new candidate facts and option questions (2026-11-24)", () => {
     expect(await mapper.map("How would you describe your sexual orientation?")).toMatchObject({ status: "BLOCKED", policy: "protected" });
   });
 });
+
+describe("known-answer gaps from the 2026-11-25 pass (posting wordings, no candidate data)", () => {
+  it("maps a sponsorship question that also mentions work authorization to sponsorship (ITW)", async () => {
+    const itw = "Will you now or in the future require sponsorship for an employment visa status (e.g., H-1B, E-3, TN, O-1, STEM OPT), or any immigration work authorization requiring a written submission from the company to a government agency)?*";
+    for (const question of [itw, "Do you require visa sponsorship or work authorization to work in the US?"]) {
+      expect(await mapper.map(question, { postingCountryCode: "US" }), question).toMatchObject({
+        status: "MAPPED", key: "requires_sponsorship", scope: { kind: "country", code: "US" }
+      });
+    }
+    // Track 22's visa-support wording composes with first-asked-wins: visa support is asked first.
+    expect(await mapper.map("Do you require visa support or work authorization to work in the US?")).toMatchObject({
+      status: "MAPPED", key: "requires_sponsorship", scope: { kind: "country", code: "US" }
+    });
+    for (const question of [
+      "Are you legally authorized to work in the United States without the need for sponsorship?",
+      "Are you legally authorized to work in the United States?"
+    ]) {
+      expect(await mapper.map(question, { postingCountryCode: "US" }), question).toMatchObject({
+        status: "MAPPED", key: "authorized_to_work", scope: { kind: "country", code: "US" }
+      });
+    }
+  });
+
+  it("maps start-date questions in other words, never a yes/no, full-time, or date-part question", async () => {
+    for (const question of [
+      "What is the earliest date you can start employment?",
+      "What is your timeline for starting the internship?",
+      "When can you start internship?"
+    ]) {
+      expect(await mapper.map(question), question).toMatchObject({ status: "MAPPED", key: "available_start_date", scope: { kind: "global" } });
+    }
+    for (const question of [
+      "Are you able to start internship 2027 Spring AND Summer Semester?",
+      "When can you start full-time employment after graduation?",
+      "Start date year"
+    ]) {
+      const result = await mapper.map(question);
+      expect(result.status === "MAPPED" && result.key === "available_start_date", question).toBe(false);
+    }
+  });
+
+  it("maps \"Are you a US Person?\" after a statement to us_person, and a U.S.-person list to the status (Apex, Neros)", async () => {
+    const apex = "You must be a U.S. Person because this position requires access to information that is subject to U.S export controls. Are you a US Person? (Citizen, Green Card holder, etc.)";
+    expect(await mapper.map(apex, { fieldKind: "radio" })).toMatchObject({ status: "MAPPED", key: "us_person" });
+    const neros = "Export Compliance: The person hired will have access to information and items controlled by the International Traffic in Arms Regulation (ITAR), and, therefore, must be a \"U.S. Person\" or otherwise eligible to receive an export license. As defined in the ITAR, a “U.S. Person” includes U.S. citizens…";
+    expect(await mapper.map(neros, { fieldKind: "select" })).toMatchObject({ status: "MAPPED", key: "us_person_export_controls" });
+  });
+});

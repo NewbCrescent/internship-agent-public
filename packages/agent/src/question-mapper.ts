@@ -18,6 +18,14 @@ const NOT_COURSEWORK = /\b(?:gpa|grade|grades|graded|grading|grade\s+point|marks
 const ELIGIBLE_TO_WORK = /\b(?:legally )?eligible to work\b|\blegally (?:able|permitted) to work\b/i;
 // "Eligible to work" also opens government, export-control, and clearance questions, which only their own saved answers decide.
 const NOT_WORK_AUTHORIZATION = /\b(?:government|federal|public sector|dod|department of defense|defen[cs]e|export\w*|itar|ear|citizen\w*|u\.?\s?s\.? (?:person|national)|clearances?|security|contracts?|contractors?|projects?)\b/i;
+const AUTHORIZED_TO_WORK = /\b(?:legally )?authori[sz]ed to work\b|\bwork authori[sz]ation\b/i;
+// Ashby's short-titled form: "Visa Support: Do you require any visa support to work in the U.S.?" (Track 22).
+const SPONSORSHIP = /\b(?:require|need).{0,30}(?:sponsor|sponsorship)\b|\bvisa sponsorship\b|\b(?:require|need)\b.{0,30}\bvisa support\b/i;
+// Start-date questions in other words ("earliest date you can start", "when can you start", "timeline for starting");
+// a full-time or after-graduation start and a yes/no question ("Are you able to start …?") are not the internship start date.
+const START_WORDING = /\b(?:earliest|soonest)\b.{0,40}\b(?:start|begin)\w*|\bwhen (?:can|could|would|will) you (?:be (?:able|available) to )?(?:start|begin)\b|\btimeline for (?:starting|beginning)\b/i;
+const NOT_INTERNSHIP_START = /\bfull[- ]?time\b|\bafter (?:you )?graduat\w*|\bpost[- ]?graduat\w*/i;
+const YES_NO_LEAD = /^(?:are|is|do|does|did|have|has|had|can|could|will|would|should)\b/i;
 // Relocation the candidate pays for is its own answer (willing_to_relocate_at_own_expense).
 const OWN_EXPENSE = /\b(?:at )?(?:my|your) own (?:expense|cost)\b|\bown expense\b|\bwithout (?:relocation )?(?:assistance|support|reimbursement)\b|\bself[- ]funded\b/i;
 // Willingness to undergo a background check: never a criminal-history answer or a consent or authorization.
@@ -99,7 +107,12 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
       };
     }
 
-    if (/\b(?:legally )?authori[sz]ed to work\b|\bwork authori[sz]ation\b/i.test(normalized) || (ELIGIBLE_TO_WORK.test(normalized) && !NOT_WORK_AUTHORIZATION.test(normalized))) {
+    const authorization = AUTHORIZED_TO_WORK.exec(normalized) ?? (!NOT_WORK_AUTHORIZATION.test(normalized) ? ELIGIBLE_TO_WORK.exec(normalized) : null);
+    const sponsorship = SPONSORSHIP.exec(normalized);
+    // "Will you require sponsorship … or any immigration work authorization requiring …?" asks about sponsorship:
+    // when both appear, the one asked first decides (an authorization question "… without the need for sponsorship" stays authorization).
+    const sponsorshipFirst = sponsorship !== null && (authorization === null || sponsorship.index < authorization.index);
+    if (authorization && !sponsorshipFirst) {
       const country = inferCountryCode(normalized, context);
       if (!country) {
         return { status: "AMBIGUOUS", reason: "Work authorization requires an explicit country scope, and neither the question nor the posting names one country." };
@@ -114,8 +127,7 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
       };
     }
 
-    // Ashby's short-titled form: "Visa Support: Do you require any visa support to work in the U.S.?".
-    if (/\b(?:require|need).{0,30}(?:sponsor|sponsorship)\b|\bvisa sponsorship\b|\b(?:require|need)\b.{0,30}\bvisa support\b/i.test(normalized)) {
+    if (sponsorship) {
       const country = inferCountryCode(normalized, context);
       if (!country) {
         return { status: "AMBIGUOUS", reason: "Sponsorship requirements require an explicit country scope, and neither the question nor the posting names one country." };
@@ -147,8 +159,9 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
 
     // A single year/month/day box ("Start date year") belongs to a date on
     // the form itself, such as education history, not to internship availability.
-    if (/\b(?:available|availability).{0,24}(?:start|begin)|\bstart date\b/i.test(normalized) &&
-      !/\b(?:year|month|day)\b/i.test(normalized)) {
+    if (!/\b(?:year|month|day)\b/i.test(normalized) && (
+      /\b(?:available|availability).{0,24}(?:start|begin)|\bstart date\b/i.test(normalized) ||
+      (START_WORDING.test(normalized) && !NOT_INTERNSHIP_START.test(normalized) && !YES_NO_LEAD.test(normalized)))) {
       return {
         status: "MAPPED",
         key: "available_start_date",

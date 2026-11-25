@@ -11,6 +11,7 @@ import {
   standardAnswerOption,
   standardAnswersFileSchema,
   usCitizenOption,
+  usPersonOption,
   type PostingPay
 } from "@internship-agent/domain";
 
@@ -104,6 +105,26 @@ describe("saved Yes/No options", () => {
     expect(standardAnswerOption("us_citizen", true, ["U.S. Citizen", "Permanent Resident", "Other"])).toBe("U.S. Citizen");
     expect(standardAnswerOption("us_person_export_controls", CITIZEN_TEXT, EXPORT_OPTIONS)).toBe("U.S. citizen or national");
     expect(standardAnswerOption("criminal_conviction", false, ["Yes", "No"])).toBe("No");
+  });
+});
+
+describe("U.S.-person options that name no category (Neros, 2026-11-25)", () => {
+  const NEROS_OPTIONS = [
+    "I am currently a \"U.S. Person\"",
+    "I will soon become a \"U.S. Person\" (requires explanation if selected)",
+    "I am not a \"U.S. Person,\" but I am eligible for licensing (requires explanation if selected)"
+  ];
+
+  it("picks the one \"currently a U.S. person\" option for a saved U.S.-person status", () => {
+    expect(standardAnswerOption("us_person_export_controls", CITIZEN_TEXT, NEROS_OPTIONS)).toBe(NEROS_OPTIONS[0]);
+    expect(standardAnswerOption("us_person_export_controls", "A lawful permanent resident of the United States", NEROS_OPTIONS)).toBe(NEROS_OPTIONS[0]);
+  });
+
+  it("never answers a saved \"none\" status, two such options, or the \"will become\" and \"not … but eligible\" options", () => {
+    expect(standardAnswerOption("us_person_export_controls", "None of the above", NEROS_OPTIONS)).toBeNull();
+    expect(usPersonOption(CITIZEN_TEXT, ["I am a U.S. person", "Yes, I am a U.S. Person", "No"])).toBeNull();
+    expect(usPersonOption(CITIZEN_TEXT, NEROS_OPTIONS.slice(1))).toBeNull();
+    expect(usPersonOption(CITIZEN_TEXT, ["I'm a U.S. person", "I am not a U.S. person"])).toBe("I'm a U.S. person");
   });
 });
 

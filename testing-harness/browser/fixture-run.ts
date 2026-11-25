@@ -282,6 +282,24 @@ async function main(): Promise<void> {
   const submitWalk = await walkWorkdayApplication(workday, planWorkday, { mode: "submit", confirm: confirmWorkday });
   if (submitWalk.outcome !== "submitted" || !submitWalk.confirmation?.includes("Application Submitted")) failures.push("workday: submit mode did not submit on Review");
 
+  // Synthetic, modeled on the 2026-11-25 real pauses (no form-step DOM was captured): a "Home Mobile" phone
+  // type (xboxgaming.wd1), the resume upload in an empty-suffix formField container labelled "Upload a file
+  // (5MB max)" (littelfuse.wd1, zoll.wd5), and a start date drawn as Month, Day and Year sections (neogen.wd5).
+  const gapsTab = await launched.newPage();
+  await gapsTab.goto(`${workdayUrl}?gaps=1`);
+  const gapsWorkday = createWorkdayPage(gapsTab);
+  await gapsWorkday.enterApplication();
+  candidateAnswers.set("formField-earliestStart", "2027-06-01");
+  const gapsWalk = await walkWorkdayApplication(gapsWorkday, planWorkday, { mode: "fill", history: historyOptions });
+  if (gapsWalk.outcome !== "review") {
+    failures.push(`workday gaps: expected to stop at Review, got ${gapsWalk.outcome} (${gapsWalk.errors.join(" ")} ${gapsWalk.pauses
+      .filter((pause) => pause.status === "open").map((pause) => `${pause.fieldId}: ${pause.question}`).join(" | ")})`);
+  }
+  const gapsState = await gapsTab.evaluate(() => (window as unknown as { fixture: FixtureState & { values: Record<string, string> } }).fixture);
+  if (gapsState.values["formField-phoneType"] !== "Home Mobile") failures.push(`workday gaps: phone type should be Home Mobile, got ${gapsState.values["formField-phoneType"]}`);
+  if (gapsState.resumes.join() !== "resume.pdf") failures.push(`workday gaps: expected the resume on My Experience's "Upload a file" input, got ${gapsState.resumes.join()}`);
+  if (gapsState.values["formField-earliestStart"] !== "06/01/2027") failures.push(`workday gaps: the start date should read 06/01/2027 (month, day, year), got ${gapsState.values["formField-earliestStart"]}`);
+
   // A resume-parsed row that is not the candidate's is deleted; a transcript
   // on a later step sends the run back to backfill Berkeley's end year and the
   // resume with 2029, and walking the same step again adds no duplicate rows.

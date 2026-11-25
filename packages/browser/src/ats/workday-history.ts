@@ -148,7 +148,7 @@ async function typeInto(page: Page, input: Locator, value: string): Promise<void
  * input, so a click never reaches it (Sierra Space, ZOLL, Neogen, Aerospace,
  * 2026-11-24/25): focus it and type.
  */
-async function typeIntoDateSection(page: Page, input: Locator, value: string): Promise<void> {
+export async function typeIntoDateSection(page: Page, input: Locator, value: string): Promise<void> {
   await input.focus();
   if ((await input.inputValue()) !== "") {
     await page.keyboard.press("ControlOrMeta+A");

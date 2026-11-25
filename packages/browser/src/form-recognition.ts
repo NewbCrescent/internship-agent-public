@@ -152,6 +152,8 @@ function kindOf(control: RawControl): BrowserFieldKind {
     case "tel": return "tel";
     case "url": return "url";
     case "date": return "date";
+    // The Workday collector's split month/day/year boxes, typed part by part by the Workday adapter.
+    case "workday-date": return "date";
     case "file": return "file";
     case "checkbox": return "checkbox";
     case "radio": return "radio";

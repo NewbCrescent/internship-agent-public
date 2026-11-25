@@ -2635,7 +2635,7 @@ describe("posting pages behind an Apply link", () => {
     const page = postingPage(formStep);
     const started = await automaticStart(database, jobId, page);
     expect(page.follows).toEqual([POSTING_URL]);
-    expect(page.filled.get("q1")).toBe("2027-06-01");
+    expect(page.filled.get("q1")).toBe("06/01/2027");
     expect(page.uploads.has("resume")).toBe(true);
     expect(started.run.applicationUrl).toBe(`${POSTING_URL}/apply`);
     expect(getBrowserRuns(jobId, database)[0]!.applicationUrl).toBe(`${POSTING_URL}/apply`);
@@ -2825,7 +2825,7 @@ describe("runs that never reached an application form", () => {
     });
     const started = await start(database, jobId, POSTING_URL, page, true);
     expect(walks).toEqual([POSTING_URL]);
-    expect(page.filled.get("q1")).toBe("2027-06-01");
+    expect(page.filled.get("q1")).toBe("06/01/2027");
     expect(page.uploads.has("resume")).toBe(true);
     expect(started.run.applicationUrl).toBe(`${POSTING_URL}/application`);
     expect(started.run.atsKind).toBe("unknown");
@@ -2880,7 +2880,7 @@ describe("runs that never reached an application form", () => {
     });
     const started = await start(database, jobId, url, page, true);
     expect(started.run.atsKind).toBe("greenhouse");
-    expect(page.filled.get("q1")).toBe("2027-06-01");
+    expect(page.filled.get("q1")).toBe("06/01/2027");
     expect(getBrowserRuns(jobId, database)).toHaveLength(1);
     database.close();
   });

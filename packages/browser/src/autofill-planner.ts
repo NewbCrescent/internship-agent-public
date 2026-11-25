@@ -205,7 +205,8 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
     const match = field.options?.find((option) => option.toLocaleLowerCase("en-US") === contact.value.toLocaleLowerCase("en-US"))
       ?? dialCodeOption(contact.value, field.options ?? [])
       ?? (contact.key === "addressCountry" ? matchCountryOption(contact.value, field.options ?? []) ?? undefined : undefined)
-      ?? (contact.key === "addressRegion" ? stateOption(contact.value, field.options ?? []) : undefined);
+      ?? (contact.key === "addressRegion" ? stateOption(contact.value, field.options ?? []) : undefined)
+      ?? (contact.key === "phoneType" ? phoneTypeOption(contact.value, field.options ?? []) : undefined);
     if (match) {
       return { fieldId: field.id, action: "choose", value: match, basis: { kind: "profile", field: contact.key }, reason: "Contact details from your profile.", pause: null };
     }
@@ -400,6 +401,8 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
   if (resolution?.status === "RESOLVED") {
     const year = graduationYearDecision(field, resolution);
     if (year) return year;
+    const start = startDateDecision(field, resolution);
+    if (start) return start;
     const picked = factOptionDecision(field, resolution, inputs);
     if (picked) return picked;
     if (field.widget === "autocomplete" && field.kind === "select") {
@@ -562,6 +565,33 @@ function graduationYearDecision(field: BrowserField, resolution: Extract<FieldRe
   }
   if (field.kind === "text" || field.kind === "number") return fill(field, year, basis, "The year of your graduation date.");
   return null;
+}
+
+/** The saved available start date typed in the format the field takes: a date input YYYY-MM-DD; a text box the label's hint (DD/MM/YYYY, YYYY-MM-DD, MM-DD-YYYY), else MM/DD/YYYY. */
+function startDateDecision(field: BrowserField, resolution: Extract<FieldResolution, { status: "RESOLVED" }>): FillDecision | null {
+  if (resolution.key !== "available_start_date" || typeof resolution.value !== "string" || field.widget === "autocomplete") return null;
+  if (field.kind !== "date" && field.kind !== "text" && field.kind !== "textarea") return null;
+  const date = /^(\d{4})-(\d{2})-(\d{2})$/.exec(resolution.value);
+  if (!date) return null;
+  const [, year, month, day] = date;
+  const label = normalizedLabel(field.label);
+  const value = field.kind === "date" ? `${year}-${month}-${day}`
+    : label.includes("dd/mm/yyyy") ? `${day}/${month}/${year}`
+    : label.includes("yyyy-mm-dd") ? `${year}-${month}-${day}`
+    : label.includes("mm-dd-yyyy") ? `${month}-${day}-${year}`
+    : `${month}/${day}/${year}`;
+  return fill(field, value, { kind: "fact", key: resolution.key, scope: resolution.scope }, "Your saved available start date, in the format this field takes.");
+}
+
+const MOBILE_PHONE_TYPE = /^(?:mobile|cell(?:ular)?)(?: phone)?$/i;
+const MOBILE_OPTION = /\b(?:mobile|cell|cellular)\b/i;
+const NOT_PERSONAL = /\b(?:work|business|corporate|office|company)\b/i;
+
+/** A saved "Mobile" phone type picks the one personal or home mobile option ("Home Mobile", "Personal Mobile Phone", "Mobile - Personal"); never a work or corporate mobile. Undefined otherwise. */
+function phoneTypeOption(saved: string, options: readonly string[]): string | undefined {
+  if (!MOBILE_PHONE_TYPE.test(saved.trim())) return undefined;
+  const matches = options.filter((option) => MOBILE_OPTION.test(option) && !NOT_PERSONAL.test(option));
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 const OTHER_FOLLOW_UP = /^if (?:you )?(?:selected|chose|picked|answered) ["“']?other["”']?,? (?:please )?(?:specify|list|enter|name|tell us)\b/;

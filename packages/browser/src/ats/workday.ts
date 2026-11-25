@@ -3,9 +3,9 @@ import type { Locator, Page } from "playwright-core";
 import type { ApplicationHistory, BrowserField, FillDecision, PauseRecord, RecognizedForm } from "@internship-agent/domain";
 
 import { recognizeForm, waitForStableControls, type RawControl } from "../form-recognition";
-import { applyDecisions, createPlaywrightPage, ensureNameShim, unfilledPause, type BrowserPage, type UnfilledField } from "../handshake-executor";
+import { applyDecisions, createPlaywrightPage, ensureNameShim, FieldUnfillable, unfilledPause, type BrowserPage, type UnfilledField } from "../handshake-executor";
 import { capturePostSubmitEvidence, type InvalidField, type PostSubmitEvidence } from "../submission-outcome";
-import { classifyFieldRole, hasTranscriptField, isSensitiveRole } from "./field-roles";
+import { classifyFieldRole, classifyUploadRole, hasTranscriptField, isSensitiveRole } from "./field-roles";
 import { isHearAboutQuestion, pickHearAboutOption } from "./hear-about";
 import {
   createWorkdayAccount,
@@ -17,7 +17,7 @@ import {
   type WorkdayCredentials,
   type WorkdaySettleOptions
 } from "./workday-account";
-import { fillWorkdayHistory, type HistoryFillResult } from "./workday-history";
+import { fillWorkdayHistory, typeIntoDateSection, type HistoryFillResult } from "./workday-history";
 import {
   closeWorkdayLists,
   openWorkdayListbox,
@@ -148,7 +148,7 @@ function collectWorkdayControlsIn(root: Element): RawControl[] {
       const selected = Array.from(container.querySelectorAll('[data-automation-id="selectedItem"]')).map(textOf).filter(Boolean).join(", ");
       controls.push({ tag: "select", id, label, required, value: selected || undefined, options: [] });
     } else if (dateParts) {
-      // Split month/year boxes are not typed as one value; they pause.
+      // Split month/day/year boxes: a date field the Workday adapter types part by part (fillField).
       controls.push({ tag: "input", type: "workday-date", id, label, required });
     } else {
       const input = container.querySelector('input:not([type="hidden"])') as HTMLInputElement | null;
@@ -325,12 +325,33 @@ export async function captureWorkdayEvidence(
   return capturePostSubmitEvidence(page, outcome, { invalidFields, alertText, detail: known.detail });
 }
 
+export const WORKDAY_RESUME_LABEL = "Resume/CV";
+const GENERIC_UPLOAD = /^(?:(?:upload|attach|select|choose|add|browse)(?: (?:a|your|the))? files?|drop (?:a |your |the )?files? here(?: or select(?: files?)?)?)(?: here)?$/i;
+
+/**
+ * Workday's My Experience step holds one upload, Resume/CV. Some tenants (littelfuse.wd1, zoll.wd5, 2026-11-25) draw it in a
+ * formField container labelled only "Upload a file (5MB max)": on that step, the one upload whose label (without a parenthetical
+ * size hint or required marker) is generic upload wording is the resume upload. Two such uploads, or a step that already has a
+ * resume upload, are left as read.
+ */
+export function markWorkdayResumeUpload(stepName: string, form: RecognizedForm): RecognizedForm {
+  if (!/^my experience$/i.test(stepName.trim())) return form;
+  const files = form.fields.filter((field) => field.kind === "file");
+  if (files.some((field) => classifyUploadRole(field.label, field.id) === "resume")) return form;
+  const generic = files.filter((field) => GENERIC_UPLOAD.test(field.label.replace(/\([^)]*\)/g, "").replace(/\*+$/, "").replace(/\s+/g, " ").trim()));
+  if (generic.length !== 1) return form;
+  return { ...form, fields: form.fields.map((field) => (field === generic[0] ? { ...field, label: WORKDAY_RESUME_LABEL } : field)) };
+}
+
 export function createWorkdayPage(page: Page): WorkdayPage {
   const base = createPlaywrightPage(page);
   const root = () => page.locator(`${APPLY_FLOW}, body`).first();
+  // A file field's container is the one holding the file input: Workday can draw an upload in a "formField-" container with an empty suffix.
   const container = (field: BrowserField): Locator => field.id === "file-upload-input-ref"
     ? page.locator("body")
-    : page.locator(`[data-automation-id="${field.id}"]`).first();
+    : field.kind === "file"
+      ? page.locator(`[data-automation-id="${field.id}"]:has(input[type="file"])`).first()
+      : page.locator(`[data-automation-id="${field.id}"]`).first();
 
   return {
     ...base,
@@ -363,7 +384,21 @@ export function createWorkdayPage(page: Page): WorkdayPage {
         (await page.locator(FIELD).filter({ visible: true }).count()) + (await page.locator(RESUME_UPLOAD).count()));
     },
     fillField: async (field, value) => {
-      await container(field).locator('input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="file"]), textarea').first().fill(value);
+      // Workday's split date boxes (Month, Day, Year sections) are typed part by part.
+      const box = container(field);
+      const sections = box.locator('[data-automation-id="dateSectionMonth-input"], [data-automation-id="dateSectionDay-input"], [data-automation-id="dateSectionYear-input"]');
+      if (await sections.count()) {
+        const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+        const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(value.trim());
+        const parts = iso ? { Month: iso[2]!, Day: iso[3]!, Year: iso[1]! } : us ? { Month: us[1]!.padStart(2, "0"), Day: us[2]!.padStart(2, "0"), Year: us[3]! } : null;
+        if (!parts) throw new FieldUnfillable(`"${field.label}" takes a date (YYYY-MM-DD or MM/DD/YYYY)`);
+        for (const part of ["Month", "Day", "Year"] as const) {
+          const input = box.locator(`[data-automation-id="dateSection${part}-input"]`).first();
+          if (await input.count()) await typeIntoDateSection(page, input, parts[part]);
+        }
+        return;
+      }
+      await box.locator('input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="file"]), textarea').first().fill(value);
     },
     chooseOption: async (field, option) => {
       const box = container(field);
@@ -387,7 +422,7 @@ export function createWorkdayPage(page: Page): WorkdayPage {
       await container(field).locator('input[type="checkbox"]').first().setChecked(checked);
     },
     uploadFile: async (field, path) => {
-      if (field.id === "file-upload-input-ref") {
+      if (field.id === "file-upload-input-ref" || field.label === WORKDAY_RESUME_LABEL) {
         // A resume already attached (an earlier run, or the 2028 resume before a
         // transcript switched to 2029) is replaced, never kept alongside.
         const attached = page.locator('[data-automation-id="delete-file"]:visible');
@@ -670,6 +705,7 @@ export async function walkWorkdayApplication(
         return result; // outcome stays "blocked"
       }
     }
+    form = markWorkdayResumeUpload(step.name, form);
     const plan = await planStep(step, form, { transcript: result.transcript });
     for (const field of form.fields) result.fieldLabels[prefix(step, field.id)] = field.label;
     result.decisions.push(...plan.decisions.map((decision) => ({ ...decision, fieldId: prefix(step, decision.fieldId) })));

@@ -21,6 +21,8 @@ const EXPLAIN = /\bexplain\b|\bdescribe\b|\bdetails?\b|\belaborate\b|\bprovide (
 
 const SALARY = /\bsalary\b|\bcompensation\b|\bpay\s+(?:expectations?|requirements?|range|rate)\b|\b(?:desired|expected|target|requested)\s+(?:pay|rate|wage|hourly rate|compensation|salary)\b|\bhourly\s+(?:rate|wage|pay)\b|\brate of pay\b|\bwage expectations?\b/;
 const CITIZENSHIP = /\bcitizen(?:s|ship)?\b|\bpermanent resident\b|\bgreen card\b|\bu\.?\s?s\.? (?:person|national)\b|\bitar\b|\bear\b|\bexport[- ]control\w*|\bexport administration regulations\b|\binternational traffic in arms\b|\bdeemed exports?\b/;
+// "You must be a U.S. Person because … Are you a US Person?": a Yes/No question asked after a statement.
+const ASKS_US_PERSON = /(?:^|[.?!:;)]\s+)(?:are|is) you (?:a |an )?(?:u\.?\s?s\.?|us) person\b[^?]*\?/;
 const CLEARANCE = /\bclearances?\b/;
 const CLEARANCE_CONTEXT = /\bsecurity\b|\bsecret\b|\bts\b|\bsci\b|\bgovernment\b|\bfederal\b|\bdod\b|\bdepartment of defense\b|\bpublic trust\b|\b[ql] clearance\b/;
 const CRIMINAL = /\bconvict\w*|\bfelon(?:y|ies)\b|\bmisdemeanou?rs?\b|\bcriminal\b|\bpled (?:guilty|no contest)\b|\bpleaded (?:guilty|no contest)\b|\barrest\w*|\bpending charges\b|\bcharged with\b/;
@@ -157,7 +159,7 @@ function citizenship(question: Prepared): QuestionMapping {
   const listWords = /\b(?:which|what|select|indicate|choose|identify)\b[^?]{0,80}\b(?:describes|applies|apply|status|category|categories|following)\b/.test(n);
   if (exportWords) {
     if (listWords) return mapped("us_person_export_controls", "Export-control status list (U.S. person under ITAR/EAR).");
-    if (question.yesNo || /^(?:i am|i'm)\b/.test(n)) return yesNo(question, "us_person", "U.S. person (ITAR/EAR) question.");
+    if (question.yesNo || ASKS_US_PERSON.test(n) || /^(?:i am|i'm)\b/.test(n)) return yesNo(question, "us_person", "U.S. person (ITAR/EAR) question.");
     if (question.choiceField) return mapped("us_person_export_controls", "Export-control status choice (U.S. person under ITAR/EAR).");
     return ambiguous("The export-control statement does not ask a question the saved status answers; answer it directly.");
   }

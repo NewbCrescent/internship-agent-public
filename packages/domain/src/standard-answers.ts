@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import type { BrowserFieldKind } from "./browser";
 import type { CandidateFactKey } from "./candidate-facts";
-import { exportControlCategory, matchExportControlOption, usCitizenOption } from "./export-control";
+import { exportControlCategory, matchExportControlOption, usCitizenOption, usPersonOption } from "./export-control";
 import { compensationPeriodSchema } from "./job-posting";
 
 /**
@@ -122,7 +122,7 @@ export function booleanOption(value: boolean, options: readonly string[]): strin
 /** The option a saved standard answer picks, or null (the field then pauses without echoing the value). */
 export function standardAnswerOption(key: string, value: boolean | string, options: readonly string[]): string | null {
   if (!isStandardAnswerKey(key)) return null;
-  if (key === "us_person_export_controls" && typeof value === "string") return matchExportControlOption(value, options);
+  if (key === "us_person_export_controls" && typeof value === "string") return matchExportControlOption(value, options) ?? usPersonOption(value, options);
   if (typeof value === "boolean") {
     const option = booleanOption(value, options);
     if (option) return option;
