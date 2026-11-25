@@ -5,11 +5,15 @@
  * stored, put in an error, event, evidence or notice, or sent to a model.
  * Deterministic, no model.
  *
- * The rules come from third-party descriptions of the step (not a capture):
- * mail from no-reply@us.greenhouse-mail.io, subject "Security code for your
- * application to <Company>", body "Copy and paste this code into the security
- * code field on your application: <CODE>", an 8-character code that may be
- * letters only.
+ * The rules were checked on 2026-11-25 against a real message (read-only,
+ * headers and structure only): mail from no-reply@us.greenhouse-mail.io,
+ * subject "Security code for your application to <organization>", where
+ * <organization> is the Greenhouse organization that hosts the board (on a
+ * job-wrapping board the wrapping service, not the posting's company); an
+ * HTML-only body (multipart/related: one quoted-printable text/html part and
+ * an inline image) reading "Copy and paste this code into the security code
+ * field on your application: <CODE>"; an 8-character code (digits only or
+ * letters only both occur).
  */
 import { mentionsCompany } from "@internship-agent/domain";
 import { isGreenhouseBoardUrl, type SecurityCodeLookup, type SecurityCodeLookupResult } from "@internship-agent/browser";
@@ -21,6 +25,8 @@ import { MailboxUnavailable, type MailMessage, type VerificationMailbox, type Ve
 export const SECURITY_CODE_CLOCK_SKEW_MS = 30_000;
 export const SECURITY_CODE_POLL_MS = 10_000;
 export const SECURITY_CODE_TIMEOUT_MS = 180_000;
+/** After this long polling with no mail naming the posting's company, Greenhouse security-code mail naming another organization counts too (job-wrapping boards). */
+export const SECURITY_CODE_ANY_ORGANIZATION_AFTER_MS = 60_000;
 
 const ADDRESS = /[^\s<>"',;()]+@([a-z0-9.-]+)/gi;
 
@@ -34,9 +40,14 @@ export function greenhouseMailSender(from: string): boolean {
   return false;
 }
 
-/** Greenhouse sender, a subject that says "security code" (any case) and names the company (mentionsCompany). */
+/** A Greenhouse sender and a subject that says "security code" (any case), whatever organization it names. */
+export function greenhouseSecurityCodeHeader(header: { from: string; subject: string }): boolean {
+  return greenhouseMailSender(header.from) && /\bsecurity code\b/i.test(header.subject);
+}
+
+/** greenhouseSecurityCodeHeader, and a subject that names the company (mentionsCompany). */
 export function relevantSecurityCodeHeader(company: string): (header: { from: string; subject: string }) => boolean {
-  return (header) => greenhouseMailSender(header.from) && /\bsecurity code\b/i.test(header.subject) && mentionsCompany(header.subject, company);
+  return (header) => greenhouseSecurityCodeHeader(header) && mentionsCompany(header.subject, company);
 }
 
 const CODE_AFTER_ANCHOR = /\bcode\b[^:\n]{0,60}:\s*([A-Za-z0-9]{6,8})(?![A-Za-z0-9])/gi;
@@ -55,26 +66,44 @@ export function securityCodesIn(message: MailMessage): string[] {
 
 export type SecurityCodeMailResult = { kind: "found"; code: string } | { kind: "none" } | { kind: "ambiguous"; count: number };
 
-/** Messages received from 30 s before `since` on, from Greenhouse, naming the company; exactly one distinct code is found, several are ambiguous. */
-export function findGreenhouseSecurityCode(messages: MailMessage[], target: { company: string; since: Date }): SecurityCodeMailResult {
-  const relevant = relevantSecurityCodeHeader(target.company);
-  const earliest = target.since.getTime() - SECURITY_CODE_CLOCK_SKEW_MS;
+function distinctCodes(messages: MailMessage[]): Set<string> {
   const found = new Set<string>();
-  for (const message of messages) {
-    if (message.receivedAt.getTime() < earliest) continue;
-    if (!relevant({ from: message.from, subject: message.subject })) continue;
-    for (const code of securityCodesIn(message)) found.add(code);
-  }
-  if (found.size === 0) return { kind: "none" };
-  if (found.size > 1) return { kind: "ambiguous", count: found.size };
-  return { kind: "found", code: [...found][0]! };
+  for (const message of messages) for (const code of securityCodesIn(message)) found.add(code);
+  return found;
+}
+
+/**
+ * Greenhouse security-code mail received from 30 s before `since` on. Mail
+ * whose subject names the posting's company decides first: exactly one
+ * distinct code is found, several are ambiguous. Without such a code and with
+ * `anyOrganization`, the same rule covers every Greenhouse security-code mail
+ * in the window: the subject names the board's Greenhouse organization, which
+ * on a job-wrapping board is not the posting's company.
+ */
+export function findGreenhouseSecurityCode(
+  messages: MailMessage[],
+  target: { company: string; since: Date },
+  options: { anyOrganization?: boolean } = {}
+): SecurityCodeMailResult {
+  const earliest = target.since.getTime() - SECURITY_CODE_CLOCK_SKEW_MS;
+  const inWindow = messages.filter((message) => message.receivedAt.getTime() >= earliest && greenhouseSecurityCodeHeader(message));
+  const named = relevantSecurityCodeHeader(target.company);
+  const namedCodes = distinctCodes(inWindow.filter((message) => named(message)));
+  const codes = namedCodes.size > 0 || !options.anyOrganization ? namedCodes : distinctCodes(inWindow);
+  if (codes.size === 0) return { kind: "none" };
+  if (codes.size > 1) return { kind: "ambiguous", count: codes.size };
+  return { kind: "found", code: [...codes][0]! };
 }
 
 /**
  * Polls the mailbox like pollVerificationLink (workday-verification-mail.ts):
- * opens it once, returns at once on a found or ambiguous code, sleeps
- * `pollMs` until `timeoutMs`, and closes the mailbox on every path. Mailbox
- * failures become MailboxUnavailable with fixed phrases, never server text.
+ * opens it once, reads every Greenhouse security-code mail, returns at once on
+ * a found or ambiguous code, sleeps `pollMs` until `timeoutMs`, and closes the
+ * mailbox on every path. Mail naming the posting's company counts from the
+ * first read; once SECURITY_CODE_ANY_ORGANIZATION_AFTER_MS (60 s) of polling
+ * has passed without it, mail naming any Greenhouse organization counts too
+ * (findGreenhouseSecurityCode's anyOrganization). Mailbox failures become
+ * MailboxUnavailable with fixed phrases, never server text.
  */
 export async function pollGreenhouseSecurityCode(
   factory: VerificationMailboxFactory,
@@ -91,17 +120,18 @@ export async function pollGreenhouseSecurityCode(
     if (error instanceof MailboxUnavailable) throw error;
     throw new MailboxUnavailable("the mailbox could not be opened");
   }
-  const deadline = Date.now() + timeoutMs;
+  const started = Date.now();
+  const deadline = started + timeoutMs;
   try {
     for (;;) {
       let messages: MailMessage[];
       try {
-        messages = await mailbox.messagesSince(target.since, relevantSecurityCodeHeader(target.company));
+        messages = await mailbox.messagesSince(target.since, greenhouseSecurityCodeHeader);
       } catch (error) {
         if (error instanceof MailboxUnavailable) throw error;
         throw new MailboxUnavailable("the mailbox could not be read");
       }
-      const result = findGreenhouseSecurityCode(messages, target);
+      const result = findGreenhouseSecurityCode(messages, target, { anyOrganization: Date.now() - started >= SECURITY_CODE_ANY_ORGANIZATION_AFTER_MS });
       if (result.kind !== "none") return result;
       if (Date.now() + pollMs > deadline) return { kind: "none" };
       await sleep(pollMs);

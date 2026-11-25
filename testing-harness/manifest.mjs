@@ -599,7 +599,7 @@ export const suiteManifest = [
     mutation: "none",
     timeoutMs: 30_000,
     reportPrefixes: [],
-    description: "Greenhouse's emailed security code from a fake mailbox: dot-bounded greenhouse-mail.io or greenhouse.io senders, a subject naming the security code and the company, mail from 30 s before the submit click on, the 6–8 character token after a \"code …:\" anchor (letters-only codes too, in text or HTML), exactly one distinct code or a hold (none, ambiguous), bounded polling with mailbox failures as fixed phrases, non-Greenhouse pages unsupported without opening the mailbox, and the code never logged."
+    description: "Greenhouse's emailed security code from a fake mailbox: dot-bounded greenhouse-mail.io or greenhouse.io senders, a subject naming the security code and the company first and, after 60 s of polling without one, any Greenhouse organization (job-wrapping boards; HTML-only mail as in the real message's structure), mail from 30 s before the submit click on, the 6–8 character token after a \"code …:\" anchor (letters-only codes too, in text or HTML), exactly one distinct code or a hold (none, ambiguous), bounded polling with mailbox failures as fixed phrases, non-Greenhouse pages unsupported without opening the mailbox, and the code never logged."
   },
   {
     id: "workday-account-contracts",

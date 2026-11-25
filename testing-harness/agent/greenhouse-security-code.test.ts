@@ -1,23 +1,27 @@
 /**
  * Greenhouse's emailed security code, from a fake mailbox only (no network,
  * no real mail): dot-bounded greenhouse-mail.io / greenhouse.io senders, a
- * subject naming the security code and the company, mail from 30 s before the
- * submit click on, the 6–8 character token after a "code …:" anchor (letters
- * only too, in text or HTML), exactly one distinct code or a hold, bounded
- * polling with mailbox failures as fixed phrases, non-Greenhouse pages
- * unsupported without opening the mailbox, and the code never logged. The
- * message wording follows third-party descriptions (not a capture); every
- * code and company here is fictional.
+ * subject naming the security code and the company first and, after 60 s of
+ * polling without one, any Greenhouse organization (job-wrapping boards),
+ * mail from 30 s before the submit click on, the 6–8 character token after a
+ * "code …:" anchor (letters only too, in text or HTML), exactly one distinct
+ * code or a hold, bounded polling with mailbox failures as fixed phrases,
+ * non-Greenhouse pages unsupported without opening the mailbox, and the code
+ * never logged. The wording and the HTML-only structure were checked against
+ * a real message's headers and structure (no real values are used); every
+ * code, company and organization here is fictional.
  */
-import { afterAll, beforeAll, describe, expect, it, vi, type MockInstance } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi, type MockInstance } from "vitest";
 
 import {
   findGreenhouseSecurityCode,
   greenhouseMailSender,
+  greenhouseSecurityCodeHeader,
   greenhouseSecurityCodeLookup,
   MailboxUnavailable,
   pollGreenhouseSecurityCode,
   relevantSecurityCodeHeader,
+  SECURITY_CODE_ANY_ORGANIZATION_AFTER_MS,
   securityCodesIn,
   type MailMessage,
   type VerificationMailbox,
@@ -27,8 +31,10 @@ import {
 const CODE = "K7QPZXMW";
 const OTHER_CODE = "R4TV9BNC";
 const LETTERS_CODE = "QWERTYUI";
-const ALL_CODES = [CODE, OTHER_CODE, LETTERS_CODE];
+const DIGITS_CODE = "40271936";
+const ALL_CODES = [CODE, OTHER_CODE, LETTERS_CODE, DIGITS_CODE];
 const COMPANY = "Fixture Robotics";
+const WRAPPER = "Fixture Job Wrapping";
 const GREENHOUSE_URL = "https://job-boards.greenhouse.io/fixturerobotics/jobs/1000001";
 const SINCE = new Date("2026-11-20T10:08:00.000Z");
 
@@ -42,6 +48,14 @@ function message(overrides: Partial<MailMessage> = {}): MailMessage {
     ...overrides
   };
 }
+
+/** Greenhouse's HTML-only security-code mail naming the board's organization (a job-wrapping service), not the posting's company. */
+const wrapped = (code = DIGITS_CODE, overrides: Partial<MailMessage> = {}) => message({
+  subject: `Security code for your application to ${WRAPPER}`,
+  text: "",
+  html: `<html><body><table><tr><td><img src="cid:logo" alt=""></td></tr><tr><td><p>Copy and paste this code into the security code field on your application:</p><p style="font-size:24px"><strong>${code}</strong></p><p>After you enter the code, resubmit your application.</p><p>© 2026 Greenhouse</p></td></tr></table></body></html>`,
+  ...overrides
+});
 
 /** A mailbox that serves `reads[n]` on the n-th read (the last one repeats) and records its use. */
 function fakeMailbox(reads: MailMessage[][], options: { readError?: Error } = {}) {
@@ -63,6 +77,13 @@ function fakeMailbox(reads: MailMessage[][], options: { readError?: Error } = {}
 }
 
 const noSleep = async () => undefined;
+
+/** Fakes Date only, starting 5 s after the click; the returned sleep moves it forward. */
+function fakeClock() {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(SINCE.getTime() + 5_000));
+  return async (ms: number) => { vi.setSystemTime(new Date(Date.now() + ms)); };
+}
 
 const spies: MockInstance[] = [];
 beforeAll(() => {
@@ -106,6 +127,17 @@ describe("relevantSecurityCodeHeader", () => {
   });
 });
 
+describe("greenhouseSecurityCodeHeader", () => {
+  const from = "Greenhouse <no-reply@us.greenhouse-mail.io>";
+  it("takes a Greenhouse security-code subject naming any organization", () => {
+    expect(greenhouseSecurityCodeHeader({ from, subject: `Security code for your application to ${WRAPPER}` })).toBe(true);
+  });
+  it("refuses another sender or another subject", () => {
+    expect(greenhouseSecurityCodeHeader({ from: "x@greenhouse.io.example.test", subject: `Security code for your application to ${WRAPPER}` })).toBe(false);
+    expect(greenhouseSecurityCodeHeader({ from, subject: `Thank you for applying to ${WRAPPER}` })).toBe(false);
+  });
+});
+
 describe("securityCodesIn", () => {
   it("reads the token after the template's anchor, never resubmit or application", () => {
     expect(securityCodesIn(message())).toEqual([CODE]);
@@ -146,6 +178,20 @@ describe("findGreenhouseSecurityCode", () => {
     expect(findGreenhouseSecurityCode([message({ from: "x@greenhouse.io.example.test" })], target)).toEqual({ kind: "none" });
     expect(findGreenhouseSecurityCode([message({ subject: "Security code for your application to Other Fixtures" })], target)).toEqual({ kind: "none" });
   });
+  it("reads mail naming another Greenhouse organization only with anyOrganization", () => {
+    expect(findGreenhouseSecurityCode([wrapped()], target)).toEqual({ kind: "none" });
+    expect(findGreenhouseSecurityCode([wrapped()], target, { anyOrganization: true })).toEqual({ kind: "found", code: DIGITS_CODE });
+  });
+  it("prefers mail naming the posting's company over another organization's", () => {
+    expect(findGreenhouseSecurityCode([wrapped(), message()], target, { anyOrganization: true })).toEqual({ kind: "found", code: CODE });
+  });
+  it("calls two other-organization codes ambiguous", () => {
+    expect(findGreenhouseSecurityCode([wrapped(), wrapped(OTHER_CODE)], target, { anyOrganization: true })).toEqual({ kind: "ambiguous", count: 2 });
+  });
+  it("keeps the window and the sender for other organizations", () => {
+    expect(findGreenhouseSecurityCode([wrapped(DIGITS_CODE, { receivedAt: new Date(SINCE.getTime() - 31_000) })], target, { anyOrganization: true })).toEqual({ kind: "none" });
+    expect(findGreenhouseSecurityCode([wrapped(DIGITS_CODE, { from: "x@greenhouse.io.example.test" })], target, { anyOrganization: true })).toEqual({ kind: "none" });
+  });
 });
 
 describe("pollGreenhouseSecurityCode", () => {
@@ -185,8 +231,35 @@ describe("pollGreenhouseSecurityCode", () => {
   });
 });
 
+describe("pollGreenhouseSecurityCode on a job-wrapping board", () => {
+  const target = { company: COMPANY, since: SINCE };
+  afterEach(() => { vi.useRealTimers(); });
+  it("finds the code in Greenhouse's mail naming the board's organization once 60 s have passed (Artefact run 97845bf4)", async () => {
+    const { factory, calls } = fakeMailbox([[wrapped()]]);
+    expect(await pollGreenhouseSecurityCode(factory, target, { sleep: fakeClock() })).toEqual({ kind: "found", code: DIGITS_CODE });
+    // Reads at +0 s … +60 s; the 7th is the first at SECURITY_CODE_ANY_ORGANIZATION_AFTER_MS.
+    expect(SECURITY_CODE_ANY_ORGANIZATION_AFTER_MS).toBe(60_000);
+    expect(calls).toEqual({ opened: 1, reads: 7, closed: 1 });
+  });
+  it("takes mail naming the posting's company at once, even with another organization's code already there", async () => {
+    const { factory, calls } = fakeMailbox([[wrapped()], [wrapped(), message()]]);
+    expect(await pollGreenhouseSecurityCode(factory, target, { sleep: fakeClock() })).toEqual({ kind: "found", code: CODE });
+    expect(calls.reads).toBe(2);
+  });
+  it("stays none when only another organization's mail arrives and the wait is under 60 s", async () => {
+    const { factory, calls } = fakeMailbox([[wrapped()]]);
+    expect(await pollGreenhouseSecurityCode(factory, target, { pollMs: 10_000, timeoutMs: 50_000, sleep: fakeClock() })).toEqual({ kind: "none" });
+    expect(calls.closed).toBe(1);
+  });
+  it("holds two other-organization codes as ambiguous after 60 s", async () => {
+    const { factory } = fakeMailbox([[wrapped(), wrapped(OTHER_CODE)]]);
+    expect(await pollGreenhouseSecurityCode(factory, target, { sleep: fakeClock() })).toEqual({ kind: "ambiguous", count: 2 });
+  });
+});
+
 describe("greenhouseSecurityCodeLookup", () => {
   const wait = { pollMs: 10, timeoutMs: 30, sleep: noSleep };
+  afterEach(() => { vi.useRealTimers(); });
   it("leaves non-Greenhouse pages unsupported without opening the mailbox", async () => {
     const { factory, calls } = fakeMailbox([[message()]]);
     const lookup = greenhouseSecurityCodeLookup({ mailbox: factory, company: COMPANY, wait });
@@ -213,5 +286,10 @@ describe("greenhouseSecurityCodeLookup", () => {
     const ambiguous = fakeMailbox([[message(), second]]);
     expect(await greenhouseSecurityCodeLookup({ mailbox: ambiguous.factory, company: COMPANY, wait })({ url: GREENHOUSE_URL, clickedAt: SINCE }))
       .toEqual({ kind: "ambiguous" });
+  });
+  it("passes a job-wrapping board's code through", async () => {
+    const { factory } = fakeMailbox([[wrapped()]]);
+    expect(await greenhouseSecurityCodeLookup({ mailbox: factory, company: COMPANY, wait: { sleep: fakeClock() } })({ url: GREENHOUSE_URL, clickedAt: SINCE }))
+      .toEqual({ kind: "found", code: DIGITS_CODE });
   });
 });
