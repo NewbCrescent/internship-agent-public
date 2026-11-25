@@ -11,4 +11,5 @@ export * from "./pdf";
 export * from "./standing-fields";
 export * from "./application-page";
 export * from "./cookie-consent";
+export * from "./announcement-dialog";
 export * from "./site-navigation";

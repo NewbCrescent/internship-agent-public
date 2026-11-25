@@ -1,0 +1,8 @@
+# Rippling custom questions are read under generated names
+
+On 2026-11-25 Rippling applications (Forterra run <run id>, APEX Analytix run <run id>) recorded their custom questions field-94, field-98, field-102, and field-124 under their input `name`, a random token that changes on every load, and field-128 as "Unlabeled textarea control 17", so the question text was never read and each paused without its question; Forterra run <run id> (2026-11-26) showed the same.
+A read-only capture of Forterra's live application on 2026-11-25 (Track 37) showed that these questions are not wrapped like Rippling's uploads: the control has no label, aria name, aria-labelledby, or placeholder, and the question is a `p` in a block written before the field, inside a container that holds no other question's control (`div.marginY--36 > [div.paddingX--16 > div > p] + [div[data-testid=field] > … > input or textarea]`), with an optional help text in a second block.
+Fix: such a control takes the text of the blocks before it in the closest ancestor holding no other question's control, read after the placeholder and before the name (`questionTextBefore` in `collectControlsIn`, `packages/browser/src/handshake-executor.ts`); help text in a separate block is joined as its own sentence.
+On the live form the questions now read as their question text (for example "What is the Country of your birth?").
+Still open: Rippling's dropdown custom questions (`div role="combobox"`) and Yes/No questions (`div role="radiogroup"` of `div role="radio"`) are not read as fields at all.
+Regressions: scenario (h) of `pnpm test:browser:unrecognized-forms` (`fixtures/rippling-application.html`).

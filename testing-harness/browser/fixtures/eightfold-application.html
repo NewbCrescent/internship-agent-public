@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply | Fixture Aero Careers</title>
+<style>
+  .field { margin: 12px 0; }
+  .select-input-group { display: inline-flex; align-items: center; }
+  .select-input-group input { width: 320px; }
+  .list-container { position: absolute; background: #fff; border: 1px solid #888; z-index: 10; list-style: none; margin: 0; padding: 0; }
+  .list-container button[role="option"] { display: block; width: 100%; text-align: left; border: 0; background: #fff; padding: 4px 8px; cursor: pointer; }
+  .modalOverlay { position: fixed; inset: 0; background: rgba(0, 0, 0, .45); display: none; align-items: center; justify-content: center; z-index: 9999; }
+  .modalBox { background: #fff; max-width: 560px; width: 90%; padding: 1.5rem 2rem; border-radius: 8px; position: relative; }
+  .modalClose { position: absolute; top: .6rem; right: .6rem; background: transparent; border: none; font-size: 1.5rem; cursor: pointer; }
+  .blocker { position: fixed; inset: 0; z-index: 10000; background: transparent; pointer-events: auto; }
+  .expired { position: fixed; inset: 0; z-index: 10001; background: rgba(0, 0, 0, .45); display: flex; align-items: center; justify-content: center; }
+  .expired > div { background: #fff; padding: 2rem; }
+</style>
+</head>
+<body>
+  <!--
+    A synthetic Eightfold-style application form ("Fixture Aero", posting 2002). DERIVED from a read-only
+    capture of a live Eightfold application form on 2026-11-25 (Track 37): Octuple Select lists are
+    editable `input role="combobox"` boxes (id input-N, aria-controls list-N, aria-labelledby naming the
+    question's label, placeholder "Select") beside an aria-hidden chevron button; the open list is
+    `ul#list-N[role=listbox] > li[role=presentation] > button[role=option][title]` with the option text in
+    a span, drawn only while open, and typing filters it; the chosen option's text is the input's value.
+    The phone "Country code picker" shows the chosen country as "<flag> (+1) <country name>". A site
+    welcome dialog (`role="dialog" aria-modal="true"`, a fixed full-viewport backdrop, a "Close welcome
+    message" button) covers the page on load until it is closed (its button or Escape).
+    ASSUMED, not observed: the picker's option texts (its list never opened during the capture; they
+    follow the shown value's shape), and the two `?blocked=` switches below.
+    Switches: `?welcome=0` hides the welcome dialog; `?country=ca` starts the picker at Canada;
+    `?blocked=1` adds, once a resume is chosen, a transparent full-viewport layer that takes every
+    trusted click and never goes away (a stand-in for whatever kept list clicks from landing after the
+    resume upload on a 2026-11-26 live run; the cause was not confirmed); `?blocked=dialog` shows, once a
+    resume is chosen, a modal "Your session has expired" dialog with no close control (a safeguard the
+    agent must never click through). Every name, host, id, and option is fictional.
+  -->
+  <div id="welcomeModal" class="modalOverlay" role="dialog" aria-modal="true" aria-labelledby="welcomeModalTitle">
+    <div class="modalBox">
+      <button class="modalClose" aria-label="Close welcome message">&times;</button>
+      <h3 id="welcomeModalTitle">Welcome to the new Fixture Aero Careers Site!</h3>
+      <p>Our new careers experience is designed to make it easier to explore opportunities and apply at Fixture Aero.</p>
+      <p>New roles are being added regularly, so be sure to check back often.</p>
+    </div>
+  </div>
+  <main>
+    <h1>Flight Software Intern</h1>
+    <form id="application" onsubmit="return false">
+      <div class="field">
+        <label id="Resume_CV_resume_label" for="Resume_CV_resume">Upload your resume/CV</label>
+        <input id="Resume_CV_resume" type="file" accept=".pdf,.doc,.docx,.txt">
+      </div>
+      <div class="field"><label for="Contact_Information_firstname">First Name</label><input id="Contact_Information_firstname" type="text" aria-required="true"></div>
+      <div class="field"><label for="Contact_Information_lastname">Last Name</label><input id="Contact_Information_lastname" type="text" aria-required="true"></div>
+      <div class="field"><label for="Contact_Information_email">Email</label><input id="Contact_Information_email" type="text" aria-required="true"></div>
+      <div class="field">
+        <div class="select-input-group">
+          <input type="text" role="combobox" aria-required="true" aria-expanded="false" aria-controls="list-3" aria-label="Country code picker"
+            placeholder="Select country code" id="Contact_Information_phone-country-code-picker" value="🇺🇸 (+1) United States of America"
+            data-options="🇺🇸 (+1) United States of America|🇨🇦 (+1) Canada|🇲🇽 (+52) Mexico">
+          <button type="button" aria-hidden="true" tabindex="-1">▾</button>
+        </div>
+        <label for="Contact_Information_phone">Phone number</label><input id="Contact_Information_phone" type="tel" aria-required="true">
+      </div>
+      <div class="field">
+        <label id="Application_Questions_q_prefPronoun_label"><span>Preferred Pronoun</span></label>
+        <div class="select-input-group">
+          <input aria-controls="list-5" aria-expanded="false" aria-labelledby="Application_Questions_q_prefPronoun_label" aria-required="false" role="combobox"
+            id="input-7" placeholder="Select" type="text" value="" data-options="He/Him/His|She/Her/Hers">
+          <button type="button" aria-hidden="true" tabindex="-1">▾</button>
+        </div>
+      </div>
+      <div class="field">
+        <label id="Application_Questions_q_source_label"><span>How did you hear about this position?</span></label>
+        <div class="select-input-group">
+          <input aria-controls="list-8" aria-expanded="false" aria-labelledby="Application_Questions_q_source_label" aria-required="true" role="combobox"
+            id="input-10" placeholder="Select" type="text" value="" data-options="Other|Job Board/Job Search Site|Company Website|Referral">
+          <button type="button" aria-hidden="true" tabindex="-1">▾</button>
+        </div>
+      </div>
+      <div class="field">
+        <label id="Application_Questions_q_age_label"><span>Are you 16 years or older?</span></label>
+        <div class="select-input-group">
+          <input aria-controls="list-11" aria-expanded="false" aria-labelledby="Application_Questions_q_age_label" aria-required="true" role="combobox"
+            id="input-13" placeholder="Select" type="text" value="" data-options="Yes|No">
+          <button type="button" aria-hidden="true" tabindex="-1">▾</button>
+        </div>
+      </div>
+      <div class="field">
+        <label id="Application_Questions_q_formerEmployee_label"><span>Have you ever worked for Fixture Aero - either as a direct employee or as a contractor?</span></label>
+        <div class="select-input-group">
+          <input aria-controls="list-14" aria-expanded="false" aria-labelledby="Application_Questions_q_formerEmployee_label" aria-required="true" role="combobox"
+            id="input-16" placeholder="Select" type="text" value="" data-options="Yes|No">
+          <button type="button" aria-hidden="true" tabindex="-1">▾</button>
+        </div>
+      </div>
+      <div class="field">
+        <label id="Application_Questions_q_customWorkAuth_label"><span>Are you legally authorized to work in the country of the job for which you are applying?</span></label>
+        <div class="select-input-group">
+          <input aria-controls="list-17" aria-expanded="false" aria-labelledby="Application_Questions_q_customWorkAuth_label" aria-required="true" role="combobox"
+            id="input-19" placeholder="Select" type="text" value="" data-options="Yes|No">
+          <button type="button" aria-hidden="true" tabindex="-1">▾</button>
+        </div>
+      </div>
+      <div class="field">
+        <label id="Application_Questions_q_customSponsorship_label"><span>Will you require sponsorship for an employment Visa?</span></label>
+        <div class="select-input-group">
+          <input aria-controls="list-20" aria-expanded="false" aria-labelledby="Application_Questions_q_customSponsorship_label" aria-required="true" role="combobox"
+            id="input-22" placeholder="Select" type="text" value="" data-options="Yes|No">
+          <button type="button" aria-hidden="true" tabindex="-1">▾</button>
+        </div>
+      </div>
+      <div class="field">
+        <label id="Application_Questions_q_gender_label"><span>Sex</span></label>
+        <div class="select-input-group">
+          <input aria-controls="list-56" aria-expanded="false" aria-labelledby="Application_Questions_q_gender_label" aria-required="true" role="combobox"
+            id="input-58" placeholder="Select" type="text" value="" data-options="Male|Female|I do not wish to self-identify">
+          <button type="button" aria-hidden="true" tabindex="-1">▾</button>
+        </div>
+      </div>
+      <button type="submit">Submit</button>
+    </form>
+  </main>
+  <script>
+    const params = new URLSearchParams(location.search);
+    window.fixture = { chosen: {}, opened: 0 };
+    const picker = document.getElementById("Contact_Information_phone-country-code-picker");
+    if (params.get("country") === "ca") picker.value = "🇨🇦 (+1) Canada";
+    const welcome = document.getElementById("welcomeModal");
+    const closeWelcome = () => { welcome.style.display = "none"; };
+    if (params.get("welcome") !== "0") welcome.style.display = "flex";
+    welcome.querySelector(".modalClose").addEventListener("click", closeWelcome);
+    document.getElementById("Resume_CV_resume").addEventListener("change", () => {
+      if (params.get("blocked") === "1") {
+        const layer = document.createElement("div");
+        layer.className = "blocker";
+        document.body.appendChild(layer);
+      } else if (params.get("blocked") === "dialog") {
+        const dialog = document.createElement("div");
+        dialog.className = "expired";
+        dialog.setAttribute("role", "dialog");
+        dialog.setAttribute("aria-modal", "true");
+        dialog.innerHTML = "<div><h3>Your session has expired</h3><p>Reload the page to continue.</p></div>";
+        document.body.appendChild(dialog);
+      }
+    });
+    let open = null;
+    function close() {
+      if (!open) return;
+      open.input.setAttribute("aria-expanded", "false");
+      open.list.remove();
+      open = null;
+    }
+    function render(input, filter) {
+      const list = open.list;
+      list.textContent = "";
+      const wanted = (filter || "").trim().toLowerCase();
+      let n = 0;
+      for (const text of input.dataset.options.split("|")) {
+        if (wanted && !text.toLowerCase().includes(wanted)) continue;
+        const item = document.createElement("li");
+        item.setAttribute("role", "presentation");
+        const option = document.createElement("button");
+        option.type = "button";
+        option.id = `${list.id}-option-${n++}`;
+        option.title = text;
+        option.setAttribute("role", "option");
+        option.setAttribute("aria-selected", String(input.value === text));
+        const label = document.createElement("span");
+        label.className = "label";
+        label.textContent = text;
+        option.appendChild(label);
+        option.addEventListener("mousedown", (event) => event.preventDefault());
+        option.addEventListener("click", () => {
+          input.value = text;
+          window.fixture.chosen[input.id] = text;
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+          close();
+        });
+        item.appendChild(option);
+        list.appendChild(item);
+      }
+    }
+    function openFor(input) {
+      if (open && open.input === input) return;
+      close();
+      const list = document.createElement("ul");
+      list.id = input.getAttribute("aria-controls");
+      list.className = "list-container";
+      list.setAttribute("role", "listbox");
+      const box = input.getBoundingClientRect();
+      list.style.left = `${box.left + window.scrollX}px`;
+      list.style.top = `${box.bottom + window.scrollY}px`;
+      document.body.appendChild(list);
+      open = { input, list };
+      input.setAttribute("aria-expanded", "true");
+      window.fixture.opened += 1;
+      render(input, "");
+    }
+    for (const input of document.querySelectorAll('input[role="combobox"]')) {
+      input.addEventListener("click", () => openFor(input));
+      input.addEventListener("input", () => {
+        // Typing filters the list, like Octuple's default filter (case-insensitive substring).
+        if (!open || open.input !== input) openFor(input);
+        render(input, input.value);
+      });
+    }
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      close();
+      if (welcome.style.display !== "none") closeWelcome();
+    });
+    document.addEventListener("mousedown", (event) => {
+      if (open && event.target !== open.input && !open.list.contains(event.target)) close();
+    });
+  </script>
+</body>
+</html>

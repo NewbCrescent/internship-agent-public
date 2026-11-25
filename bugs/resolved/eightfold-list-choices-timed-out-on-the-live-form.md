@@ -1,0 +1,11 @@
+# Eightfold list choices timed out on the live form
+
+On Lockheed Martin run <run id> (pass 18, 2026-11-26) every Eightfold list choice failed with "the field did not respond in time", although Track 35 had read each list with its options: Preferred Pronoun, how heard, previously worked there, work authorization, sponsorship, Security Clearance - Active, Sex, and ethnic group, so the resolver's answers for the authorization, sponsorship, former-employee, and clearance questions never reached the form.
+A read-only capture of the live form on 2026-11-25 showed that Octuple's lists are editable `input role="combobox"` boxes that filter as you type yet show every option on opening, so Track 35 sent them through the type-ahead path (click, clear, type, pick a suggestion).
+The capture also showed a welcome dialog (`role="dialog" aria-modal="true"`, fixed over the whole page) on load that takes every trusted click until its close button or Escape closes it.
+What kept the list clicks from landing after the resume upload on the real run is not confirmed, because the capture could not upload a file.
+Fix: any bare ARIA list that shows options on opening is a plain list chosen by clicking its option in the listbox it names, and typed into only when the option is not shown (`chooseComboboxOption`, `packages/browser/src/handshake-executor.ts`).
+A click on such a list or its option that times out closes a site announcement first, only with its own close control and only when it holds no form field, frame, or safeguard wording (`packages/browser/src/announcement-dialog.ts`), then tries once more, and is otherwise dispatched to the element itself only when no CAPTCHA, site check, or modal dialog is still shown; under one the list pauses ("a site check covers the form", "a dialog covers the form").
+A choice the input does not show pauses with "the site did not keep the choice".
+The next real Eightfold run confirms the post-upload case.
+Regressions: scenarios (d) and (e) of `pnpm test:browser:unrecognized-forms` (`fixtures/eightfold-application.html`, its `?blocked=1` layer an assumed stand-in and its `?blocked=dialog` session dialog the safeguard case), and the announcement chooser cases in `pnpm test:browser-worker:fast`.

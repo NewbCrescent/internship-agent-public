@@ -2,6 +2,7 @@ import type { Locator, Page } from "playwright-core";
 
 import { promptSearchTerms, type AtsKind, type BrowserField, type FillDecision, type PauseRecord, type RecognizedForm } from "@internship-agent/domain";
 
+import { dismissAnnouncementDialog, visibleModalDialogIn } from "./announcement-dialog";
 import { chooseApplyEntry, clickApplyEntry, dismissCookieBanner, embedSourcesOf, greenhouseEmbedTarget, type ApplyEntryCandidate } from "./apply-entry";
 import { isDoverOrAshby } from "./ats/adapters";
 import {
@@ -685,8 +686,8 @@ export function createPlaywrightPage(page: Page): BrowserPage {
         // the first page shown on opening is never the whole list (the options read are kept).
         if (control.options.length === 0 || /^(?:school|discipline)--\d+$/.test(control.id)) control.widget = "autocomplete";
       }
-      // Bare ARIA lists (Eightfold's Octuple Select) draw their options only while open, like react-select's.
-      // Opening one saves nothing; a list that shows no options on opening stays a type-ahead.
+      // Bare ARIA lists (Eightfold's Octuple Select, Rippling's searchable select) draw their options only while
+      // open, like react-select's. Opening one saves nothing; a list that shows no options on opening stays a type-ahead.
       for (const control of controls) {
         if (!control.listbox || opened >= 40) continue;
         const selector = control.id
@@ -699,10 +700,11 @@ export function createPlaywrightPage(page: Page): BrowserPage {
         control.tag = "select";
         control.type = undefined;
         control.options = options;
-        // A readonly list is chosen by clicking its option (recognizeFields drops "combobox"; chooseOption
-        // routes the role="combobox" control to chooseComboboxOption). An editable one is searched and
-        // picked, keeping the options read on opening, like Greenhouse's School list.
-        control.widget = control.listbox === "readonly" ? "combobox" : "autocomplete";
+        // A list that shows its options on opening is chosen by clicking its option (recognizeFields drops
+        // "combobox"; chooseOption routes the role="combobox" control to chooseComboboxOption), readonly or not:
+        // Eightfold's Octuple lists filter as you type yet show every option on opening, and a click never
+        // types into them (Track 37: typing through the type-ahead path timed out on the live form).
+        control.widget = "combobox";
       }
       return controls;
     },
@@ -1317,8 +1319,41 @@ function listboxIdsIn(element: Element): string[] {
 }
 
 /**
- * Opens a bare ARIA list (Eightfold's Octuple Select), reads its options, and
- * closes it: the visible `role="option"` items of the listbox its
+ * A click on a bare ARIA list's control or option (never react-select, a
+ * native select, a radio, Ashby, Workday, or a submit control). A trusted
+ * click first. When it times out (something covers the form: Eightfold's
+ * welcome dialog on load, or whatever kept every trusted list click from
+ * landing after the resume upload on Lockheed Martin run <run id>, Track 37),
+ * a site announcement is closed when that is safe (announcement-dialog.ts)
+ * and the trusted click is tried once more. Still blocked: a visible
+ * CAPTCHA or other site check, or a modal dialog still shown, makes the field
+ * unfillable, so a safeguard is never clicked through; otherwise the click is
+ * dispatched to the element itself. Other errors are thrown as they are.
+ */
+async function clickBareList(page: Page, target: Locator, timeoutMs: number): Promise<void> {
+  try {
+    await target.click({ timeout: timeoutMs });
+    return;
+  } catch (error) {
+    if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+  }
+  if (await dismissAnnouncementDialog(page)) {
+    try {
+      await target.click({ timeout: 3_000 });
+      return;
+    } catch (error) {
+      if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+    }
+  }
+  await ensureNameShim(page);
+  if (await page.evaluate(findVisibleChallengeIn)) throw new FieldUnfillable("a site check covers the form");
+  if (await page.evaluate(visibleModalDialogIn)) throw new FieldUnfillable("a dialog covers the form");
+  await target.dispatchEvent("click");
+}
+
+/**
+ * Opens a bare ARIA list (Eightfold's Octuple Select) with clickBareList,
+ * reads its options, and closes it: the visible `role="option"` items of the listbox its
  * aria-controls/aria-owns names (on it or its ancestors), else of the one
  * visible `role="listbox"` on the page. Then Escape, the focus leaves the
  * active element, and up to 1 s for the list to hide. Opening a list saves
@@ -1326,7 +1361,7 @@ function listboxIdsIn(element: Element): string[] {
  */
 async function readAriaListOptions(page: Page, control: Locator): Promise<string[]> {
   try {
-    await control.click({ timeout: 3_000 });
+    await clickBareList(page, control, 3_000);
     let texts: string[] = [];
     let listbox: Locator | null = null;
     const deadline = Date.now() + 1_500;
@@ -1369,11 +1404,15 @@ async function readAriaListOptions(page: Page, control: Locator): Promise<string
 }
 
 /**
- * Picks one option of a react-select list and checks that the control shows
- * it. Greenhouse's phone-country list shows only the chosen country's dialing
- * code ("+1" for "United States +1"), which counts as showing that option.
- * A react-select multi-select ("mark all that apply") shows the choice as a
- * chip, which counts as showing it.
+ * Picks one option of a react-select list or a bare ARIA list and checks that
+ * the control shows it. Greenhouse's phone-country list shows only the chosen
+ * country's dialing code ("+1" for "United States +1"), which counts as
+ * showing that option. A react-select multi-select ("mark all that apply")
+ * shows the choice as a chip, which counts as showing it. A bare ARIA list
+ * (Eightfold's Octuple Select, Rippling's searchable select) is opened and its
+ * option clicked with clickBareList; its option is looked up in the listbox
+ * it names (a "…"-clipped option by its prefix), and an editable one that does
+ * not show the option on opening is searched by typing it.
  */
 async function chooseComboboxOption(page: Page, control: Locator, field: BrowserField, option: string): Promise<void> {
   const shown = () => control.evaluate((element) => {
@@ -1387,13 +1426,17 @@ async function chooseComboboxOption(page: Page, control: Locator, field: Browser
   });
   // Already chosen: react-select hides chosen options from a multi menu.
   if ((await shown()).multi.includes(option)) return;
+  // React-select keeps its own path; only a bare ARIA list gets clickBareList and the typing fallback.
+  const bare = await control.evaluate((element) => element instanceof HTMLInputElement
+    && element.getAttribute("role") === "combobox" && !element.closest('[class*="select__control"]')).catch(() => false);
   await settleOpenMenus(page);
-  await control.click({ timeout: 5_000 });
+  if (bare) await clickBareList(page, control, 5_000);
+  else await control.click({ timeout: 5_000 });
   // A list that loads its options (Greenhouse's Degree catalog) shows them a moment after opening.
   await page.locator('[role="option"], [class*="select__option"]').filter({ visible: true }).first()
     .waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
   // A bare ARIA list's option is looked up in the listbox it names, so another open list's same-named option is never clicked.
-  const ownListbox = await control.evaluate((element) => {
+  const ownListboxOf = () => control.evaluate((element) => {
     if (element.closest('[class*="select__control"]')) return null;
     const ids: string[] = [];
     let node: Element | null = element;
@@ -1407,13 +1450,43 @@ async function chooseComboboxOption(page: Page, control: Locator, field: Browser
       return Boolean(owner && owner.getClientRects().length > 0 && getComputedStyle(owner).visibility !== "hidden");
     }) ?? null;
   }).catch(() => null);
-  const scope = ownListbox ? page.locator(idSelector(ownListbox)) : page;
-  const byRole = scope.getByRole("option", { name: option, exact: true });
-  const target = (await byRole.count()) > 0
-    ? byRole.first()
-    : page.locator('[class*="select__option"]').filter({ hasText: new RegExp(`^\\s*${option.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`) }).first();
-  await target.click({ timeout: 5_000 });
   const wanted = choiceText(option);
+  const clipped = wanted.endsWith("…") ? wanted.slice(0, -1).trimEnd() : null;
+  const optionIn = async (listboxId: string | null): Promise<Locator | null> => {
+    const scope = listboxId ? page.locator(idSelector(listboxId)) : page;
+    const byRole = scope.getByRole("option", { name: option, exact: true });
+    if ((await byRole.count()) > 0) return byRole.first();
+    if (bare && clipped) {
+      // Recognition clipped a long option with "…": the first option it starts.
+      const options = scope.locator('[role="option"]').filter({ visible: true });
+      const texts = await options.allInnerTexts().catch(() => [] as string[]);
+      const index = texts.findIndex((text) => choiceText(text).startsWith(clipped));
+      if (index >= 0) return options.nth(index);
+    }
+    return null;
+  };
+  let target = await optionIn(await ownListboxOf());
+  if (!target && bare) {
+    const editable = await control.evaluate((element) => !(element as HTMLInputElement).readOnly).catch(() => false);
+    if (editable) {
+      // An editable list that does not show the option on opening is searched for it.
+      await control.fill("", { timeout: 5_000 });
+      await control.pressSequentially(option.replace(/…$/, "").trimEnd(), { delay: 40, timeout: 10_000 });
+      const deadline = Date.now() + 3_000;
+      while (!target && Date.now() < deadline) {
+        target = await optionIn(await ownListboxOf());
+        if (!target) await page.waitForTimeout(200);
+      }
+    }
+    if (!target) {
+      await page.keyboard.press("Escape").catch(() => undefined);
+      await control.blur().catch(() => undefined);
+      throw new FieldUnfillable("the option was not found");
+    }
+  }
+  target ??= page.locator('[class*="select__option"]').filter({ hasText: new RegExp(`^\\s*${option.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`) }).first();
+  if (bare) await clickBareList(page, target, 5_000);
+  else await target.click({ timeout: 5_000 });
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const { single, multi, value } = await shown();
     if (single === option || (/^\+\d{1,4}$/.test(single) && option.endsWith(` ${single}`))) return;
@@ -1425,12 +1498,13 @@ async function chooseComboboxOption(page: Page, control: Locator, field: Browser
     if (value) {
       const current = choiceText(value);
       // Recognition clips a long option with "…": the shown value is compared by that prefix (as choicesNotTaken does).
-      if (current === wanted || (wanted.endsWith("…") && current.startsWith(wanted.slice(0, -1).trimEnd()))) return;
+      if (current === wanted || (clipped !== null && current.startsWith(clipped))) return;
       // A phone-country picker shows only the dialing code ("+1" for "United States (+1)").
       if (/^\+\d{1,4}$/.test(value) && (option.endsWith(` ${value}`) || option.endsWith(`(${value})`))) return;
     }
     await page.waitForTimeout(200);
   }
+  if (bare) throw new FieldUnfillable("the site did not keep the choice");
   throw new Error(`"${field.label}" did not accept the option.`);
 }
 
@@ -1786,7 +1860,38 @@ export function collectControlsIn(root: Element): RawControl[] {
     }
     return "";
   };
-  /** The label and where it came from; placeholder and name are the last resort, after the question text near the control. */
+  /**
+   * The question text written before a control with no label, aria name, or placeholder: in the closest
+   * ancestor holding the control and no other question's control, the text of its children before the one
+   * holding the control. Rippling's custom questions draw `div > [div > p "Question?"] + [div[data-testid=field]
+   * > … > input]` with a random `name` and nothing else naming the control (Track 37, read-only capture of
+   * 2026-11-25). An option's own label, aria-hidden text, and buttons or links are never the question.
+   */
+  const questionTextBefore = (element: Element): string => {
+    const name = (element as HTMLInputElement).name;
+    const sameQuestion = (other: Element): boolean => other === element
+      || (Boolean(name) && (other as HTMLInputElement).name === name && other.tagName === element.tagName);
+    let child: Element = element;
+    let node: Element | null = element.parentElement;
+    for (let depth = 0; node && depth < 6 && node !== document.body; depth += 1, child = node, node = node.parentElement) {
+      if (Array.from(node.querySelectorAll(CONTROL)).some((other) => isQuestion(other) && !sameQuestion(other))) return "";
+      const before: string[] = [];
+      for (const sibling of Array.from(node.children)) {
+        if (sibling === child) break;
+        if (sibling.matches(CONTROL) || sibling.querySelector(CONTROL) || sibling.closest(ACTION) || notQuestionText(sibling)) continue;
+        // A question and its help text in separate blocks read as two sentences, not one run-on word.
+        const ownText = Array.from(sibling.childNodes).some((part) => part.nodeType === Node.TEXT_NODE && (part.textContent ?? "").trim());
+        const blocks = sibling.children.length > 1 && !ownText ? Array.from(sibling.children) : [sibling];
+        for (const block of blocks) {
+          const text = notQuestionText(block) ? "" : textOf(block);
+          if (text) before.push(text);
+        }
+      }
+      if (before.length > 0) return collapse(before.join(" ")).slice(0, 300);
+    }
+    return "";
+  };
+  /** The label and where it came from; placeholder, the question text before the control, and name are the last resort, after the question text near the control. */
   const labelFor = (element: Element): string | undefined => {
     const labelled = byIds(element.getAttribute("aria-labelledby"));
     if (labelled) return labelled;
@@ -1811,7 +1916,8 @@ export function collectControlsIn(root: Element): RawControl[] {
     }
     const near = questionLabelNear(element);
     if (near) return near;
-    return collapse(element.getAttribute("placeholder")) || nameLabel((element as HTMLInputElement).name) || undefined;
+    return collapse(element.getAttribute("placeholder")) || questionTextBefore(element)
+      || nameLabel((element as HTMLInputElement).name) || undefined;
   };
   const RESUME_LABEL = /\b(resume|cv|curriculum vitae)\b|r[eé]sum[eé]|add resume|attach resume/i;
   const isSiblingPaste = (other: Element) => other.tagName === "TEXTAREA" && /paste|resume/i.test(other.id || other.className);

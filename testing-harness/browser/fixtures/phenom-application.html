@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Applying for a job | Fixture Labs Careers</title></head>
+<body>
+  <!--
+    A synthetic Phenom-style personal-information step ("Fixture Labs", job R200002). DERIVED from a
+    read-only capture of a live Phenom apply form on 2026-11-25 (Track 37): native `<select class="form-control">`
+    lists with a "Please Select" first option, labelled by `label[for]`; the phone widget's "Country Phone
+    Code" select also carries `type="text"`, `autocomplete="tel-country-code"`, and aria-labelledby naming
+    its label, its options are country names with "USA" as the United States entry (values like
+    "USA_1"), and the phone number box sits beside it in `#phoneWidget`. The option list is shortened.
+    Every name, host, and id is fictional.
+  -->
+  <main>
+    <h1>You are applying for - Robotics Intern (R200002)</h1>
+    <form id="application" onsubmit="return false">
+      <div class="form-group field field-string">
+        <label class="control-label" for="country" id="country-label">Country<span class="required" aria-hidden="true">*</span></label>
+        <div><select id="country" class="form-control" autocomplete="cntry-name" required>
+          <option value="">Please Select</option>
+          <option value="CAN">Canada</option>
+          <option value="GBR">United Kingdom</option>
+          <option value="UMI">United States Minor Outlying Islands</option>
+          <option value="USA">United States of America</option>
+          <option value="URY">Uruguay</option>
+        </select></div>
+      </div>
+      <div class="form-group field field-string">
+        <label class="control-label" for="cntryFields.firstName">First Name<span class="required" aria-hidden="true">*</span></label>
+        <div><input type="text" class="form-control" id="cntryFields.firstName" aria-label="First Name" required></div>
+      </div>
+      <div class="form-group field field-string">
+        <label class="control-label" for="cntryFields.lastName">Last Name<span class="required" aria-hidden="true">*</span></label>
+        <div><input type="text" class="form-control" id="cntryFields.lastName" aria-label="Last Name" required></div>
+      </div>
+      <div class="form-group field field-string">
+        <label class="control-label" for="email">Email Address<span class="required" aria-hidden="true">*</span></label>
+        <div><input type="text" class="form-control" id="email" name="email" aria-label="Email Address" required></div>
+      </div>
+      <div class="form-group field field-object apply-form"><div>
+        <div class="form-group field field-string row">
+          <label for="phoneWidget.countryPhoneCode" id="phoneWidget.countryPhoneCode-label" aria-label="Country Phone Code">Country Phone Code<span aria-hidden="true" class="required">*</span></label>
+          <div><select id="phoneWidget.countryPhoneCode" class="form-control" type="text" autocomplete="tel-country-code" aria-labelledby="phoneWidget.countryPhoneCode-label">
+            <option value="">Please Select</option>
+            <option value="CAN_1">Canada</option>
+            <option value="VIR_1">U.S. Virgin Islands</option>
+            <option value="GBR_44">United Kingdom</option>
+            <option value="UMI_1">United States Minor Outlying Islands</option>
+            <option value="USA_1">USA</option>
+            <option value="URY_598">Uruguay</option>
+          </select></div>
+        </div>
+        <div class="form-group field field-string row">
+          <label for="phoneWidget.phoneNumber" id="phoneWidget.phoneNumber-label" aria-label="Phone Number">Phone Number<span aria-hidden="true" class="required">*</span></label>
+          <div id="phoneWidget"><input class="form-control" type="text" placeholder=" " id="phoneWidget.phoneNumber" aria-labelledby="phoneWidget.phoneNumber-label" autocomplete="tel-national" name="phoneWidget.phoneNumber"></div>
+        </div>
+      </div></div>
+      <button type="submit">Next</button>
+    </form>
+  </main>
+</body>
+</html>

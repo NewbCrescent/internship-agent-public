@@ -204,6 +204,11 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
 
   const contact = contactValue(field.label, inputs.profile);
   if (contact && (TEXT_KINDS.has(field.kind) || field.kind === "select" || field.kind === "radio")) {
+    // A phone-country picker that already shows the profile's country ("🇺🇸 (+1) United States of America") is
+    // kept, never retyped: typing into it first clears the country it shows (Track 37). A bare "+1" names no country.
+    if (contact.key === "addressCountry" && field.currentValue && matchCountryOption(contact.value, [field.currentValue])) {
+      return keepShown(field, resolution);
+    }
     if (field.widget === "autocomplete") {
       // A Country type-ahead searches by the country's name: a "US" / "USA" profile value types "United States".
       const typed = contact.key === "addressCountry" && US_COUNTRY_KEYS.has(countryKey(contact.value)) ? "United States" : contact.value;
@@ -821,9 +826,14 @@ const US_COUNTRY_KEYS: ReadonlySet<string> = new Set([
   "united states", "united states of america", "us", "usa", "u.s", "u.s.", "u.s.a", "u.s.a."
 ]);
 
-/** A country name compared loosely: no accents, lowercase, no trailing dialing code ("+1", "(+44)"), no leading "the". */
+/**
+ * A country name compared loosely: no accents, lowercase, no leading flag or dialing code
+ * ("🇺🇸 (+1) United States of America", Eightfold's phone picker), no trailing dialing code ("+1", "(+44)"),
+ * no leading "the".
+ */
 function countryKey(text: string): string {
-  return text.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLocaleLowerCase("en-US")
+  return text.normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/^\s*[\u{1F1E6}-\u{1F1FF}]{2}\s*/u, "")
+    .replace(/^\(?\+\d{1,4}\)?\s*/, "").toLocaleLowerCase("en-US")
     .replace(/\s*\(?\+\d{1,4}\)?\s*$/, "").replace(/\s+/g, " ").trim().replace(/^the /, "");
 }
 
@@ -1064,7 +1074,11 @@ function csMajorDecision(field: BrowserField, inputs: PlannerInputs): FillDecisi
   };
 }
 
-/** "he/him" matches "He/Him/His": the saved pronouns are a prefix of exactly one option's. */
+/**
+ * "he/him" matches "He/Him/His": the saved pronouns are a prefix of exactly one option's. When saved
+ * pronouns naming one set also start a combined option (Rippling's "She/her/hers, they/them/theirs" beside
+ * "She/her/hers"), only the options naming one set count.
+ */
 function matchPronounOption(saved: string, options: string[]): string | undefined {
   const tokens = (text: string) => text.split("/").map((token) => token.trim().toLocaleLowerCase("en-US")).filter(Boolean);
   const wanted = tokens(saved);
@@ -1073,7 +1087,13 @@ function matchPronounOption(saved: string, options: string[]): string | undefine
     const offered = tokens(option);
     return wanted.length <= offered.length && wanted.every((token, index) => offered[index] === token);
   });
-  return matches.length === 1 ? matches[0] : undefined;
+  if (matches.length === 1) return matches[0];
+  const oneSet = (text: string) => !/[,;&]| and | or /i.test(text);
+  if (matches.length > 1 && oneSet(saved)) {
+    const single = matches.filter(oneSet);
+    if (single.length === 1) return single[0];
+  }
+  return undefined;
 }
 
 function pauseRecord(field: BrowserField, decision: FillDecision, sensitive: boolean): PauseRecord {
@@ -1179,7 +1199,7 @@ const CONTACT_LABELS: Array<{ key: ContactKey; pattern: RegExp }> = [
   { key: "addressCity", pattern: /^city$|^town\/city$|^city\/town$/ },
   { key: "addressRegion", pattern: /^(state|province|region)$|^state\/province$|^state or province$|^(?:what|which) state do you (?:currently )?(?:reside|live) in\??$|^(?:current )?state of residence$/ },
   { key: "addressPostalCode", pattern: /^(postal|zip)( code)?$|^zip\/postal code$|^postal\/zip code$/ },
-  { key: "addressCountry", pattern: /^country$|^country \/ territory$|^country\/territory$|^(?:phone )?country(?: dialing)? code(?: picker)?$/ },
+  { key: "addressCountry", pattern: /^country$|^country \/ territory$|^country\/territory$|^(?:phone )?country(?: phone| dialing)? code(?: picker)?$/ },
   { key: "phoneType", pattern: /^phone (device )?type$|^type of phone$|^phone number type$/ },
   { key: "fieldOfStudy", pattern: /^(field|area) of study$|^major$|^discipline$/ }
 ];

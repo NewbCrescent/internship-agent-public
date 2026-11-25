@@ -60,6 +60,8 @@ import {
   isHearAboutQuestion,
   isSafeguardField,
   matchCountryOption,
+  chooseAnnouncementClose,
+  type AnnouncementCandidate,
   matchSuggestion,
   pickHearAboutOption,
   stripRequiredMarker,
@@ -2434,5 +2436,84 @@ describe("unrecognized-site answers (Track 35)", () => {
       control({ tag: "select", id: "Contact_Information_phone-country-code-picker", label: "Country code picker", value: "+1", options: ["United States (+1)", "Canada (+1)", "Mexico (+52)"] })
     ], [], { addressCountry: "United States" });
     expect(planned.decisions[0]).toMatchObject({ action: "choose", value: "United States (+1)", basis: { kind: "profile", field: "addressCountry" } });
+  });
+});
+
+describe("live unrecognized forms (Track 37)", () => {
+  const plan = (controls: RawControl[], resolutions: Array<[string, FieldResolution]> = [], profile: Record<string, string> = {}) => planAutofill(
+    recognizeForm("https://careers.fixtureaero.example/careers/apply?pid=2002", "Apply", controls),
+    { profile, resolutions: new Map(resolutions), packageAnswers: [], variantId: null }
+  );
+  const US_PICKER = "🇺🇸 (+1) United States of America";
+  const PICKER_OPTIONS = [US_PICKER, "🇨🇦 (+1) Canada", "🇲🇽 (+52) Mexico"];
+
+  it("takes the profile country on Phenom's \"Country Phone Code\" list (\"USA\", never a territory)", () => {
+    const planned = plan([
+      control({ tag: "select", id: "phoneWidget.countryPhoneCode", label: "Country Phone Code", required: true,
+        options: ["Please Select", "Canada", "U.S. Virgin Islands", "United Kingdom", "United States Minor Outlying Islands", "USA", "Uruguay"] })
+    ], [], { addressCountry: "United States" });
+    expect(planned.decisions[0]).toMatchObject({ action: "choose", value: "USA", basis: { kind: "profile", field: "addressCountry" } });
+    expect(planned.pauses).toEqual([]);
+  });
+
+  it("keeps a phone-country picker that already shows the profile's country, and chooses it when another shows", () => {
+    const typeAhead = plan([
+      control({ tag: "input", type: "text", widget: "autocomplete", id: "Contact_Information_phone-country-code-picker", label: "Country code picker", value: US_PICKER })
+    ], [], { addressCountry: "United States" });
+    expect(typeAhead.decisions[0]).toMatchObject({ action: "keep", value: US_PICKER });
+    const other = plan([
+      control({ tag: "select", id: "Contact_Information_phone-country-code-picker", label: "Country code picker", value: "🇨🇦 (+1) Canada", options: PICKER_OPTIONS })
+    ], [], { addressCountry: "United States" });
+    expect(other.decisions[0]).toMatchObject({ action: "choose", value: US_PICKER, basis: { kind: "profile", field: "addressCountry" } });
+    const same = plan([
+      control({ tag: "select", id: "Contact_Information_phone-country-code-picker", label: "Country code picker", value: US_PICKER, options: PICKER_OPTIONS })
+    ], [], { addressCountry: "United States" });
+    expect(same.decisions[0]).toMatchObject({ action: "keep", value: US_PICKER });
+    expect(matchCountryOption("Canada", PICKER_OPTIONS)).toBe("🇨🇦 (+1) Canada");
+  });
+
+  it("picks the one single-set pronoun option the saved pronouns start, never a combined one", () => {
+    const options = ["She/her/hers", "He/him/his", "They/them/theirs", "She/her/hers, they/them/theirs", "He/him/his, they/them/theirs", "Just use my name", "Enter my pronouns"];
+    const pronouns = (display: string) => plan(
+      [control({ tag: "select", id: "field-20", label: "Pronouns", options })],
+      [["field-20", { status: "RESOLVED", key: "pronouns", scope: "global", display, value: display }]]
+    ).decisions[0];
+    expect(pronouns("she/her")).toMatchObject({ action: "choose", value: "She/her/hers", basis: { kind: "fact", key: "pronouns", scope: "global" } });
+    expect(pronouns("he/him")).toMatchObject({ action: "choose", value: "He/him/his" });
+    // Saved pronouns naming two sets are not narrowed to one: no option is guessed.
+    expect(pronouns("she/her, they/them")).toMatchObject({ action: "pause", value: null });
+  });
+
+  describe("closing a site announcement over the form", () => {
+    const welcome: AnnouncementCandidate = {
+      index: 0,
+      text: "× Welcome to the new Fixture Aero Careers Site! Our new careers experience is designed to make it easier to explore opportunities and apply at Fixture Aero.",
+      formControls: 0,
+      frames: 0,
+      closes: [{ tag: "0-0", text: "×", ariaLabel: "Close welcome message", title: "" }]
+    };
+
+    it("closes a welcome message with its own close control", () => {
+      expect(chooseAnnouncementClose([welcome])).toBe("0-0");
+      expect(chooseAnnouncementClose([{ ...welcome, closes: [{ tag: "0-0", text: "×", ariaLabel: "", title: "" }] }])).toBe("0-0");
+      expect(chooseAnnouncementClose([{ ...welcome, closes: [{ tag: "0-0", text: "Dismiss", ariaLabel: "", title: "" }] }])).toBe("0-0");
+    });
+
+    it("never closes a dialog with a form field, a frame, safeguard wording, or only an accept or continue control", () => {
+      expect(chooseAnnouncementClose([{ ...welcome, formControls: 1 }])).toBeNull();
+      expect(chooseAnnouncementClose([{ ...welcome, frames: 1 }])).toBeNull();
+      for (const text of [
+        "Sign in to continue",
+        "We use cookies on this site",
+        "Please complete the CAPTCHA",
+        "Your session has expired",
+        "Your application has been saved",
+        "Verify your email address"
+      ]) {
+        expect(chooseAnnouncementClose([{ ...welcome, text }])).toBeNull();
+      }
+      expect(chooseAnnouncementClose([{ ...welcome, closes: [{ tag: "0-0", text: "Accept", ariaLabel: "", title: "" }, { tag: "0-1", text: "Continue", ariaLabel: "", title: "" }] }])).toBeNull();
+      expect(chooseAnnouncementClose([])).toBeNull();
+    });
   });
 });
