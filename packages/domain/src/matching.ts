@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import type { CandidateFactKey } from "./candidate-facts";
+
 /**
  * Milestone 4 keeps three states distinct: a STATED value the posting asserts,
  * an INFERRED reading (which can never fail eligibility), and an absent value
@@ -83,3 +85,12 @@ export type CompetitivenessResponse = z.infer<typeof competitivenessResponseSche
 export type SemanticFitResponse = z.infer<typeof semanticFitResponseSchema>;
 export type SemanticFitAssessment = z.infer<typeof semanticFitAssessmentSchema>;
 export type FitEvidence = { id: string; text: string };
+
+/**
+ * The candidate facts the AI-fit prompt reads (packages/agent semantic-fit.ts).
+ * Migration 0034's candidate_facts triggers bump the fit context version only
+ * for these keys, so other saved answers leave fits current. A key the fit
+ * starts reading goes here and, in a new migration, into those triggers.
+ */
+export const FIT_CONTEXT_FACT_KEYS = ["graduation_date"] as const satisfies readonly CandidateFactKey[];
+export type FitContextFactKey = (typeof FIT_CONTEXT_FACT_KEYS)[number];

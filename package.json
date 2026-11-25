@@ -59,6 +59,7 @@
     "test:agent:continued": "pnpm --filter @internship-agent/agent test:continued",
     "test:agent:evidence": "pnpm --filter @internship-agent/agent test:evidence",
     "test:agent:security-code": "pnpm --filter @internship-agent/agent test:security-code",
+    "test:agent:oracle-code": "pnpm --filter @internship-agent/agent test:oracle-code",
     "test:agent:workday-account": "pnpm --filter @internship-agent/agent test:workday-account",
     "test:agent:workday-account:local": "pnpm --filter @internship-agent/agent test:workday-account:local",
     "test:agent:icims-account": "pnpm --filter @internship-agent/agent test:icims-account",
@@ -94,6 +95,7 @@
     "test:voice:fast": "pnpm --filter @internship-agent/voice test:fast",
     "test:browser-worker:fast": "pnpm --filter @internship-agent/browser test:fast",
     "test:browser-worker:local": "pnpm --filter @internship-agent/browser test:local",
+    "test:browser-worker:oracle": "pnpm --filter @internship-agent/browser test:oracle:local",
     "test:outcomes:fast": "vitest --root . run testing-harness/outcomes/outcome-contracts.test.ts",
     "test:outcomes:local": "vitest --root . run testing-harness/outcomes/funnel.integration.test.ts",
     "test:dashboard:fast": "vitest --root . run testing-harness/dashboard/style-contracts.test.ts",
@@ -103,6 +105,7 @@
     "test:browser:greenhouse": "tsx testing-harness/browser/greenhouse-fixture-run.ts",
     "test:browser:greenhouse-demographics": "tsx testing-harness/browser/greenhouse-demographics-run.ts",
     "test:browser:site-navigation": "tsx testing-harness/browser/site-navigation-run.ts",
+    "test:browser:oracle-apply": "tsx testing-harness/browser/oracle-apply-run.ts",
     "test:harness": "node --test testing-harness/harness/*.test.mjs",
     "test:browser": "node testing-harness/browser/run.mjs",
     "verify:fit:model": "tsx --env-file-if-exists=.env testing-harness/matching/semantic-fit-model.acceptance.ts"

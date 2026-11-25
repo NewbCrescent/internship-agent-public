@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Robotics Software Intern - Fixture Robotics Careers</title>
+  <style>
+    .oda-dialog { border: 1px solid #ccc; margin-top: 24px; }
+  </style>
+</head>
+<body>
+  <!--
+    A fictional Oracle Cloud HCM Candidate Experience application section ("Fixture Robotics",
+    served at .../job/10001/apply/section/1). DERIVED from Oracle's public CE bundle templates
+    (static.oracle.com oj-hcm-ce 2610.17: apply-flow, its blocks, and apply-flow-pagination), not
+    captured: no Oracle section page has been loaded. Its English strings are assumed. The harness
+    replaces __PAGINATION__ with "multi" (a Next button: more sections follow) or "single" (the
+    Submit button of the last section). The email box shows the address the email step took (read
+    from the fixture's own state, no query string). The Oracle Digital Assistant block is the
+    chatbot popup's required work-summary box, which is never an application field.
+  -->
+  <main class="app-main">
+    <form novalidate class="apply-flow" id="section-form" data-pagination="__PAGINATION__">
+      <h1 class="apply-flow-header">Contact Information</h1>
+      <div class="input-row input-row--text">
+        <label class="input-row__label input-row__label--required" for="firstName-1">First Name</label>
+        <input class="input-row__control" id="firstName-1" name="firstName" type="text" aria-required="true" required>
+      </div>
+      <div class="input-row input-row--text">
+        <label class="input-row__label input-row__label--required" for="lastName-2">Last Name</label>
+        <input class="input-row__control" id="lastName-2" name="lastName" type="text" aria-required="true" required>
+      </div>
+      <div class="input-row input-row--text">
+        <label class="input-row__label input-row__label--required" for="email-3">Email Address</label>
+        <input class="input-row__control" id="email-3" name="email" type="email" aria-required="true" required>
+      </div>
+      <div class="input-row input-row--text">
+        <label class="input-row__label input-row__label--required" for="phoneNumber-4">Phone Number</label>
+        <input class="input-row__control" id="phoneNumber-4" name="phoneNumber" type="tel" aria-required="true" required>
+      </div>
+      <div class="input-row input-row--file">
+        <label class="input-row__label input-row__label--required" for="attachment-upload-5">Resume</label>
+        <input class="input-row__control" id="attachment-upload-5" name="resume" type="file" accept=".pdf,.doc,.docx" aria-required="true" required>
+      </div>
+      <footer class="apply-flow-pagination">
+        <button type="button" class="button apply-flow-pagination__button" disabled><span class="button__label">Previous</span></button>
+        <button type="button" class="button apply-flow-pagination__button" data-qa="applyFlowPaginationNextButton" id="next-section"><span class="button__label">Next</span></button>
+        <button type="button" class="button apply-flow-pagination__submit-button" id="submit-application"><span class="button__label">Submit</span></button>
+      </footer>
+    </form>
+  </main>
+
+  <section class="oda-dialog">
+    <p class="oda-dialog__hint">Summarize your work experience for the digital assistant.</p>
+    <oj-text-area id="oda-work-summary-text-area" class="oda-dialog-text-area__content" required="true">
+      <textarea class="oj-textarea-input" aria-required="true" required id="oda-work-summary-text-area|input"></textarea>
+    </oj-text-area>
+  </section>
+
+  <script>
+    (() => {
+      const multi = document.getElementById("section-form").dataset.pagination === "multi";
+      // Only the pagination this section shows: Next while more sections follow, Submit on the last.
+      document.getElementById(multi ? "submit-application" : "next-section").remove();
+      const state = JSON.parse(localStorage.getItem("fixture-oracle") || "{}");
+      if (state.email) document.getElementById("email-3").value = state.email;
+      const submit = document.getElementById("submit-application");
+      if (submit) submit.addEventListener("click", () => { state.submitted = (state.submitted || 0) + 1; localStorage.setItem("fixture-oracle", JSON.stringify(state)); });
+    })();
+  </script>
+</body>
+</html>

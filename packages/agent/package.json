@@ -20,6 +20,7 @@
     "test:continued": "vitest --root ../.. run testing-harness/agent/continued-auto-submit.integration.test.ts",
     "test:evidence": "vitest --root ../.. run testing-harness/agent/submit-evidence.integration.test.ts",
     "test:security-code": "vitest --root ../.. run testing-harness/agent/greenhouse-security-code.test.ts",
+    "test:oracle-code": "vitest --root ../.. run testing-harness/agent/oracle-verification-mail.test.ts",
     "test:notify": "vitest --root ../.. run testing-harness/agent/discord-notify.test.ts",
     "test:discord-read": "vitest --root ../.. run testing-harness/agent/discord-read.test.ts",
     "test:digest": "vitest --root ../.. run testing-harness/agent/daily-digest.integration.test.ts",

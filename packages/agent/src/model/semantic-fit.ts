@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { getApplicationIntent, getCandidate, getCoursework, getCurrentFact, getFitInputVersion, getJobPosting, getSemanticFit, listProjectEvidenceProfiles, listResumeEntries,
   LOCAL_CANDIDATE_ID, getSemanticFitFailure, recordSemanticFitFailure, recordModelInvocation, saveSemanticFit } from "@internship-agent/db";
-import { competitivenessResponseSchema, courseEvidenceId, courseEvidenceText, termStanding, type FitEvidence, type SemanticFitAssessment, type TargetTerm } from "@internship-agent/domain";
+import { competitivenessResponseSchema, courseEvidenceId, courseEvidenceText, termStanding, type FitContextFactKey, type FitEvidence, type SemanticFitAssessment, type TargetTerm } from "@internship-agent/domain";
 import { diagnoseCompetitiveness, validateCompetitiveness } from "@internship-agent/matching";
 import { targetTerm } from "../application-target";
 import { OpenAiCompatibleProvider } from "./openai-compatible-provider";
@@ -58,9 +58,14 @@ export type FitCandidateContext = {
   };
 };
 
+/** Every candidate fact the fit reads goes through here; its key type keeps it within FIT_CONTEXT_FACT_KEYS (migration 0034's triggers). */
+function fitContextFact(database: DatabaseSync, candidateId: string, key: FitContextFactKey) {
+  return getCurrentFact(database, candidateId, key, { kind: "global" })?.value;
+}
+
 export function fitCandidateContext(database: DatabaseSync, candidateId = LOCAL_CANDIDATE_ID, term: TargetTerm | null = targetTerm()): FitCandidateContext {
   const candidate = getCandidate(database, candidateId);
-  const fact = getCurrentFact(database, candidateId, "graduation_date", { kind: "global" })?.value;
+  const fact = fitContextFact(database, candidateId, "graduation_date");
   const graduation = (typeof fact === "string" ? fact : null) ?? candidate?.graduationDate ?? null;
   const short = (value: string | null | undefined) => value ? redactFitText(value).slice(0, 300) : null;
   const intent = getApplicationIntent(database, candidateId)?.statement;

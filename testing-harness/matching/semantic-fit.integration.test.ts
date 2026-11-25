@@ -2,9 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect } from "vitest";
+import type { DatabaseSync } from "node:sqlite";
 import { createDatabase, seedDevelopmentData, listJobSummaries, getJobPosting, getSemanticFit, getJobStatus, setJobStatus, listFitScores, getSemanticFitFailure,
-  clearApplicationIntent, LOCAL_CANDIDATE_ID, replaceCoursework, saveApplicationIntent } from "@internship-agent/db";
-import { APPLICATION_INTENT_EXAMPLE, type CourseworkSet } from "@internship-agent/domain";
+  clearApplicationIntent, LOCAL_CANDIDATE_ID, replaceCoursework, saveApplicationIntent, saveCandidateFact, type SaveCandidateFactInput } from "@internship-agent/db";
+import { APPLICATION_INTENT_EXAMPLE, candidateFactKeySchema, FIT_CONTEXT_FACT_KEYS, type CourseworkSet } from "@internship-agent/domain";
 import { advancePipeline, analyzeSemanticFit, automaticallyAnalyzeFit, evaluateAndPersistMatch, getMatchReport, redactFitText, SEMANTIC_FIT_MAX_ATTEMPTS } from "@internship-agent/agent";
 import type { ModelProvider, StructuredRequest } from "../../packages/agent/src/model/provider";
 
@@ -23,6 +24,10 @@ function provider(onInput?: (input: string) => void): ModelProvider & { calls: n
     return { value: request.schema.parse({ score: 23, rating: "WEAK", confidence: "LOW", summary: "Candidate alignment is limited in this synthetic fixture.",
       strengths: [], gaps: [{text: "Depth is not demonstrated.", postingQuote: input.postingText.slice(0, 60), citations: []}], unknowns: ["Applicant pool is unknown."] }), model: "fixture", inputTokens: 10, outputTokens: 10, reasoningTokens: 0, durationMs: 1 };
   } };
+}
+function saveFixtureFact(database: DatabaseSync, key: SaveCandidateFactInput["key"], scope: SaveCandidateFactInput["scope"], value: SaveCandidateFactInput["value"]) {
+  return saveCandidateFact(database, { candidateId: LOCAL_CANDIDATE_ID, key, scope, value, source: "user", sourceDetail: { kind: "profile" },
+    confidence: 1, rememberedAt: "2026-11-25T00:00:00.000Z" });
 }
 type ParsedFitInput = { postingText: string; evidence: Array<{ id: string; text: string }> };
 function scripted(responses: Array<(input: ParsedFitInput) => unknown>): ModelProvider & { calls: number; inputs: string[] } {
@@ -287,6 +292,51 @@ describe("semantic fit cache and safety", () => {
         expect(getSemanticFit(upgraded, jobId)?.stale).toBe(true);
         expect(listFitScores(upgraded).get(jobId)).toBeUndefined();
       } finally { upgraded.close(); }
+    } finally { close(); }
+  });
+  it("the fit prompt reads only FIT_CONTEXT_FACT_KEYS from candidate facts", async () => {
+    const { database, jobId, close } = fixture();
+    const reads: Array<{ sql: string; args: unknown[] }> = [];
+    try {
+      saveFixtureFact(database, "graduation_date", { kind: "global" }, "2029-05-15");
+      saveFixtureFact(database, "how_heard", { kind: "global" }, "Company website");
+      saveFixtureFact(database, "willing_background_check", { kind: "global" }, true);
+      saveFixtureFact(database, "authorized_to_work", { kind: "country", code: "US" }, true);
+      const prepare = database.prepare.bind(database);
+      Object.defineProperty(database, "prepare", { configurable: true, value: (sql: string) => {
+        const statement = prepare(sql);
+        if (!sql.includes("candidate_facts")) return statement;
+        return new Proxy(statement, { get(target, property, receiver) {
+          const value: unknown = Reflect.get(target, property, receiver);
+          if (typeof value !== "function" || !["get", "all", "iterate"].includes(String(property))) return value;
+          return (...args: unknown[]) => { reads.push({ sql, args }); return Reflect.apply(value, target, args); };
+        } });
+      } });
+      const inputs: string[] = [];
+      await analyzeSemanticFit(jobId, { database, provider: provider((input) => inputs.push(input)), term: { season: "summer", year: 2027 } });
+      Reflect.deleteProperty(database, "prepare");
+      expect(reads.length).toBeGreaterThan(0);
+      for (const read of reads) expect(read.sql).toMatch(/\bkey\s*=\s*\?/);
+      const factKeys: readonly string[] = candidateFactKeySchema.options;
+      const keysRead = [...new Set(reads.flatMap((read) => read.args).filter((arg): arg is string => typeof arg === "string" && factKeys.includes(arg)))].sort();
+      expect(keysRead).toEqual([...FIT_CONTEXT_FACT_KEYS].sort());
+      const parsed = JSON.parse(inputs[0]!) as { candidateContext: { level: { expectedGraduation: string | null } } };
+      expect(parsed.candidateContext.level.expectedGraduation).toBe("2029-05-15");
+    } finally { Reflect.deleteProperty(database, "prepare"); close(); }
+  });
+  it("saving facts the fit does not read leaves the AI fit current", async () => {
+    const { database, jobId, close } = fixture();
+    try {
+      await analyzeSemanticFit(jobId, { database, provider: provider() });
+      expect(getSemanticFit(database, jobId)?.stale).toBe(false);
+      saveFixtureFact(database, "willing_background_check", { kind: "global" }, true);
+      saveFixtureFact(database, "eeo_gender", { kind: "global" }, "non_binary");
+      saveFixtureFact(database, "authorized_to_work", { kind: "country", code: "US" }, true);
+      saveFixtureFact(database, "how_heard", { kind: "global" }, "Company website");
+      expect(getSemanticFit(database, jobId)?.stale).toBe(false);
+      expect(listFitScores(database).get(jobId)).toBe(23);
+      saveFixtureFact(database, "graduation_date", { kind: "global" }, "2029-05-15");
+      expect(getSemanticFit(database, jobId)?.stale).toBe(true);
     } finally { close(); }
   });
 });

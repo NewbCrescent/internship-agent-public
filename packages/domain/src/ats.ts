@@ -68,11 +68,14 @@ export const ATS_KIND_LABELS: Record<Exclude<AtsKind, "unknown">, string> = {
 
 /**
  * Recognized for display; the agent has no adapter that walks their
- * application, so the candidate approves each run. Oracle Candidate
- * Experience puts an email and one-time-code step in front of a multi-step
- * form, and a SmartRecruiters posting page sits in front of a separate
- * application page: the generic single-page filler would fill and submit the
- * wrong page. Jobvite's Apply opens a data-consent step (residence and
+ * application, so the candidate approves each run. The agent takes Oracle
+ * Candidate Experience's email and one-time-code step (packages/agent
+ * oracle-email-step.ts), but no adapter walks its several-section form
+ * (/apply/section/<n>, Next per section, Submit on the last), and the
+ * post-submit code step (/apply/confirm) and the /my-profile landing are not
+ * recognized as an outcome, so Oracle stays approval-needed. A
+ * SmartRecruiters posting page sits in front of a separate application page:
+ * the generic single-page filler would fill and submit the wrong page. Jobvite's Apply opens a data-consent step (residence and
  * language, then accept or decline its policy) before any form, and iCIMS's
  * Apply lands on an email-first account step. Jobvite's consent step is
  * accepted only under INTERNSHIP_AGENT_ACCEPT_DATA_CONSENT and iCIMS accounts

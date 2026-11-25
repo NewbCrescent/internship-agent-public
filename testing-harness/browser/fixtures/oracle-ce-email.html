@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Robotics Software Intern - Fixture Robotics Careers</title>
+  <style>
+    .input-row--invisible { position: absolute; left: -10000px; top: auto; width: 1px; height: 1px; overflow: hidden; }
+    .oj-helper-hidden-accessible { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+    .input-row__hidden-control { position: absolute; opacity: 0; width: 1px; height: 1px; }
+    .apply-flow-input-checkbox__button { display: inline-block; width: 18px; height: 18px; border: 1px solid #456; cursor: pointer; }
+    .apply-flow-input-checkbox__button--checked { background: #345; }
+    .input-row__validation[hidden], #pin-code-error[hidden] { display: none; }
+    .pin-code-input__input { width: 24px; }
+    .captcha-frame { width: 300px; height: 80px; border: 0; }
+    .oda-dialog { border: 1px solid #ccc; margin-top: 24px; }
+  </style>
+</head>
+<body>
+  <!--
+    A fictional Oracle Cloud HCM Candidate Experience email step ("Fixture Robotics", served at
+    fixture.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/10001/apply/email).
+    The email step is reduced from the read-only capture of 2026-11-24 (two tenants' /apply/email
+    pages, nothing typed or clicked): its form, the primary-email-0 box, the off-screen honeypot
+    row, the legal-disclaimer label (hidden checkbox, clickable span, terms link), and the footer's
+    Cancel and Next. Everything after Next (the PIN step, the identity check, the already-applied
+    screen) is DERIVED from Oracle's public CE bundle templates (static.oracle.com oj-hcm-ce
+    2610.17), not captured; its English strings are assumed. A small script stands in for
+    Knockout. The harness picks the scenario by replacing the placeholders below:
+    data-flow (new | pin | identity | already | stuck | captcha-after), __TERMS__ (the terms label,
+    or the whole TERMS block removed), __CAPTCHA__ (a visible hCaptcha frame or nothing), and
+    data-code (the code the PIN step accepts). The Oracle Digital Assistant block at the end is
+    the chatbot popup's required work-summary box, which is never an application field.
+  -->
+  <div id="fixture" data-flow="__FLOW__" data-code="__CODE__"></div>
+  <main class="app-main">
+    <section class="apply-flow-dialog">
+      <form novalidate id="email-form">
+        <header>
+          <h1 class="apply-flow-dialog__header">
+            <span class="oj-helper-hidden-accessible">Authentication screen.</span>
+            <span>You don't need to have an account</span>
+          </h1>
+        </header>
+        <section class="apply-flow-dialog__content email-verification">
+          <p class="apply-flow-dialog__text">Get started right away by simply using your email. Your profile will be created and kept up to date automatically as you enter details for each of your job applications.</p>
+          <div class="apply-flow-dialog__form">
+            <div class="input-row input-row--text">
+              <label class="input-row__label input-row__label--required" for="primary-email-0"><span id="labelText-primary-email-0">Email Address</span></label>
+              <div class="input-row__control-container">
+                <input class="input-row__control" id="primary-email-0" name="primary-email" type="email" autocomplete="email" aria-required="true">
+              </div>
+              <div class="input-row__validation" id="primary-email-0-error" role="alert" hidden></div>
+            </div>
+            <div class="input-row__note"><span class="text-color-secondary">This is how we'll communicate with you.</span></div>
+            __CAPTCHA__
+            <div class="input-row input-row--text input-row--invisible">
+              <label class="input-row__label" for="honey-pot-1" aria-hidden="true"><span id="labelText-honey-pot-1">honeypot</span></label>
+              <input class="input-row__control" id="honey-pot-1" name="honey-pot" aria-hidden="true" tabindex="-1">
+            </div>
+            <!--TERMS-->
+            <label class="input-row legal-disclaimer-container" for="legal-disclaimer-checkbox">
+              <input type="checkbox" class="input-row__hidden-control" id="legal-disclaimer-checkbox" aria-labelledby="legal-disclaimer-checkbox-label" required>
+              <span class="apply-flow-input-checkbox" id="legal-disclaimer-checkbox-label">
+                <span class="apply-flow-input-checkbox__button"></span>
+                <span class="apply-flow-input-checkbox__label apply-flow-input-checkbox__label--required"><span>__TERMS__</span></span>
+              </span>
+            </label>
+            <div class="input-row__validation" id="legalDisclaimerErrorMessage" role="alert" hidden></div>
+            <!--/TERMS-->
+          </div>
+        </section>
+        <footer class="apply-flow-pagination__buttons">
+          <button type="button" class="button apply-flow-pagination__button" data-qa="emailVerificationCancelButton" title="Cancel" aria-label="Cancel"><span class="button__label">Cancel</span></button>
+          <div class="apply-flow-pagination__buttons-spacer"></div>
+          <button type="submit" class="button apply-flow-pagination__button" title="Next" aria-label="Next"><span class="button__label">Next</span></button>
+        </footer>
+      </form>
+    </section>
+  </main>
+
+  <template id="pin-step">
+    <form class="pin-code-verification" novalidate id="pin-form">
+      <section class="apply-flow-dialog__content" aria-live="polite">
+        <p class="apply-flow-dialog__text" role="alert">We sent a verification code to your email. Enter it below.</p>
+        <div class="apply-flow-dialog__form pin-code-form">
+          <div class="input-row input-row--pin-code">
+            <div class="input-row__control-container">
+              <fieldset class="pin-code-fieldset">
+                <legend aria-labelledby="pin-code-a11y-label"></legend>
+                <span id="pin-code-a11y-label" class="oj-helper-hidden-accessible">Verification code</span>
+                <div class="pin-code-input">
+                  <div class="pin-code-input__segment"><input class="input-row__control pin-code-input__input" type="text" inputmode="numeric" autocomplete="off" pattern="[0-9]*" id="pin-code-1" aria-label="Verification code digit 1"></div>
+                  <div class="pin-code-input__segment"><input class="input-row__control pin-code-input__input" type="text" inputmode="numeric" autocomplete="off" pattern="[0-9]*" id="pin-code-2" aria-label="Verification code digit 2"></div>
+                  <div class="pin-code-input__segment"><input class="input-row__control pin-code-input__input" type="text" inputmode="numeric" autocomplete="off" pattern="[0-9]*" id="pin-code-3" aria-label="Verification code digit 3"></div>
+                  <div class="pin-code-input__segment"><input class="input-row__control pin-code-input__input" type="text" inputmode="numeric" autocomplete="off" pattern="[0-9]*" id="pin-code-4" aria-label="Verification code digit 4"></div>
+                  <div class="pin-code-input__segment"><input class="input-row__control pin-code-input__input" type="text" inputmode="numeric" autocomplete="off" pattern="[0-9]*" id="pin-code-5" aria-label="Verification code digit 5"></div>
+                  <div class="pin-code-input__segment"><input class="input-row__control pin-code-input__input" type="text" inputmode="numeric" autocomplete="off" pattern="[0-9]*" id="pin-code-6" aria-label="Verification code digit 6"></div>
+                </div>
+              </fieldset>
+            </div>
+            <p id="pin-code-error" class="input-row__validation" role="alert" hidden>The code is not valid.</p>
+          </div>
+          <label class="keep-signed-in"><input type="checkbox" id="keep-signed-in"> Keep me signed in</label>
+          <button type="button" class="pin-code-form__action-button" id="resend-code">Send new code</button>
+        </div>
+      </section>
+      <div class="apply-flow-dialog__buttons">
+        <button type="submit" class="button apply-flow-dialog__button apply-flow-dialog__button--primary"><span class="button__label">Verify</span></button>
+      </div>
+    </form>
+  </template>
+
+  <template id="identity-step">
+    <form class="apply-flow-last-name-check" novalidate>
+      <h1 class="apply-flow-dialog__header">Authenticate your identity</h1>
+      <label for="last-name-check">Last Name</label>
+      <input type="text" id="last-name-check">
+      <button type="submit" class="button"><span class="button__label">Verify</span></button>
+    </form>
+  </template>
+
+  <template id="already-step">
+    <div class="apply-flow-already-applied">
+      <h1 class="apply-flow-dialog__header">You already applied for this job</h1>
+      <a href="#" class="button">View your applications</a>
+    </div>
+  </template>
+
+  <section class="oda-dialog" id="oda-summary-host">
+    <p class="oda-dialog__hint">Summarize your work experience for the digital assistant.</p>
+    <oj-text-area id="oda-work-summary-text-area" class="oda-dialog-text-area__content" required="true">
+      <textarea class="oj-textarea-input" aria-required="true" required id="oda-work-summary-text-area|input"></textarea>
+    </oj-text-area>
+  </section>
+
+  <script>
+    (() => {
+      const fixture = document.getElementById("fixture");
+      const flow = fixture.dataset.flow;
+      const code = fixture.dataset.code;
+      const section = location.pathname.replace(/\/apply\/email\/?$/, "/apply/section/1");
+      const state = { email: "", terms: false, nextClicks: 0, verifyClicks: 0, resendClicks: 0, codeRequests: 0 };
+      const save = () => localStorage.setItem("fixture-oracle", JSON.stringify(state));
+      save();
+      const model = { email: "" };
+      const emailBox = document.getElementById("primary-email-0");
+      // Knockout's default value binding reads the box on change.
+      emailBox.addEventListener("change", () => { model.email = emailBox.value; });
+      const terms = document.getElementById("legal-disclaimer-checkbox");
+      const toggle = document.querySelector(".apply-flow-input-checkbox__button");
+      if (toggle) {
+        toggle.addEventListener("click", (event) => {
+          event.preventDefault();
+          terms.checked = !terms.checked;
+          toggle.classList.toggle("apply-flow-input-checkbox__button--checked", terms.checked);
+        });
+      }
+      const show = (id, text) => {
+        const element = document.getElementById(id);
+        if (!element) return;
+        element.textContent = text;
+        element.hidden = !text;
+      };
+      const replaceForm = (templateId) => {
+        const form = document.getElementById("email-form");
+        form.replaceWith(document.getElementById(templateId).content.cloneNode(true));
+      };
+      document.getElementById("email-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        state.nextClicks += 1;
+        save();
+        const emailMissing = !model.email;
+        const termsMissing = terms !== null && !terms.checked;
+        show("primary-email-0-error", emailMissing ? "Enter your email address." : "");
+        show("legalDisclaimerErrorMessage", termsMissing ? "Accept the terms and conditions." : "");
+        if (emailMissing || termsMissing) return;
+        state.email = model.email;
+        state.terms = terms !== null && terms.checked;
+        save();
+        if (flow === "new") {
+          location.assign(section);
+        } else if (flow === "pin") {
+          state.codeRequests += 1;
+          save();
+          if (typeof window.fixtureOracleCodeRequested === "function") window.fixtureOracleCodeRequested();
+          setTimeout(() => {
+            replaceForm("pin-step");
+            const pinForm = document.getElementById("pin-form");
+            document.getElementById("resend-code").addEventListener("click", () => { state.resendClicks += 1; save(); });
+            pinForm.addEventListener("submit", (pinEvent) => {
+              pinEvent.preventDefault();
+              state.verifyClicks += 1;
+              save();
+              const typed = Array.from(pinForm.querySelectorAll(".pin-code-input__input")).map((input) => input.value).join("");
+              if (typed === code) {
+                location.assign(section);
+                return;
+              }
+              pinForm.querySelector(".input-row--pin-code").classList.add("input-row--invalid");
+              document.getElementById("pin-code-error").hidden = false;
+            });
+          }, 150);
+        } else if (flow === "identity") {
+          setTimeout(() => replaceForm("identity-step"), 150);
+        } else if (flow === "already") {
+          setTimeout(() => replaceForm("already-step"), 150);
+        } else if (flow === "captcha-after") {
+          setTimeout(() => {
+            const frame = document.createElement("iframe");
+            frame.className = "captcha-frame";
+            frame.src = "https://newassets.hcaptcha.com/captcha/v1/fixture";
+            document.querySelector(".apply-flow-dialog__form").appendChild(frame);
+          }, 150);
+        }
+        // stuck: nothing happens.
+      });
+    })();
+  </script>
+</body>
+</html>

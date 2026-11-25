@@ -1,0 +1,135 @@
+/**
+ * Oracle Cloud HCM Candidate Experience's emailed one-time code, read from
+ * the candidate's mailbox through the read-only `VerificationMailbox` the
+ * Workday verification and Greenhouse's security code use. The code lives
+ * only in memory: it is typed into the page and never logged, stored, put in
+ * an error, event, evidence or notice, or sent to a model. Deterministic, no
+ * model.
+ *
+ * The rules are derived, not captured: Oracle's mail was never seen, and its
+ * sender and template ("Candidate Verification Notification") are
+ * configurable per tenant (Oracle's recruiting documentation). Codes are six
+ * digits. The matching is conservative and fails closed: no code or more
+ * than one distinct code stops the run.
+ */
+import { mentionsCompany } from "@internship-agent/domain";
+
+import { htmlToText } from "./mail-outcomes";
+import { MailboxUnavailable, type MailMessage, type VerificationMailbox, type VerificationMailboxFactory } from "./workday-verification-mail";
+
+/** Messages received this long before the Next click still count (clock skew). */
+export const ORACLE_CODE_CLOCK_SKEW_MS = 30_000;
+export const ORACLE_CODE_POLL_MS = 10_000;
+export const ORACLE_CODE_TIMEOUT_MS = 180_000;
+
+/** The tenant's host (`<tenant>.fa.<region>.oraclecloud.com`) and the posting's company. */
+export type OracleCodeTarget = { host: string; company: string };
+
+const ADDRESS = /[^\s<>"',;()]+@([a-z0-9.-]+)/gi;
+
+function senderDomains(from: string): string[] {
+  return [...from.matchAll(ADDRESS)].map((match) => match[1]!.toLowerCase().replace(/\.+$/, ""));
+}
+
+const within = (domain: string, root: string) => domain === root || domain.endsWith(`.${root}`);
+
+/** From names an address on oracle.com, oraclecloud.com, or a dot-bounded subdomain of either (notoracle.com, oracle.com.example no). */
+export function oracleMailSender(from: string): boolean {
+  return senderDomains(from).some((domain) => within(domain, "oracle.com") || within(domain, "oraclecloud.com"));
+}
+
+/** Other application sites' mail machinery: never Oracle's code, even when it names the company. */
+const OTHER_SITES = ["greenhouse-mail.io", "greenhouse.io", "myworkday.com", "workday.com", "myworkdayjobs.com", "icims.com"];
+
+function tenantLabel(host: string): string {
+  return host.trim().toLowerCase().split(".")[0] ?? "";
+}
+
+/**
+ * Not from another site's machinery, and from Oracle's mail, naming the
+ * company (From or Subject, mentionsCompany), or naming the tenant (the
+ * host's first label, at least 4 characters) in From.
+ */
+export function relevantOracleCodeHeader(target: OracleCodeTarget): (header: { from: string; subject: string }) => boolean {
+  const label = tenantLabel(target.host);
+  return (header) => {
+    if (senderDomains(header.from).some((domain) => OTHER_SITES.some((root) => within(domain, root)))) return false;
+    if (oracleMailSender(header.from)) return true;
+    if (target.company.trim() && mentionsCompany(`${header.from} ${header.subject}`, target.company)) return true;
+    return label.length >= 4 && header.from.toLowerCase().includes(label);
+  };
+}
+
+const CODE_AFTER_ANCHOR = /\b(?:code|pin|passcode)\b[^0-9]{0,80}?(?<![0-9])([0-9]{6})(?![0-9])/gi;
+const CODE_BEFORE_ANCHOR = /(?<![0-9])([0-9]{6})(?![0-9])[^0-9]{0,40}?\b(?:code|pin|passcode)\b/gi;
+
+function codesInText(text: string): string[] {
+  const collapsed = text.replace(/\s+/g, " ");
+  return [...collapsed.matchAll(CODE_AFTER_ANCHOR), ...collapsed.matchAll(CODE_BEFORE_ANCHOR)].map((match) => match[1]!);
+}
+
+/** Distinct six-digit codes next to a "code", "PIN", or "passcode" anchor, in the plain text and in the HTML read as text. */
+export function oracleCodesIn(message: MailMessage): string[] {
+  const found = new Set<string>();
+  for (const code of codesInText(message.text)) found.add(code);
+  if (message.html) for (const code of codesInText(htmlToText(message.html))) found.add(code);
+  return [...found];
+}
+
+export type OracleCodeResult = { kind: "found"; code: string } | { kind: "none" } | { kind: "ambiguous"; count: number };
+
+/** Messages received from 30 s before `since` on, with a relevant header; exactly one distinct code is found, several are ambiguous. */
+export function findOracleVerificationCode(messages: MailMessage[], target: OracleCodeTarget & { since: Date }): OracleCodeResult {
+  const relevant = relevantOracleCodeHeader(target);
+  const earliest = target.since.getTime() - ORACLE_CODE_CLOCK_SKEW_MS;
+  const found = new Set<string>();
+  for (const message of messages) {
+    if (message.receivedAt.getTime() < earliest) continue;
+    if (!relevant({ from: message.from, subject: message.subject })) continue;
+    for (const code of oracleCodesIn(message)) found.add(code);
+  }
+  if (found.size === 0) return { kind: "none" };
+  if (found.size > 1) return { kind: "ambiguous", count: found.size };
+  return { kind: "found", code: [...found][0]! };
+}
+
+/**
+ * Polls the mailbox like pollGreenhouseSecurityCode: opens it once, returns
+ * at once on a found or ambiguous code, sleeps `pollMs` until `timeoutMs`,
+ * and closes the mailbox on every path. Mailbox failures become
+ * MailboxUnavailable with fixed phrases, never server text.
+ */
+export async function pollOracleVerificationCode(
+  factory: VerificationMailboxFactory,
+  target: OracleCodeTarget & { since: Date },
+  options: { pollMs?: number; timeoutMs?: number; sleep?: (ms: number) => Promise<void> } = {}
+): Promise<OracleCodeResult> {
+  const pollMs = options.pollMs ?? ORACLE_CODE_POLL_MS;
+  const timeoutMs = options.timeoutMs ?? ORACLE_CODE_TIMEOUT_MS;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  let mailbox: VerificationMailbox;
+  try {
+    mailbox = await factory();
+  } catch (error) {
+    if (error instanceof MailboxUnavailable) throw error;
+    throw new MailboxUnavailable("the mailbox could not be opened");
+  }
+  const deadline = Date.now() + timeoutMs;
+  try {
+    for (;;) {
+      let messages: MailMessage[];
+      try {
+        messages = await mailbox.messagesSince(target.since, relevantOracleCodeHeader(target));
+      } catch (error) {
+        if (error instanceof MailboxUnavailable) throw error;
+        throw new MailboxUnavailable("the mailbox could not be read");
+      }
+      const result = findOracleVerificationCode(messages, target);
+      if (result.kind !== "none") return result;
+      if (Date.now() + pollMs > deadline) return { kind: "none" };
+      await sleep(pollMs);
+    }
+  } finally {
+    await mailbox.close().catch(() => undefined);
+  }
+}

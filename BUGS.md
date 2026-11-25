@@ -57,19 +57,6 @@ discovery-contracts) down with it; the other four files in that script pass.
 Fix direction: declare `zod` where the test resolves it, or import the schema
 helpers through a workspace package.
 
-### Oracle Candidate Experience textarea with no readable label
-
-Corvane's Oracle Candidate Experience form (run <run id>, 2026-11-20) paused
-on "Unlabeled textarea control 2": the recognizer found no label for that
-textarea. Its label source is unverified: the Corvane posting address is not
-public and Oracle's form sits behind an email and one-time-code step, so no
-markup could be captured read-only. Today an optional unlabeled control is
-skipped and a required one still pauses (the digest reports it as the
-agent's bug); unlabeled fields are no longer sent to the voice drafter (see
-Resolved). Next step: a read-only DOM capture of that form from a session the
-candidate opens, then the label source (aria-labelledby, a preceding
-heading) in `collectControlsIn`.
-
 ### iCIMS applications stop after the account step
 
 With `INTERNSHIP_AGENT_ICIMS_ACCOUNTS=1` an automatic run creates or signs in
@@ -83,22 +70,25 @@ iCIMS's multi-page application yet …"), saves no run, and saves
 `pnpm run:evidence --job <ref>`). Next step: an iCIMS adapter built from that
 evidence, after which iCIMS could leave the approval-needed kinds.
 
-### Oracle Candidate Experience applications stop at the email step
+### Oracle Candidate Experience's several-section form and post-submit code are not handled
 
-An Oracle Cloud HCM Candidate Experience posting's Apply Now leads to
-`<posting>/apply/email` (a read-only, headful capture of 2026-11-24 showed an
-Email Address box, an "I agree with the terms and conditions" checkbox, and
-NEXT), after which Oracle emails a one-time code before its multi-step form.
-The agent now follows Apply Now and names that step ("Oracle Cloud HCM asks
-for your email at <host>, then emails you a one-time code, before its
-application form; the agent does not take that step yet. Apply in your own
-browser.") before anything is typed, on automatic and candidate-started runs,
-and saves no run. Walking past it needs typing the candidate's email and
-reading the emailed code; no structure past the email step has been captured
-(the capture stopped there without typing), so no adapter walks Oracle's
-application and `oracle` stays in `ATS_KINDS_NEEDING_APPROVAL`. Next step: a
-capture of the post-code form from a session the candidate opens, then an
-Oracle adapter with a disposable-Chromium regression and its confirmation.
+The agent now takes Oracle Cloud HCM Candidate Experience's email step and its
+emailed one-time code (see Resolved), but what follows is not handled yet, so
+`oracle` stays in `ATS_KINDS_NEEDING_APPROVAL`. No adapter walks Oracle's
+several-section form (`/apply/section/<n>`, Next per section, Submit only on
+the last): a single-section form is filled by the generic filler, and a
+section showing Next stops the run with the several-page reason. A new
+candidate meets Oracle's code step only after Submit (`/apply/confirm`), and
+the post-submit security-code lookup reads only Greenhouse's mail and its
+hold texts say Greenhouse; a successful submit lands on `/my-profile`, which
+is not read as a confirmation. Oracle's field ids carry counters
+(`primary-email-0`, `-1`), so a continue or submit may not find the saved
+fields and fail closed. The PIN, section, and confirmation screens and their
+English strings, and the code email itself, were never seen (derived from
+Oracle's public Candidate Experience bundle). Next step: a capture of a
+section page from a session the candidate opens, then a section walker and
+the post-submit code step and confirmation (after Track 10's submit-outcome
+work merges), each with a disposable-Chromium regression.
 
 ### SmartRecruiters application pages show DataDome to the agent's browser
 
@@ -284,6 +274,26 @@ a held run" tests in
 (`pnpm test:browser-worker:fast`), and
 `testing-harness/browser/greenhouse-demographics-run.ts`
 (`pnpm test:browser:greenhouse-demographics`).
+
+### Saving any candidate fact made every AI fit stale
+
+Found 2026-11-25 on the real workspace. Loading facts with `pnpm
+profile:facts --set-file` and saving one answer with `pnpm run:answer`
+raised the AI-fit context version from 57 to 64, so all 228 cached fits went
+stale and the next pass held every posting with "Fit: no current AI
+judgment." until it was re-scored, at most 25 per pass. Cause: the
+`candidate_facts` triggers (migration 0024, rebuilt by 0030) bumped the
+context version on every fact write, but the fit prompt reads only one
+fact, `graduation_date` (the expected graduation in its level context);
+legal, sensitive, and application-only answers never reach it. Migration
+0034 recreates the three triggers so they fire only for the keys in
+`FIT_CONTEXT_FACT_KEYS` (packages/domain `matching.ts`), which the fit
+builder's key type is limited to; it does not bump the version itself, so
+fits scored before it stay current. Regressions:
+`testing-harness/db/fit-context-facts.test.ts` (`pnpm test:db`) and the
+fact-key and fact-staleness tests in
+`testing-harness/matching/semantic-fit.integration.test.ts` (`pnpm
+test:matching:local`).
 
 ### Known answers went unused on common application questions
 
@@ -874,6 +884,44 @@ preferred name; with none, an optional field stays empty and a required one
 pauses. It is never derived from the legal name. Regressions:
 `recognition-planner.test.ts` and the Greenhouse scenario of
 `pnpm test:browser:greenhouse`.
+
+### Oracle Candidate Experience runs stopped at the email step
+
+Nine Oracle Cloud HCM runs on 2026-11-24 (INL, Corvane, Vertiv, Stantec,
+Worthington) stopped with "Oracle Cloud HCM asks for your email at <host>,
+then emails you a one-time code, before its application form; the agent does
+not take that step yet.": no adapter took `/apply/email`. Now
+`packages/browser/src/ats/oracle-apply.ts` reads and drives the email, terms,
+and PIN screens (derived from Oracle's public Candidate Experience bundle and
+a read-only capture of two tenants' email steps), and
+`packages/agent/src/oracle-email-step.ts` takes the step in start, continue,
+and submit: the saved email is typed only when it is the mailbox the agent
+reads, the terms box is ticked only under the standing data-consent setting
+and logged with its exact text, and an emailed six-digit code is read from
+the candidate's own mailbox (`oracle-verification-mail.ts`, never logged or
+stored) and typed once, never resent. No code, several codes, a refused
+code, a CAPTCHA, an identity check, an already-applied screen, or an
+unrecognized step stops the run with a fixed reason. Oracle's default label
+"I agree with the terms and conditions" is accepted under the standing
+data-consent setting through the terms-of-use group (Track 8) and logged;
+without the setting the run stops at the terms step with nothing typed.
+Regressions: `pnpm test:browser:oracle-apply`,
+`pnpm test:browser-worker:oracle`, `pnpm test:agent:oracle-code`. Boundary:
+the PIN and section fixtures are derived, and the step was never run against
+a live code.
+
+### Oracle Digital Assistant's chatbot box was read as an Oracle question
+
+Corvane's Oracle runs (<run id>, <run id>, 2026-11-20) paused on field
+`oda-work-summary-text-area|input`, labelled "Discard" and later "Unlabeled
+textarea control 2". It is not an application question: Oracle's public
+Candidate Experience bundle draws it as the required work-summary box of
+Oracle Digital Assistant's chatbot popup (`oda-summary`,
+`<oj-text-area id="oda-work-summary-text-area">`), and the read-only capture
+of 2026-11-24 found it on the email step's page. Now `collectControlsIn`
+never reads a control inside an `oda-` element or `.oda-chat-wrapper` on an
+Oracle Cloud host. Regression: the chatbot scenario of
+`pnpm test:browser:oracle-apply` (fails on the old code).
 
 ### A button's label became a field on Oracle Cloud HCM
 

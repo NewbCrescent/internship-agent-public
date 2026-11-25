@@ -2,18 +2,22 @@ import type { Page } from "playwright-core";
 
 import { icimsAccountSteps, type IcimsAccountSteps } from "./ats/icims-account";
 import { passJobviteConsent, type JobviteConsentOutcome } from "./ats/jobvite-consent";
+import { oracleApplySteps, type OracleApplySteps } from "./ats/oracle-apply";
 import { createPlaywrightPage, ensureNameShim, type BrowserPage } from "./handshake-executor";
 import { advanceToApplicationForm, readStepButtonsIn, type NavigationOutcome, type StepButtons } from "./site-navigation";
 
 /**
  * The page adapter generic (non-Workday) runs open: the Playwright page plus
  * iCIMS's account steps and Jobvite's data-consent step, which the
- * orchestrator takes only when the candidate's settings allow it, the
- * bounded navigation toward an unrecognized site's form
+ * orchestrator takes only when the candidate's settings allow it, Oracle
+ * Cloud HCM's email and one-time-code step (ats/oracle-apply.ts), which the
+ * orchestrator takes with the saved email and the candidate's own mailbox,
+ * the bounded navigation toward an unrecognized site's form
  * (site-navigation.ts), and the page's step buttons.
  */
 export type ApplicationPage = BrowserPage & {
   icims: IcimsAccountSteps;
+  oracle: OracleApplySteps;
   jobviteConsent(choose: (options: string[]) => string | null): Promise<JobviteConsentOutcome>;
   /** Walks toward the application form (reject cookies, guest, Apply, manual, continue; at most four entries). */
   advanceToApplicationForm(): Promise<NavigationOutcome>;
@@ -25,6 +29,7 @@ export function createApplicationPage(page: Page): ApplicationPage {
   return {
     ...createPlaywrightPage(page),
     icims: icimsAccountSteps(page),
+    oracle: oracleApplySteps(page),
     jobviteConsent: (choose) => passJobviteConsent(page, choose),
     advanceToApplicationForm: () => advanceToApplicationForm(page),
     stepButtons: async () => {
@@ -41,6 +46,10 @@ export function createApplicationPage(page: Page): ApplicationPage {
 
 export function hasIcimsSteps(page: BrowserPage): page is BrowserPage & { icims: IcimsAccountSteps } {
   return "icims" in page;
+}
+
+export function hasOracleSteps(page: BrowserPage): page is BrowserPage & { oracle: OracleApplySteps } {
+  return "oracle" in page;
 }
 
 export function hasJobviteConsent(page: BrowserPage): page is BrowserPage & { jobviteConsent(choose: (options: string[]) => string | null): Promise<JobviteConsentOutcome> } {

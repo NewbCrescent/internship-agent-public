@@ -117,6 +117,7 @@ import { answerCandidateQuestion, resolveCandidateQuestion } from "./candidate-s
 import { companyStanding, profileLabel, yearHoldMessage } from "./company-policy";
 import { gmailMailboxFactory } from "./gmail-mailbox";
 import { greenhouseSecurityCodeLookup } from "./greenhouse-security-code";
+import { passOracleEmailStep, type OracleEmailStepSettings } from "./oracle-email-step";
 import { assertHandshakeSignedIn } from "./handshake-session-service";
 import { applyVoiceDrafts, createDefaultVoiceDrafter, draftSourcesFor, type VoiceDrafter } from "./voice-drafting";
 import { AutomaticRunStopped, IcimsAccountHeld, WorkdayAccountHeld } from "./run-errors";
@@ -720,6 +721,8 @@ export async function startBrowserRun(
     standingConsent?: StandingConsentSettings;
     /** iCIMS account automation; used by automatic runs only, which may create an account. */
     icimsAccounts?: IcimsAccountRuntime | null;
+    /** Oracle Cloud HCM's email and one-time-code step: the mailbox it reads and its address. Default from INTERNSHIP_AGENT_GMAIL_*; null never takes the step (the email-step stop stays). */
+    oracleEmailStep?: OracleEmailStepSettings | null;
   } = {}
 ): Promise<RunReport> {
   const database = options.database ?? getDatabase();
@@ -796,7 +799,11 @@ export async function startBrowserRun(
         throw new Error(wall);
       }
     }
-    // A step no adapter takes yet (Oracle Cloud HCM's email and one-time-code step): named before anything is typed.
+    // Oracle Cloud HCM's email step: the saved email typed, its terms box accepted only under the standing settings, and an emailed one-time code read from the candidate's own mailbox (oracle-email-step.ts). The saved address stays the email step's, so continue and submit take it again.
+    const oracle = await passOracleEmailStep(database, page, form, { jobId, company: posting.companyName, candidateEmail: candidate?.email, standing, settings: options.oracleEmailStep });
+    if (oracle.kind === "stopped") throw automatic ? new AutomaticRunStopped(oracle.reason) : new Error(oracle.reason);
+    if (oracle.kind === "passed") form = oracle.form;
+    // A step no adapter takes (Oracle's email step on a page without its steps): named before anything is typed.
     const siteWall = siteWallReason(page.url(), form.fields);
     if (siteWall) throw automatic ? new AutomaticRunStopped(siteWall) : new Error(siteWall);
     if (automatic) {
@@ -1146,6 +1153,8 @@ export async function continueBrowserRun(
     voiceDrafter?: VoiceDrafter | null;
     /** The candidate's standing consent and attestation settings; default from the environment. */
     standingConsent?: StandingConsentSettings;
+    /** Oracle Cloud HCM's email and one-time-code step: the mailbox it reads and its address. Default from INTERNSHIP_AGENT_GMAIL_*; null never takes the step (the email-step stop stays). */
+    oracleEmailStep?: OracleEmailStepSettings | null;
   } = {}
 ): Promise<RunReport> {
   const database = options.database ?? getDatabase();
@@ -1185,9 +1194,17 @@ export async function continueBrowserRun(
       const outcome = await page.advanceToApplicationForm();
       if (outcome.moved) form = await recognizeCurrentForm(page);
     }
+    // Oracle Cloud HCM's email step again (the run's saved address is the email step's); the
+    // re-planning below then reads the form the step reached, not the email step.
     const posting = getJobPosting(database, run.jobId);
-    const resolutions = await resolveFields(form, database, { ...questionContextFor(channel), ...postingQuestionContext(posting) });
     const candidate = getCandidate(database, LOCAL_CANDIDATE_ID);
+    const oracle = await passOracleEmailStep(database, page, form, {
+      jobId: run.jobId, company: posting?.companyName ?? "", candidateEmail: candidate?.email,
+      standing, settings: options.oracleEmailStep
+    });
+    if (oracle.kind === "stopped") throw new Error(oracle.reason);
+    if (oracle.kind === "passed") form = oracle.form;
+    const resolutions = await resolveFields(form, database, { ...questionContextFor(channel), ...postingQuestionContext(posting) });
     const packageAnswers = runPackageAnswers(database, run);
     // Open pauses nothing answered are planned again with today's rules: a standing setting, a saved
     // self-identification answer, or a rule added since the run paused may answer them now.
@@ -1364,6 +1381,8 @@ export async function submitBrowserRun(
     securityCodeWait?: { pollMs?: number; timeoutMs?: number; sleep?: (ms: number) => Promise<void> };
     /** The candidate's standing consent and attestation settings; default from the environment. */
     standingConsent?: StandingConsentSettings;
+    /** Oracle Cloud HCM's email and one-time-code step: the mailbox it reads and its address. Default from INTERNSHIP_AGENT_GMAIL_*; null never takes the step (the email-step stop stays). */
+    oracleEmailStep?: OracleEmailStepSettings | null;
   } = {}
 ): Promise<BrowserRun> {
   const database = options.database ?? getDatabase();
@@ -1442,6 +1461,13 @@ export async function submitBrowserRun(
       const outcome = await page.advanceToApplicationForm();
       if (outcome.moved) shown = await recognizeCurrentForm(page);
     }
+    // Oracle Cloud HCM's email step again; a stop keeps the run waiting for approval.
+    const oracle = await passOracleEmailStep(database, page, shown, {
+      jobId: run.jobId, company: getJobPosting(database, run.jobId)?.companyName ?? "", candidateEmail: getCandidate(database, LOCAL_CANDIDATE_ID)?.email,
+      standing, settings: options.oracleEmailStep
+    });
+    if (oracle.kind === "stopped") throw new Error(`${oracle.reason} Nothing was submitted, and the run still waits for approval.`);
+    if (oracle.kind === "passed") shown = oracle.form;
     const present = new Set(shown.fields.map((field) => field.id));
     const onForm = run.decisions.some((decision) => SHOWN_ACTIONS.has(decision.action)
       && (present.has(decision.fieldId) || (decision.action === "keep" && decision.fieldId === ATTACHED_RESUME_FIELD)));

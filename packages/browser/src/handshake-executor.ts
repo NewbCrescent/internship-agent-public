@@ -1172,8 +1172,9 @@ export function attachedNamesFromText(text: string): string[] {
  * same element. Controls inside a cookie-consent manager (OneTrust's banner
  * and preference-center toggles, its vendor search), a share or copy-link
  * box (an id or name saying copy-link or share-link, or a read-only text box
- * holding a URL), and a honeypot text box ("Leave this field blank", "for
- * robots", Workday's beecatcher) are never fields.
+ * holding a URL), a honeypot text box ("Leave this field blank", "for
+ * robots", Workday's beecatcher), and Oracle Digital Assistant's chatbot
+ * controls on Oracle Cloud hosts are never fields.
  */
 export function collectControlsIn(root: Element): RawControl[] {
   const controls: RawControl[] = [];
@@ -1445,6 +1446,8 @@ export function collectControlsIn(root: Element): RawControl[] {
     if (type === "button" || type === "reset" || ACTION_ROLE.test(input.getAttribute("role") ?? "")) continue;
     // A share or copy-link box (Oracle's copy-link-<uuid>) holds the posting's address, not a question.
     if (COPY_LINK.test(input.id || "") || COPY_LINK.test(input.getAttribute("name") ?? "")) continue;
+    // Oracle Digital Assistant's chatbot popup (its required work-summary box, #oda-work-summary-text-area) is not the application's.
+    if (location.hostname.endsWith(".oraclecloud.com") && input.closest('[id^="oda-"], .oda-chat-wrapper')) continue;
     if (input instanceof HTMLInputElement && type === "text" && input.readOnly && /^https?:\/\//i.test(input.value)) continue;
     // React-select's shadow input that only carries `required` for the form.
     if (input.getAttribute("aria-hidden") === "true" && input.getAttribute("tabindex") === "-1" && type !== "file") continue;

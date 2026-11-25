@@ -117,7 +117,8 @@ describe("migration 0030: candidate facts gain a text value type", () => {
         rememberedAt: "2026-11-19T00:00:00.000Z"
       });
       expect(heard.valueType).toBe("text");
-      expect(version()).toBeGreaterThan(before);
+      // Migration 0034: facts the AI fit does not read leave the fit context unchanged.
+      expect(version()).toBe(before);
 
       const country = saveCandidateFact(database, {
         candidateId: LOCAL_CANDIDATE_ID,

@@ -275,7 +275,7 @@ export const suiteManifest = [
     mutation: "local-temporary",
     timeoutMs: 45_000,
     reportPrefixes: [],
-    description: "Migration, profile database isolation, seed, preferences, posting projection, fact revision, revocation, base resumes, transcripts, browser sessions, GPA, resume entry revisions, approval, ordering, and archival, and application intent storage against disposable SQLite; the 0030 candidate_facts rebuild keeps rows, the supersede chain, indexes, and AI-fit triggers; candidate coursework (migration 0031) replace, no-op, rollback, and AI-fit context bumps."
+    description: "Migration, profile database isolation, seed, preferences, posting projection, fact revision, revocation, base resumes, transcripts, browser sessions, GPA, resume entry revisions, approval, ordering, and archival, and application intent storage against disposable SQLite; the 0030 candidate_facts rebuild keeps rows, the supersede chain, indexes, and AI-fit triggers; candidate coursework (migration 0031) replace, no-op, rollback, and AI-fit context bumps; migration 0034 bumps the AI-fit context only for FIT_CONTEXT_FACT_KEYS facts (graduation_date), keeps other fit triggers, and does not bump on apply."
   },
   {
     id: "memory-resolution",
@@ -467,7 +467,7 @@ export const suiteManifest = [
     mutation: "local-temporary",
     timeoutMs: 45_000,
     reportPrefixes: [],
-    description: "Match reports, state transitions, full-posting competitiveness with zero extracted requirements, grounded citations, candidate intent, level, and selectivity context in the fit prompt (no student ID), prompt-revision and intent staleness, legacy cache/failure invalidation, cache reuse/invalidation, in-flight changes, and unchanged approval boundaries against disposable SQLite; course evidence items with in-progress labels and coursework staleness. A stored constraint text longer than the schema allows (rows from before the extraction window) is clipped on read, so the analysis still runs."
+    description: "Match reports, state transitions, full-posting competitiveness with zero extracted requirements, grounded citations, candidate intent, level, and selectivity context in the fit prompt (no student ID), prompt-revision and intent staleness, legacy cache/failure invalidation, cache reuse/invalidation, in-flight changes, and unchanged approval boundaries against disposable SQLite; course evidence items with in-progress labels and coursework staleness. A stored constraint text longer than the schema allows (rows from before the extraction window) is clipped on read, so the analysis still runs; the fit prompt reads only FIT_CONTEXT_FACT_KEYS facts, and saving other facts leaves a fit current."
   },
   {
     id: "job-ingestion-persistence",
@@ -684,6 +684,42 @@ export const suiteManifest = [
     timeoutMs: 120_000,
     reportPrefixes: ["SITE_NAVIGATION_REPORT"],
     description: "Real Chromium against routed synthetic pages (no network): a OneTrust-shaped banner rejected, never accepted, by the shared reject-first helper on its own and on the posting's Apply-entry path, an accept-only banner left unclicked, and its preference-center toggles, vendor search, copy-link box, and a honeypot never controls; an unrecognized site walked consent, Apply, and Apply as guest to its one-page form (never Sign in, Create account, or Apply with LinkedIn) and its identity fields and resume filled while the honeypot is no field; a several-page form's first page read as Next without a submit; Paylocity's reconstructions (from a read-only capture): no field on the posting, its accept-only banner closed and Apply followed, the application classified paylocity (confirm), First Name, Last Name, Email Address, and Mobile Number filled, the resume uploaded to its input only, County paused, and Next Step without a submit; SmartRecruiters' WeChat share box no application field and I'm interested reaching DataDome (a challenge); Oracle Cloud HCM's posting with no field and Apply Now reaching the email step (a wall)."
+  },
+  {
+    id: "oracle-verification-code",
+    features: ["browser"],
+    tier: "fast",
+    script: "test:agent:oracle-code",
+    requires: ["node", "pnpm"],
+    network: "none",
+    mutation: "none",
+    timeoutMs: 30_000,
+    reportPrefixes: [],
+    description: "Oracle Cloud HCM's emailed one-time code from a fake mailbox (derived rules; Oracle's mail was never seen): dot-bounded oracle.com or oraclecloud.com senders, the company in From or Subject, or the tenant label (at least 4 characters) in From; Greenhouse, Workday, and iCIMS mail never counts even when it names the company; six-digit codes after or before a code, PIN, or passcode anchor in text or HTML (five- and seven-digit numbers and an unanchored job number are not codes); mail from 30 s before the Next click on; exactly one distinct code, else none or ambiguous; bounded polling with mailbox failures as fixed phrases and the mailbox closed on every path; and the code never logged."
+  },
+  {
+    id: "oracle-email-step-lifecycle",
+    features: ["browser"],
+    tier: "local",
+    script: "test:browser-worker:oracle",
+    requires: ["node", "pnpm", "node-sqlite"],
+    network: "none",
+    mutation: "local-temporary",
+    timeoutMs: 60_000,
+    reportPrefixes: [],
+    description: "Oracle Cloud HCM's email and one-time-code step through start, continue, and submit with in-memory pages and a fake mailbox in temporary SQLite: a new candidate's run passes the email step (saved email typed, the terms accepted under the data-consent setting and logged with the exact text) and is saved awaiting approval at the email step's address with the section filled; a returning candidate's emailed code is read once and entered, and reaches no table row, console line, or report; no code, two codes, a mailbox failure, a refused code, an identity check, an already-applied screen, a CAPTCHA, terms the setting does not cover, no profile email, no mailbox, and a mailbox for another address each stop with their exact reason, no run saved and the job status unchanged; with the step turned off the email-step stop is unchanged; a candidate-started run stops with a plain error; continue takes the step again and fills the answered pause; submit takes it again and submits, and a stop there keeps the run waiting for approval; Oracle's default \"I agree with the terms and conditions\" box is accepted under the data-consent setting and logged, and declined without it."
+  },
+  {
+    id: "oracle-apply-fixture",
+    features: ["browser"],
+    tier: "browser",
+    script: "test:browser:oracle-apply",
+    requires: ["node", "pnpm", "node-sqlite", "playwright-chromium"],
+    network: "none",
+    mutation: "local-temporary",
+    timeoutMs: 180_000,
+    reportPrefixes: ["ORACLE_APPLY_REPORT"],
+    description: "Real Chromium against routed synthetic Oracle Candidate Experience pages (the email step reduced from a read-only capture; the PIN, section, identity, and already-applied screens derived from Oracle's public CE bundle; no network): the screens told apart; the email typed, the terms box ticked through its span, and Next clicked once, never Resend; declined terms and a visible hCaptcha leave the email box empty; the right code passes the PIN with one Verify click and a wrong code stops after one; Oracle Digital Assistant's chatbot box is never a control or field; a start run passes the email step and fills the single-section form (names, email, phone, resume) with the consent logged; a returning candidate's emailed code is entered and the several-section form then stops the run, the code in no console line, database row, or error; Oracle's default \"I agree with the terms and conditions\" box is accepted under the data-consent setting and declined without it, the email box left empty and Next never clicked."
   },
   {
     id: "browser-fixture-run",

@@ -8,3 +8,4 @@ export * from "./workday-history";
 export * from "./self-identification";
 export * from "./icims-account";
 export * from "./jobvite-consent";
+export * from "./oracle-apply";
