@@ -11,8 +11,9 @@ import {
   saveBrowserRun, saveVerificationReport, setJobStatus, updateBrowserRun
 } from "@internship-agent/db";
 import type { BrowserRun } from "@internship-agent/domain";
-import { submitEvidenceRoot, type BrowserPage, type PostSubmitEvidence } from "@internship-agent/browser";
+import { createAshbyNetworkRecorder, submitEvidenceRoot, type BrowserPage, type PostSubmitEvidence } from "@internship-agent/browser";
 import {
+  describeAshbyNetwork,
   readJobEvidence,
   readSubmitEvidence,
   redactEvidenceText,
@@ -690,6 +691,101 @@ describe("pnpm run:evidence", () => {
       `Job ${run.jobId.slice(0, 8)}: Fixture Robotics — Software Engineering Intern (APPLYING)`,
       "No evidence is stored for this job."
     ]);
+    database.close();
+  });
+});
+
+describe("Ashby's network record in the evidence (Track 22)", () => {
+  const PERSONAL = ["Jordan Rivera", "jordan.rivera@example.test", "jordan@example.test", "+1 555 010 0199", "tok-5c2d", "fp-77aa", "UNIVERSAL_ENT"];
+  const ENTRY = "9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2";
+
+  async function recordedNetwork() {
+    const recorder = createAshbyNetworkRecorder();
+    const save = {};
+    recorder.request(save, "https://jobs.ashbyhq.com/api/non-user-graphql?op=ApiSetFormValue", () => JSON.stringify({ variables: { value: "Jordan Rivera" } }));
+    recorder.response(save, 200, async () => JSON.stringify({ data: { value: "Jordan Rivera" } }));
+    recorder.noteClick();
+    const token = {};
+    recorder.request(token, "https://www.recaptcha.net/recaptcha/enterprise/reload?k=fixture", () => null);
+    recorder.response(token, 200, async () => "");
+    const submit = {};
+    recorder.request(submit, "https://jobs.ashbyhq.com/api/non-user-graphql?op=ApiSubmitSingleApplicationFormAction", () => JSON.stringify({
+      variables: { recaptchaToken: "UNIVERSAL_ENT===tok-5c2d", deviceFingerprint: "fp-77aa", answers: { name: "Jordan Rivera", email: "jordan.rivera@example.test", phone: "+1 555 010 0199" } }
+    }));
+    recorder.response(submit, 200, async () => JSON.stringify({
+      errors: [{ message: "fixture", extensions: { ashbyErrorType: "FIXTURE_ERROR", message: "Contact jordan@example.test for help." } }],
+      data: { submitApplicationFormAction: { applicationFormResult: {
+        __typename: "FormRender",
+        fieldValues: { name: "Jordan Rivera", email: "jordan.rivera@example.test", phone: "+1 555 010 0199" },
+        errorMessages: ["Missing entry for required field: Visa Support"],
+        formErrors: [{ message: "Missing entry for required field: Visa Support", fieldEntryId: ENTRY }]
+      } } }
+    }));
+    return recorder.snapshot();
+  }
+
+  it("stores the record with its messages redacted and nothing personal, and reads older files as null", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    const ashbyNetwork = await recordedNetwork();
+    const saved = await savePostSubmitEvidence({
+      database, dataDir, run, page: stubPage(), now: new Date("2026-11-25T10:00:00.000Z"),
+      evidence: evidence({ outcome: "unknown", url: "https://jobs.ashbyhq.com/fixturerobotics/1/application", invalidFields: [], alertText: "", bodyText: "Submit Application", ashbyNetwork })
+    });
+    const raw = readFileSync(join(dataDir, saved.relativeDir, "evidence.json"), "utf8");
+    const stored = submitEvidenceFileSchema.parse(JSON.parse(raw));
+    expect(stored.ashbyNetwork).toEqual({
+      calls: [
+        { operation: "ApiSetFormValue", status: 200, failed: false, clicks: 0 },
+        { operation: "ApiSubmitSingleApplicationFormAction", status: 200, failed: false, clicks: 1 }
+      ],
+      submits: [{
+        operation: "ApiSubmitSingleApplicationFormAction", status: 200, failed: false, clicks: 1, recaptchaToken: "present",
+        resultType: "FormRender", success: false, errorCodes: ["FIXTURE_ERROR"], errorMessages: ["Contact [email] for help."],
+        formErrorMessages: ["Missing entry for required field: Visa Support"],
+        fieldErrors: [{ fieldEntryId: ENTRY, message: "Missing entry for required field: Visa Support" }], blockMessage: false
+      }],
+      recaptchaTokenRequests: 1,
+      recaptchaTokenStatuses: [200]
+    });
+    for (const secret of PERSONAL) expect(raw).not.toContain(secret);
+    const old = submitEvidenceFileSchema.parse({
+      version: 1, runId: run.id, jobId: run.jobId, capturedAt: "2026-11-19T10:00:00.000Z", outcome: "unknown", url: "", invalidFields: [],
+      alertText: "", challenge: null, text: "", screenshot: null
+    });
+    expect(old.ashbyNetwork).toBeNull();
+    const plain = await savePostSubmitEvidence({ database, dataDir, run, page: stubPage(), evidence: evidence(), now: new Date("2026-11-25T11:00:00.000Z") });
+    expect(JSON.parse(readFileSync(join(dataDir, plain.relativeDir, "evidence.json"), "utf8")).ashbyNetwork).toBeNull();
+    database.close();
+  });
+
+  it("prints the record with pnpm run:evidence, nothing personal", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    await savePostSubmitEvidence({
+      database, dataDir, run, page: stubPage("throw"), now: new Date("2026-11-25T10:00:00.000Z"),
+      evidence: evidence({ outcome: "unknown", url: "https://jobs.ashbyhq.com/fixturerobotics/1/application", invalidFields: [], alertText: "", bodyText: "Submit Application", ashbyNetwork: await recordedNetwork() })
+    });
+    const lines: string[] = [];
+    expect(await runEvidenceCommand(["--run", run.id], { open: () => database, close: () => {}, dataDir: () => dataDir, log: (line) => { lines.push(line); } })).toBe(0);
+    expect(lines).toContain("Ashby network: 2 GraphQL call(s) recorded; reCAPTCHA token requests: 1 (HTTP 200)");
+    expect(lines).toContain("  - ApiSubmitSingleApplicationFormAction after click 1: HTTP 200; token present; result FormRender; error codes: FIXTURE_ERROR; errors: Contact [email] for help.; form errors: Missing entry for required field: Visa Support; field errors: 1");
+    const text = lines.join("\n");
+    for (const secret of PERSONAL) expect(text).not.toContain(secret);
+    expect(describeAshbyNetwork({ calls: [], submits: [], recaptchaTokenRequests: 1, recaptchaTokenStatuses: [null] })).toEqual([
+      "Ashby network: 0 GraphQL call(s) recorded; reCAPTCHA token requests: 1 (HTTP no answer)",
+      "  - no submit request was sent"
+    ]);
+    expect(describeAshbyNetwork({
+      calls: [], recaptchaTokenRequests: 0, recaptchaTokenStatuses: [],
+      submits: [{ operation: "ApiSubmitSingleApplicationFormAction", status: null, failed: true, clicks: 1, recaptchaToken: "dummy", resultType: "FormSubmitSuccess", success: true, errorCodes: [], errorMessages: [], formErrorMessages: [], fieldErrors: [], blockMessage: true }]
+    })).toEqual([
+      "Ashby network: 0 GraphQL call(s) recorded; reCAPTCHA token requests: 0",
+      "  - ApiSubmitSingleApplicationFormAction after click 1: request failed; token dummy; result FormSubmitSuccess (accepted); error codes: none; block message shown"
+    ]);
+    expect(describeAshbyNetwork(null)).toEqual([]);
     database.close();
   });
 });

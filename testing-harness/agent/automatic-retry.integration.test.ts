@@ -36,6 +36,8 @@ import {
   SubmissionCodeNotFound,
   SubmissionNeedsInput,
   SubmissionUnconfirmed,
+  type AshbySubmitCall,
+  type AshbySubmitNetwork,
   type BrowserPage,
   type RawControl,
   type WorkdayPage,
@@ -1172,14 +1174,31 @@ function failedSubmit(database: DatabaseSync, input: { company: string; applicat
 async function capture(database: DatabaseSync, dataDir: string, run: BrowserRun, evidence: {
   outcome: "unknown" | "challenged" | "refused" | "field-errors" | "verification-code"; url: string; bodyText: string;
   detail?: string | null; challenge?: string | null; alertText?: string; invalidFields?: Array<{ ref: string | null; label: string; error: string }>; now?: Date;
+  ashbyNetwork?: AshbySubmitNetwork | null;
 }) {
   await savePostSubmitEvidence({
     database, dataDir, run, page: fakePage(), now: evidence.now,
     evidence: {
       outcome: evidence.outcome, url: evidence.url, bodyText: evidence.bodyText, detail: evidence.detail ?? null,
-      challenge: evidence.challenge ?? null, alertText: evidence.alertText ?? "", invalidFields: evidence.invalidFields ?? []
+      challenge: evidence.challenge ?? null, alertText: evidence.alertText ?? "", invalidFields: evidence.invalidFields ?? [],
+      ...(evidence.ashbyNetwork ? { ashbyNetwork: evidence.ashbyNetwork } : {})
     }
   });
+}
+
+/** An Ashby network record (Track 22) with the given submits and one reCAPTCHA token request per click. */
+function ashbyNetwork(submits: Array<Partial<AshbySubmitCall>>): AshbySubmitNetwork {
+  const full = submits.map((entry): AshbySubmitCall => ({
+    operation: "ApiSubmitSingleApplicationFormAction", status: 200, failed: false, clicks: 1, recaptchaToken: "present",
+    resultType: null, success: false, errorCodes: [], errorMessages: [], formErrorMessages: [], fieldErrors: [], blockMessage: false,
+    ...entry
+  }));
+  return {
+    calls: [{ operation: "ApiSetFormValue", status: 200, failed: false, clicks: 0 }, ...full.map((entry) => ({ operation: entry.operation, status: entry.status, failed: entry.failed, clicks: entry.clicks }))],
+    submits: full,
+    recaptchaTokenRequests: 1,
+    recaptchaTokenStatuses: [200]
+  };
 }
 
 const current = (database: DatabaseSync, run: BrowserRun) => listBrowserRuns(database, run.jobId).find((entry) => entry.id === run.id)!;
@@ -1196,13 +1215,19 @@ const holdTrace = (database: DatabaseSync, jobId: string) => applicationHoldTrac
 describe("pnpm pipeline:retry --reopen-unsubmitted with evidence the site never took the submit", () => {
   const REASON = "The site never took the click; the saved evidence shows the form.";
 
-  type Case = { site: "ashby" | "dover"; outcome: "unknown" | "challenged"; detail?: string | null; challenge?: string | null; text: string; kind: string };
+  type Case = {
+    site: "ashby" | "dover"; outcome: "unknown" | "challenged"; detail?: string | null; challenge?: string | null; text: string; kind: string;
+    ashbyNetwork?: AshbySubmitNetwork;
+  };
   const ACCEPTED: Array<[string, Case]> = [
     ["Ashby's busy notice at the last click", { site: "ashby", outcome: "unknown", detail: ASHBY_BUSY_DETAIL, text: ASHBY_FORM, kind: "ashby-busy-evidence" }],
     ["Dover's Turnstile challenge (redirected page)", { site: "dover", outcome: "challenged", challenge: TURNSTILE, text: DOVER_FORM, kind: "dover-turnstile-evidence" }],
     ["an older capture of the intact Ashby form", { site: "ashby", outcome: "unknown", text: ASHBY_FORM, kind: "intact-form-evidence" }],
     ["an older Dover capture with a Turnstile marker", {
       site: "dover", outcome: "unknown", text: DOVER_FORM.replace("\nApply\nJobs", "\nVerify you are human\nApply\nJobs"), kind: "dover-turnstile-evidence"
+    }],
+    ["an intact Ashby capture whose network record shows a token request and no submit", {
+      site: "ashby", outcome: "unknown", text: ASHBY_FORM, kind: "intact-form-evidence", ashbyNetwork: ashbyNetwork([])
     }]
   ];
 
@@ -1212,7 +1237,7 @@ describe("pnpm pipeline:retry --reopen-unsubmitted with evidence the site never 
       : { company: "Fixture Labs", applicationUrl: DOVER_RUN_URL, atsKind: "dover" });
     await capture(database, dataDir, run, {
       outcome: item.outcome, url: item.site === "ashby" ? ASHBY_RUN_URL : DOVER_EVIDENCE_URL, bodyText: item.text,
-      detail: item.detail ?? null, challenge: item.challenge ?? null
+      detail: item.detail ?? null, challenge: item.challenge ?? null, ashbyNetwork: item.ashbyNetwork
     });
     return run;
   }
@@ -1282,7 +1307,11 @@ describe("pnpm pipeline:retry --reopen-unsubmitted with evidence the site never 
     } }, /no post-submit evidence saved after it/],
     ["an older capture with a confirmation before a newer clean one", { ...ashby, setup: async (database, dataDir, run) => {
       await capture(database, dataDir, run, { outcome: "unknown", url: ASHBY_RUN_URL, bodyText: `Thank you for applying\n${ASHBY_FORM}`, now: new Date(Date.now() - 40_000) });
-    } }, /shows confirmation text \("Thank you for applying"\)/]
+    } }, /shows confirmation text \("Thank you for applying"\)/],
+    // Ashby's network record (Track 22): its server's answer outranks the intact page.
+    ["Ashby's reCAPTCHA rejection in the network record", { ...ashby, ashbyNetwork: ashbyNetwork([{ errorCodes: ["RECAPTCHA_SCORE_BELOW_THRESHOLD"] }]) }, /reCAPTCHA \(spam check\) rejection/],
+    ["Ashby's server accepting the submission", { ...ashby, ashbyNetwork: ashbyNetwork([{ resultType: "FormSubmitSuccess", success: true }]) }, /server accepting the submission/],
+    ["a submit request with no answer", { ...ashby, ashbyNetwork: ashbyNetwork([{ status: null }]) }, /does not show that Ashby refused it/]
   ];
 
   it.each(REFUSED)("refuses %s and writes nothing", async (_name, item, reason) => {
@@ -1294,7 +1323,8 @@ describe("pnpm pipeline:retry --reopen-unsubmitted with evidence the site never 
       : { company: "Fixture Labs", applicationUrl: DOVER_RUN_URL, atsKind: "dover" });
     await capture(database, dataDir, run, {
       outcome: item.outcome, url: pageUrl, bodyText: item.text, detail: item.detail ?? null, challenge: item.challenge ?? null,
-      alertText: item.alertText, invalidFields: item.invalid ? [{ ref: "q1", label: "Email", error: "Enter a valid email." }] : []
+      alertText: item.alertText, invalidFields: item.invalid ? [{ ref: "q1", label: "Email", error: "Enter a valid email." }] : [],
+      ashbyNetwork: item.ashbyNetwork
     });
     await item.setup?.(database, dataDir, run);
     if (item.receipt === "confirmed") receiptCheck(database, run, "confirmed");

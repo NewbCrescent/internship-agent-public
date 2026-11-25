@@ -21,6 +21,17 @@ describe("deterministic semantic question mapping", () => {
     });
   });
 
+  it("maps Ashby's short-titled visa support question to the scoped sponsorship need (Track 22)", async () => {
+    expect(await mapper.map("Visa Support: Do you require any visa support to work in the U.S.?")).toMatchObject({
+      status: "MAPPED", key: "requires_sponsorship", scope: { kind: "country", code: "US" }
+    });
+    expect(await mapper.map("Do you require any visa support?", { postingCountryCode: "us" })).toMatchObject({
+      status: "MAPPED", key: "requires_sponsorship", scope: { kind: "country", code: "US" }, explanation: expect.stringContaining("the posting's country")
+    });
+    expect(await mapper.map("Do you require any visa support?")).toMatchObject({ status: "AMBIGUOUS" });
+    expect(await mapper.map("Does Fixture Robotics offer visa support?")).not.toMatchObject({ key: "requires_sponsorship" });
+  });
+
   it("scopes generic sponsorship and authorization questions to the posting's one country", async () => {
     const sponsorship = [
       "Will you now or in the future require sponsorship for employment visa status (e.g. F-1 STEM OPT, H-1B, TN, E-3…)",

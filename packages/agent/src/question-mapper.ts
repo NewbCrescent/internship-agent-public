@@ -114,7 +114,8 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
       };
     }
 
-    if (/\b(?:require|need).{0,30}(?:sponsor|sponsorship)\b|\bvisa sponsorship\b/i.test(normalized)) {
+    // Ashby's short-titled form: "Visa Support: Do you require any visa support to work in the U.S.?".
+    if (/\b(?:require|need).{0,30}(?:sponsor|sponsorship)\b|\bvisa sponsorship\b|\b(?:require|need)\b.{0,30}\bvisa support\b/i.test(normalized)) {
       const country = inferCountryCode(normalized, context);
       if (!country) {
         return { status: "AMBIGUOUS", reason: "Sponsorship requirements require an explicit country scope, and neither the question nor the posting names one country." };

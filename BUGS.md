@@ -522,6 +522,65 @@ Ashby answer-save and failure scenarios of `pnpm test:browser:greenhouse`
 Ashby submit-feedback tests in `recognition-planner.test.ts`
 (`pnpm test:browser-worker:fast`).
 
+### Ashby's required single- and multi-choice questions were read as optional
+
+The First Resonance runs (<run id>, <run id> on 2026-11-23; <run id>,
+<run id> on 2026-11-25) skipped the required "Visa Support" radio ("Do you
+require any visa support to work in the U.S.?") as "Optional field with no
+known answer stays empty."; the <run id> evidence screenshot shows its
+required star with neither Yes nor No chosen, then Submit Application.
+Ashby's public bundle (read 2026-11-24) draws single-choice (ValueSelect)
+and multi-choice (MultiValueSelect) questions without the
+`.ashby-application-form-field-entry` wrapper: the radio or checkbox group
+fieldset holds the `_required` question title inside a bare
+`[data-field-entry-id]` div, and its radios carry no `required` attribute.
+The agent looked for the title only inside the field-entry wrapper, so these
+questions read as optional; the fixture's radio (from the 2026-11-20 Fernwave
+capture) had the wrapper, so the fixture passed while production failed. The
+title alone ("Visa Support") was also the whole label, which the question
+mapper could not read as a sponsorship question. H1 (confirmed defect, the
+most likely cause of the First Resonance failures): Ashby's server checks
+required fields, so it would not take a submission with Visa Support empty.
+Now the required mark is read from the field entry, the `[data-field-entry-id]`
+div, or the radio or checkbox group; a short title with no "?" takes Ashby's
+question description ("Visa Support: Do you require any visa support to work
+in the U.S.?"); and the mapper reads "require/need … visa support" as the
+saved, country-scoped sponsorship need (a question naming no country, with no
+posting country, still pauses). Track 16's busy-notice explanation did not
+apply to these runs: their evidence carries no busy detail. Boundary: whether
+the empty answer is why Ashby showed nothing is not proven (no correction
+message appeared); the network record (next entry) answers it on the next
+real attempt. Regressions: the value-select recognition checks in
+`pnpm test:browser:greenhouse` (`fixtures/ashby-value-select.html`) and the
+visa-support mapper test in `pnpm test:agent`.
+
+### Ashby submits left no record of what was sent
+
+An Ashby submit's evidence held only the page's text and screenshot, so a
+silent page (<run id>, <run id>) could not say whether the submit was sent
+or what Ashby answered. Unproven explanations: H2, Ashby's server answered
+with a FormRender naming the missing field but "Your form needs corrections"
+was not drawn within 30 s; H3, reCAPTCHA Enterprise's token step hung or
+failed, so the submit mutation was never sent; H4, a reCAPTCHA score
+rejection (`RECAPTCHA_SCORE_BELOW_THRESHOLD`) whose failure container was
+not drawn; H5, a server or network error with no visible message; H6, the
+click never reached Ashby's handler (no token request and no submit). Now
+the agent records Ashby's submit on the network from before the first click
+(`packages/browser/src/ats/ashby-network.ts`): Ashby's GraphQL operation
+names and HTTP statuses, the submit's token kind, result type, success,
+error codes and messages, field errors, and block message, and each
+reCAPTCHA token request; bodies are read in memory only and never kept.
+Ashby's answer decides the outcome: `FormSubmitSuccess` confirms, a
+`FormRender` naming fields pauses them with the approval withdrawn, the
+block message is refused, and a reCAPTCHA rejection is held as challenged,
+never retried, and refused by `--reopen-unsubmitted`. Once a submit request
+went out after a click the agent never clicks again. The record is kept in
+evidence.json (`ashbyNetwork`) and printed by `pnpm run:evidence`. Real runs
+<run id> and <run id> stay failed; nothing is applied to the real records.
+Regressions: the `?network=` scenarios in `pnpm test:browser:greenhouse`,
+the network tests in `pnpm test:browser-worker:fast`,
+`pnpm test:agent:evidence`, and `pnpm test:agent:retry`.
+
 ### Failed submits the site never took could not be reopened, closed, or corrected
 
 `pnpm pipeline:retry --reopen-unsubmitted` accepted only Greenhouse's

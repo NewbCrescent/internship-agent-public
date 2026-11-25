@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Robotics Software Intern @ Fixture Robotics</title></head>
+<body>
+  <!--
+    A fictional Ashby application page ("Fixture Robotics"); every text, uuid, token, and host name
+    here is fictional, and nothing captured is copied.
+    DERIVED from Ashby's public front-end bundle (index-CY3T4pnC.js, read 2026-11-24, no submission
+    made): a single-choice question (ValueSelect, at most 8 options) and a multi-choice question
+    (MultiValueSelect) are drawn WITHOUT the `ashby-application-form-field-entry` wrapper: a bare
+    div[data-field-path][data-field-entry-id] holds the fieldset `_container _fieldEntry
+    ashby-application-form-input-radio-group` (or `-checkbox-group`), whose children are the question
+    title label (`_heading _required_<hash> _label ashby-application-form-question-title`, for= the
+    field path; `_required_<hash>` only when required), the optional
+    `ashby-application-form-question-description`, then the options
+    (`ashby-application-form-input-radio-group-option`, the radio with id
+    "<entry>-labeled-radio-<n>", name "<entry>", no `required` attribute, and its own label).
+    The submit sequence: a reCAPTCHA Enterprise token request (POST recaptcha.net
+    /recaptcha/enterprise/reload), then POST /api/non-user-graphql?op=ApiSubmitSingleApplicationFormAction;
+    the harness answers it per ?network= (accepted, recaptcha, form-errors, server-error; hang: the
+    token request is never followed by the submit). Real Ashby sends no answers in the submit; this
+    fixture does, so the harness proves bodies are never kept. After the answer this page draws
+    NOTHING (the silent page the real runs showed).
+    Checked against the First Resonance evidence screenshot of 2026-11-25 (a required radio "Visa
+    Support" with a description; structure only) and a read-only load of that public posting's
+    application page on 2026-11-24 (same structure: the radio inside span._container inside the
+    option div, the fieldset inside a bare div[data-field-entry-id], the title's `_required_<hash>`
+    class; no form interaction).
+  -->
+  <div id="root">
+    <h1 class="ashby-job-posting-heading">Robotics Software Intern</h1>
+    <div tabindex="0" role="tabpanel" aria-labelledby="job-application-form" id="form">
+      <div class="_jobPostingForm ashby-application-form-container">
+        <div class="_section ashby-application-form-section-container">
+          <div class="_fieldEntry ashby-application-form-field-entry" data-field-path="_systemfield_name">
+            <label class="_heading _required_fx1 _label ashby-application-form-question-title" for="_systemfield_name">Name</label>
+            <div><input placeholder="Type here..." name="_systemfield_name" required id="_systemfield_name" type="text" class="_input ashby-application-form-input-text"></div>
+          </div>
+          <div class="_fieldEntry ashby-application-form-field-entry" data-field-path="_systemfield_email">
+            <label class="_heading _required_fx1 _label ashby-application-form-question-title" for="_systemfield_email">Email</label>
+            <div><input placeholder="hello@example.com..." name="_systemfield_email" required id="_systemfield_email" type="email" class="_input ashby-application-form-input-text"></div>
+          </div>
+          <div data-field-path="9a0b1c2d-0000-4000-8000-0000000000d1" data-field-entry-id="9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2">
+            <fieldset class="_container _fieldEntry ashby-application-form-input-radio-group">
+              <label class="_heading _required_fx1 _label ashby-application-form-question-title" for="9a0b1c2d-0000-4000-8000-0000000000d1">Visa Support</label>
+              <div class="_description ashby-application-form-question-description"><p>Do you require any visa support to work in the U.S.?</p></div>
+              <div class="_option ashby-application-form-input-radio-group-option"><span class="_container"><input type="radio" class="ashby-application-form-input-radio-group-option-radio" id="9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2-labeled-radio-0" name="9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2"></span><label for="9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2-labeled-radio-0">Yes</label></div>
+              <div class="_option ashby-application-form-input-radio-group-option"><span class="_container"><input type="radio" class="ashby-application-form-input-radio-group-option-radio" id="9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2-labeled-radio-1" name="9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2"></span><label for="9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2-labeled-radio-1">No</label></div>
+            </fieldset>
+          </div>
+          <div data-field-path="1c2d3e4f-0000-4000-8000-0000000000d3" data-field-entry-id="1c2d3e4f-0000-4000-8000-0000000000d3_2d3e4f50-0000-4000-8000-0000000000d4">
+            <fieldset class="_container _fieldEntry ashby-application-form-input-radio-group">
+              <label class="_heading _label ashby-application-form-question-title" for="1c2d3e4f-0000-4000-8000-0000000000d3">Preferred team</label>
+              <div class="_option ashby-application-form-input-radio-group-option"><span class="_container"><input type="radio" class="ashby-application-form-input-radio-group-option-radio" id="1c2d3e4f-0000-4000-8000-0000000000d3_2d3e4f50-0000-4000-8000-0000000000d4-labeled-radio-0" name="1c2d3e4f-0000-4000-8000-0000000000d3_2d3e4f50-0000-4000-8000-0000000000d4"></span><label for="1c2d3e4f-0000-4000-8000-0000000000d3_2d3e4f50-0000-4000-8000-0000000000d4-labeled-radio-0">Autonomy</label></div>
+              <div class="_option ashby-application-form-input-radio-group-option"><span class="_container"><input type="radio" class="ashby-application-form-input-radio-group-option-radio" id="1c2d3e4f-0000-4000-8000-0000000000d3_2d3e4f50-0000-4000-8000-0000000000d4-labeled-radio-1" name="1c2d3e4f-0000-4000-8000-0000000000d3_2d3e4f50-0000-4000-8000-0000000000d4"></span><label for="1c2d3e4f-0000-4000-8000-0000000000d3_2d3e4f50-0000-4000-8000-0000000000d4-labeled-radio-1">Controls</label></div>
+            </fieldset>
+          </div>
+          <div data-field-path="3e4f5061-0000-4000-8000-0000000000d5" data-field-entry-id="3e4f5061-0000-4000-8000-0000000000d5_4f506172-0000-4000-8000-0000000000d6">
+            <fieldset class="_container _fieldEntry ashby-application-form-input-checkbox-group">
+              <label class="_heading _required_fx1 _label ashby-application-form-question-title" for="3e4f5061-0000-4000-8000-0000000000d5">Which of these tools have you used?</label>
+              <div class="_option ashby-application-form-input-checkbox-group-option"><span class="ashby-application-form-input-checkbox-group-option-checkbox"><input type="checkbox" id="3e4f5061-0000-4000-8000-0000000000d5_4f506172-0000-4000-8000-0000000000d6-labeled-checkbox-0" name="ROS"></span><span class="ashby-application-form-input-checkbox-group-option-label"><label for="3e4f5061-0000-4000-8000-0000000000d5_4f506172-0000-4000-8000-0000000000d6-labeled-checkbox-0">ROS</label></span></div>
+              <div class="_option ashby-application-form-input-checkbox-group-option"><span class="ashby-application-form-input-checkbox-group-option-checkbox"><input type="checkbox" id="3e4f5061-0000-4000-8000-0000000000d5_4f506172-0000-4000-8000-0000000000d6-labeled-checkbox-1" name="Git"></span><span class="ashby-application-form-input-checkbox-group-option-label"><label for="3e4f5061-0000-4000-8000-0000000000d5_4f506172-0000-4000-8000-0000000000d6-labeled-checkbox-1">Git</label></span></div>
+              <div class="_option ashby-application-form-input-checkbox-group-option"><span class="ashby-application-form-input-checkbox-group-option-checkbox"><input type="checkbox" id="3e4f5061-0000-4000-8000-0000000000d5_4f506172-0000-4000-8000-0000000000d6-labeled-checkbox-2" name="Docker"></span><span class="ashby-application-form-input-checkbox-group-option-label"><label for="3e4f5061-0000-4000-8000-0000000000d5_4f506172-0000-4000-8000-0000000000d6-labeled-checkbox-2">Docker</label></span></div>
+            </fieldset>
+          </div>
+        </div>
+        <button class="_button _primary _submitButton ashby-application-form-submit-button" type="button"><span>Submit Application</span></button>
+      </div>
+    </div>
+  </div>
+  <div>
+    <textarea id="g-recaptcha-response-100000" name="g-recaptcha-response" class="g-recaptcha-response" style="display:none"></textarea>
+  </div>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const NETWORK = params.get("network");
+    const state = { submitClicks: 0, responseStatus: null, radios: {} };
+    window.fixture = state;
+    document.addEventListener("change", (event) => {
+      if (event.target.type !== "radio") return;
+      state.radios[event.target.name] = document.querySelector(`label[for="${CSS.escape(event.target.id)}"]`).textContent;
+    });
+    const VISA = "9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2";
+    document.querySelector(".ashby-application-form-submit-button").addEventListener("click", async () => {
+      state.submitClicks += 1;
+      // reCAPTCHA Enterprise's execute(): a token request first.
+      try {
+        await fetch("https://www.recaptcha.net/recaptcha/enterprise/reload?k=fixture-site-key", { method: "POST", mode: "no-cors", body: "fixture" });
+      } catch {
+        // The token request's answer is never read here.
+      }
+      // An execute that never resolves: the submit is never sent.
+      if (NETWORK === "hang") return;
+      try {
+        const response = await fetch("/api/non-user-graphql?op=ApiSubmitSingleApplicationFormAction", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            operationName: "ApiSubmitSingleApplicationFormAction",
+            variables: {
+              organizationHostedJobsPageName: "fixturerobotics",
+              jobPostingId: "00000000-0000-4000-8000-0000000000a3",
+              formRenderIdentifier: "fixture-render",
+              actionIdentifier: "fixture-action",
+              recaptchaToken: "UNIVERSAL_ENT===fixture-token-7f3a",
+              deviceFingerprint: "fixture-fingerprint-9c1e",
+              answers: {
+                name: document.getElementById("_systemfield_name").value,
+                email: document.getElementById("_systemfield_email").value,
+                visa: state.radios[VISA] ?? null
+              }
+            }
+          })
+        });
+        state.responseStatus = response.status;
+      } catch {
+        state.responseStatus = -1;
+      }
+      // Nothing is drawn after the answer: the silent page the real runs showed.
+    });
+  </script>
+</body>
+</html>

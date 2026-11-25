@@ -1,8 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { promptSearchTerms } from "@internship-agent/domain";
 
 import {
+  ASHBY_ACCEPTED_CONFIRMATION,
+  ASHBY_BLOCKED_MESSAGE,
+  ASHBY_RECAPTCHA_REJECTED,
+  ashbyFormErrorsMessage,
+  ashbyGraphqlOperation,
+  ashbyNetworkInvalidFields,
+  ashbyNetworkVerdict,
+  ashbySubmitSentAfter,
+  createAshbyNetworkRecorder,
+  isRecaptchaTokenRequest,
+  readAshbySubmitResponse,
+  readAshbySubmitToken,
+  type AshbySubmitCall,
+  type AshbySubmitNetwork,
   ASHBY_BUSY_DETAIL,
   ASHBY_MAX_SUBMIT_CLICKS,
   ASHBY_RECLICK_SETTLE_MS,
@@ -1637,10 +1651,13 @@ describe("Ashby's answer saves and submit feedback", () => {
     state?: (clicks: number, reads: number) => AshbySubmitState;
     successAtClick?: number;
     successText?: string;
+    /** Ashby's network record at the given click count (Track 22); without it the page has no network watch. */
+    network?: (clicks: number) => AshbySubmitNetwork | null;
   } = {}) {
     const events: string[] = [];
     let clicks = 0;
     let reads = 0;
+    const networkOf = options.network;
     const page: BrowserPage = {
       url: () => options.url ?? "https://jobs.ashbyhq.com/fixture/1/application",
       title: async () => "Apply",
@@ -1663,7 +1680,15 @@ describe("Ashby's answer saves and submit feedback", () => {
       ashbySubmitState: async () => {
         if (clicks > 0) reads += 1;
         return options.state ? options.state(clicks, reads) : quiet;
-      }
+      },
+      ...(networkOf
+        ? {
+          watchAshbyNetwork: async () => {
+            events.push("watch");
+          },
+          ashbySubmitNetwork: async () => networkOf(clicks)
+        }
+        : {})
     };
     return { page, events, clicks: () => clicks };
   }
@@ -1743,6 +1768,13 @@ describe("Ashby's answer saves and submit feedback", () => {
       ashbySubmitState: async () => {
         events.push("state");
         return quiet;
+      },
+      watchAshbyNetwork: async () => {
+        events.push("watch");
+      },
+      ashbySubmitNetwork: async () => {
+        events.push("network");
+        return null;
       }
     };
     await expect(submitAndConfirm(page, FAST)).resolves.toContain("successfully submitted");
@@ -1769,5 +1801,263 @@ describe("Ashby's answer saves and submit feedback", () => {
     expect(isAshbyApplicationUrl("https://jobs.dover.com/job/1")).toBe(false);
     expect(isAshbyApplicationUrl("https://careers.example.com/jobs?ashby_jid=1")).toBe(false);
     expect(isAshbyApplicationUrl("not a url")).toBe(false);
+  });
+});
+
+describe("Ashby's submit on the network (Track 22)", () => {
+  const FAST = { timeoutMs: 50, pollMs: 1 };
+  const ENTRY = "9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2";
+  const MISSING = "Missing entry for required field: Visa Support";
+  const PERSONAL = ["Jordan Rivera", "jordan.rivera@example.test", "+1 555 010 0199", "tok-5c2d", "fp-77aa", "UNIVERSAL_ENT"];
+  const GRAPHQL = (op: string) => `https://jobs.ashbyhq.com/api/non-user-graphql?op=${op}`;
+  const TOKEN_URL = "https://www.recaptcha.net/recaptcha/enterprise/reload?k=fixture-key";
+  const submitBody = JSON.stringify({
+    operationName: "ApiSubmitSingleApplicationFormAction",
+    variables: {
+      recaptchaToken: "UNIVERSAL_ENT===tok-5c2d",
+      deviceFingerprint: "fp-77aa",
+      answers: { name: "Jordan Rivera", email: "jordan.rivera@example.test", phone: "+1 555 010 0199" }
+    }
+  });
+  const formRender = JSON.stringify({
+    data: {
+      submitApplicationFormAction: {
+        applicationFormResult: {
+          __typename: "FormRender",
+          id: "render-1",
+          fieldValues: { name: "Jordan Rivera", email: "jordan.rivera@example.test", phone: "+1 555 010 0199" },
+          errorMessages: [MISSING],
+          formErrors: [{ message: MISSING, fieldEntryId: ENTRY }]
+        },
+        messages: { blockMessageForCandidateHtml: null }
+      }
+    }
+  });
+  const submit = (partial: Partial<AshbySubmitCall> = {}): AshbySubmitCall => ({
+    operation: "ApiSubmitSingleApplicationFormAction", status: 200, failed: false, clicks: 1, recaptchaToken: "present",
+    resultType: null, success: false, errorCodes: [], errorMessages: [], formErrorMessages: [], fieldErrors: [], blockMessage: false,
+    ...partial
+  });
+  const network = (submits: AshbySubmitCall[]): AshbySubmitNetwork => ({
+    calls: submits.map((entry) => ({ operation: entry.operation, status: entry.status, failed: entry.failed, clicks: entry.clicks })),
+    submits,
+    recaptchaTokenRequests: submits.length,
+    recaptchaTokenStatuses: submits.map(() => 200)
+  });
+  const rejected = network([submit({ errorCodes: [ASHBY_RECAPTCHA_REJECTED], errorMessages: ["Your application could not be verified."] })]);
+  const accepted = network([submit({ resultType: "FormSubmitSuccess", success: true })]);
+  const blocked = network([submit({ resultType: "FormSubmitSuccess", blockMessage: true })]);
+  const fieldErrors = network([submit({ resultType: "FormRender", formErrorMessages: [MISSING], fieldErrors: [{ fieldEntryId: ENTRY, message: MISSING }] })]);
+
+  it("records operation names, statuses, and the submit's answer, never a body", async () => {
+    const recorder = createAshbyNetworkRecorder();
+    const savePostData = vi.fn(() => JSON.stringify({ variables: { value: "Jordan Rivera" } }));
+    const save = {};
+    recorder.request(save, GRAPHQL("ApiSetFormValue"), savePostData);
+    recorder.response(save, 200, async () => JSON.stringify({ data: { setFormValue: { value: "Jordan Rivera" } } }));
+    recorder.noteClick();
+    const token = {};
+    recorder.request(token, TOKEN_URL, () => "token body");
+    recorder.response(token, 200, async () => ")]}'");
+    const submitRequest = {};
+    recorder.request(submitRequest, GRAPHQL("ApiSubmitSingleApplicationFormAction"), () => submitBody);
+    recorder.response(submitRequest, 200, async () => formRender);
+    const snapshot = await recorder.snapshot();
+    expect(savePostData).not.toHaveBeenCalled();
+    expect(snapshot).toEqual({
+      calls: [
+        { operation: "ApiSetFormValue", status: 200, failed: false, clicks: 0 },
+        { operation: "ApiSubmitSingleApplicationFormAction", status: 200, failed: false, clicks: 1 }
+      ],
+      submits: [{
+        operation: "ApiSubmitSingleApplicationFormAction", status: 200, failed: false, clicks: 1, recaptchaToken: "present",
+        resultType: "FormRender", success: false, errorCodes: [], errorMessages: [], formErrorMessages: [MISSING],
+        fieldErrors: [{ fieldEntryId: ENTRY, message: MISSING }], blockMessage: false
+      }],
+      recaptchaTokenRequests: 1,
+      recaptchaTokenStatuses: [200]
+    });
+    const text = JSON.stringify(snapshot);
+    for (const secret of PERSONAL) expect(text).not.toContain(secret);
+  });
+
+  it("ignores other hosts, paths, and op names, marks failed requests, and caps its lists", async () => {
+    const recorder = createAshbyNetworkRecorder();
+    const postData = vi.fn(() => submitBody);
+    recorder.request({}, "https://evil.example/api/non-user-graphql?op=ApiSubmitSingleApplicationFormAction", postData);
+    recorder.request({}, "https://jobs.ashbyhq.com/api/graphql?op=ApiSubmitSingleApplicationFormAction", postData);
+    recorder.request({}, "https://jobs.ashbyhq.com/api/non-user-graphql?op=<script>", postData);
+    recorder.request({}, "https://www.recaptcha.net/recaptcha/enterprise/anchor?k=x", postData);
+    expect(postData).not.toHaveBeenCalled();
+    expect(await recorder.snapshot(0)).toEqual({ calls: [], submits: [], recaptchaTokenRequests: 0, recaptchaTokenStatuses: [] });
+    recorder.noteClick();
+    const lost = {};
+    recorder.request(lost, GRAPHQL("ApiSubmitSingleApplicationFormAction"), () => submitBody);
+    recorder.failed(lost);
+    const failed = await recorder.snapshot(0);
+    expect(failed.submits[0]).toMatchObject({ status: null, failed: true, clicks: 1 });
+    expect(failed.calls[0]).toMatchObject({ status: null, failed: true });
+    for (let index = 0; index < 45; index += 1) recorder.request({}, GRAPHQL("ApiSetFormValue"), () => null);
+    for (let index = 0; index < 6; index += 1) recorder.request({}, GRAPHQL("ApiSubmitMultipleFormsAction"), () => null);
+    for (let index = 0; index < 7; index += 1) recorder.request({}, TOKEN_URL, () => null);
+    const capped = await recorder.snapshot(0);
+    expect(capped.calls).toHaveLength(40);
+    expect(capped.submits).toHaveLength(5);
+    expect(capped.recaptchaTokenRequests).toBe(7);
+    expect(capped.recaptchaTokenStatuses).toHaveLength(5);
+    recorder.cancelClick();
+    recorder.cancelClick();
+    recorder.request({}, GRAPHQL("ApiSetFormValue"), () => null);
+    expect(() => recorder.response({}, 200, () => { throw new Error("no body"); })).not.toThrow();
+    expect(ashbyGraphqlOperation(GRAPHQL("ApiSetFormValue"))).toBe("ApiSetFormValue");
+    expect(ashbyGraphqlOperation("https://fixture.ashbyhq.com/api/non-user-graphql?op=ApiJobPosting")).toBe("ApiJobPosting");
+    expect(ashbyGraphqlOperation("https://ashbyhq.com.evil.example/api/non-user-graphql?op=ApiJobPosting")).toBeNull();
+    expect(ashbyGraphqlOperation("not a url")).toBeNull();
+    expect(isRecaptchaTokenRequest(TOKEN_URL)).toBe(true);
+    expect(isRecaptchaTokenRequest("https://www.google.com/recaptcha/api2/reload?k=x")).toBe(true);
+    expect(isRecaptchaTokenRequest("https://recaptcha.evil.example/recaptcha/enterprise/reload")).toBe(false);
+  });
+
+  it("reads only the token's kind from a submit body", () => {
+    expect(readAshbySubmitToken(submitBody)).toBe("present");
+    expect(readAshbySubmitToken(JSON.stringify([{ variables: { recaptchaToken: "UNIVERSAL_ENT===recaptcha_dummy_token" } }]))).toBe("dummy");
+    expect(readAshbySubmitToken(JSON.stringify({ variables: { recaptchaToken: "  " } }))).toBe("missing");
+    expect(readAshbySubmitToken(JSON.stringify({ variables: {} }))).toBe("missing");
+    expect(readAshbySubmitToken(null)).toBe("unknown");
+    expect(readAshbySubmitToken("not json")).toBe("unknown");
+  });
+
+  it("reads Ashby's answers to a submit", () => {
+    expect(readAshbySubmitResponse(200, JSON.stringify({ data: { submitApplicationFormAction: { applicationFormResult: { __typename: "FormSubmitSuccess" }, messages: { blockMessageForCandidateHtml: null } } } })))
+      .toMatchObject({ resultType: "FormSubmitSuccess", success: true, blockMessage: false });
+    expect(readAshbySubmitResponse(200, JSON.stringify({ data: null, errors: [{ message: "fixture", extensions: { ashbyErrorType: ASHBY_RECAPTCHA_REJECTED, message: "Your application could not be verified." } }] })))
+      .toEqual({ resultType: null, success: false, errorCodes: [ASHBY_RECAPTCHA_REJECTED], errorMessages: ["Your application could not be verified."], formErrorMessages: [], fieldErrors: [], blockMessage: false });
+    expect(readAshbySubmitResponse(200, JSON.stringify({ data: { submitSingleApplicationFormAction: { applicationFormResult: { __typename: "FormSubmitSuccess" }, messages: { blockMessageForCandidateHtml: "<p>You have reached the limit.</p>" } } } })))
+      .toMatchObject({ resultType: "FormSubmitSuccess", success: false, blockMessage: true });
+    expect(readAshbySubmitResponse(200, JSON.stringify({ data: { submitMultipleFormsAction: {
+      applicationFormResult: { __typename: "FormSubmitSuccess" },
+      surveyFormResults: [{ __typename: "FormRender", errorMessages: ["Survey answer missing"], formErrors: [{ message: "Survey answer missing", fieldEntryId: "survey-1" }] }]
+    } } }))).toMatchObject({ resultType: "FormSubmitSuccess", success: false, formErrorMessages: ["Survey answer missing"], fieldErrors: [{ fieldEntryId: "survey-1", message: "Survey answer missing" }] });
+    expect(readAshbySubmitResponse(500, JSON.stringify({ data: { submitApplicationFormAction: { applicationFormResult: { __typename: "FormSubmitSuccess" } } } }))).toMatchObject({ success: false });
+    expect(readAshbySubmitResponse(500, JSON.stringify({ errors: [{ message: "Internal error" }] }))).toMatchObject({ errorMessages: ["Internal error"], errorCodes: [], success: false });
+    const empty = { resultType: null, success: false, errorCodes: [], errorMessages: [], formErrorMessages: [], fieldErrors: [], blockMessage: false };
+    expect(readAshbySubmitResponse(200, null)).toEqual(empty);
+    expect(readAshbySubmitResponse(200, "not json")).toEqual(empty);
+    expect(readAshbySubmitResponse(200, `{"data":"${"x".repeat(2_000_001)}"}`)).toEqual(empty);
+    const many = readAshbySubmitResponse(200, JSON.stringify({ data: { submitApplicationFormAction: { applicationFormResult: {
+      __typename: "FormRender",
+      errorMessages: Array.from({ length: 15 }, (_, index) => `Error ${index} ${"y".repeat(300)}`),
+      formErrors: [{ message: "x", fieldEntryId: "<bad id>" }]
+    } } } }));
+    expect(many.formErrorMessages).toHaveLength(10);
+    expect(many.formErrorMessages.every((message) => message.length <= 200)).toBe(true);
+    expect(many.fieldErrors).toEqual([{ fieldEntryId: null, message: "x" }]);
+  });
+
+  it("judges the record", () => {
+    expect(ashbyNetworkVerdict(null)).toBe("none");
+    expect(ashbyNetworkVerdict(network([]))).toBe("none");
+    expect(ashbyNetworkVerdict(network([submit({ status: null })]))).toBe("none");
+    expect(ashbyNetworkVerdict(rejected)).toBe("recaptcha-rejected");
+    expect(ashbyNetworkVerdict(accepted)).toBe("accepted");
+    expect(ashbyNetworkVerdict(blocked)).toBe("blocked");
+    expect(ashbyNetworkVerdict(fieldErrors)).toBe("form-errors");
+    expect(ashbyNetworkVerdict(network([submit({ status: 500, errorMessages: ["Internal error"] })]))).toBe("none");
+    expect(ashbyNetworkInvalidFields(fieldErrors)).toEqual([{ ref: ENTRY, label: "", error: MISSING }]);
+    expect(ashbyNetworkInvalidFields(network([submit({ resultType: "FormRender", formErrorMessages: ["Something is missing"] })]))).toEqual([{ ref: null, label: "", error: "Something is missing" }]);
+    expect(ashbyNetworkInvalidFields(null)).toEqual([]);
+    expect(ashbySubmitSentAfter(null, 1)).toBe(false);
+    expect(ashbySubmitSentAfter(network([submit({ clicks: 1 })]), 1)).toBe(true);
+    expect(ashbySubmitSentAfter(network([submit({ clicks: 1 })]), 2)).toBe(false);
+  });
+
+  function ashbyPage(options: { network: (clicks: number) => AshbySubmitNetwork | null; busyAtClick?: number; successAtClick?: number }) {
+    const events: string[] = [];
+    let clicks = 0;
+    const page: BrowserPage = {
+      url: () => "https://jobs.ashbyhq.com/fixture/1/application",
+      title: async () => "Apply",
+      collectControls: async () => [],
+      bodyText: async () => "Robotics Software Intern Submit Application",
+      fillField: async () => {},
+      chooseOption: async () => {},
+      setChecked: async () => {},
+      uploadFile: async () => {},
+      clickSubmit: async () => {
+        events.push("click");
+        clicks += 1;
+      },
+      screenshot: async () => {},
+      close: async () => {},
+      successText: async () => (options.successAtClick !== undefined && clicks >= options.successAtClick ? "Your application was successfully submitted." : ""),
+      settleAshbySaves: async (ms) => {
+        events.push(`settle:${ms}`);
+      },
+      ashbySubmitState: async () => ({
+        busySeen: options.busyAtClick !== undefined && clicks === options.busyAtClick, busyShown: false, failureText: "", spamCheck: false
+      }),
+      watchAshbyNetwork: async () => {
+        events.push("watch");
+      },
+      ashbySubmitNetwork: async () => options.network(clicks)
+    };
+    return { page, events, clicks: () => clicks };
+  }
+
+  it("starts the watch before the settle and the first click", async () => {
+    const { page, events } = ashbyPage({ network: () => null, successAtClick: 1 });
+    await expect(submitAndConfirm(page, FAST)).resolves.toContain("successfully submitted");
+    expect(events.slice(0, 3)).toEqual(["watch", `settle:${ASHBY_SAVE_SETTLE_MS}`, "click"]);
+  });
+
+  it("holds Ashby's reCAPTCHA rejection as a challenge after one click", async () => {
+    const { page, clicks } = ashbyPage({ network: (count) => (count > 0 ? rejected : network([])) });
+    const error = await submitAndConfirm(page, FAST).then(() => null, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SubmissionChallenged);
+    const evidence = postSubmitEvidenceOf(error);
+    expect(evidence?.outcome).toBe("challenged");
+    expect(evidence?.challenge).toBe(ASHBY_SPAM_CHECK_DETAIL);
+    expect(evidence?.ashbyNetwork).toEqual(rejected);
+    expect(clicks()).toBe(1);
+  });
+
+  it("confirms Ashby's FormSubmitSuccess with no success container", async () => {
+    const { page } = ashbyPage({ network: (count) => (count > 0 ? accepted : null) });
+    await expect(submitAndConfirm(page, FAST)).resolves.toBe(ASHBY_ACCEPTED_CONFIRMATION);
+  });
+
+  it("pauses the fields Ashby's FormRender names", async () => {
+    const { page, clicks } = ashbyPage({ network: (count) => (count > 0 ? fieldErrors : null) });
+    const error = await submitAndConfirm(page, FAST).then(() => null, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SubmissionNeedsInput);
+    const needsInput = error as SubmissionNeedsInput;
+    expect(needsInput.invalidFields).toEqual([{ ref: ENTRY, label: "", error: MISSING }]);
+    expect(needsInput.message).toBe(ashbyFormErrorsMessage(1));
+    expect(needsInput.evidence.outcome).toBe("field-errors");
+    expect(clicks()).toBe(1);
+  });
+
+  it("refuses on Ashby's application-limit block message", async () => {
+    const { page } = ashbyPage({ network: (count) => (count > 0 ? blocked : null) });
+    const error = await submitAndConfirm(page, FAST).then(() => null, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SubmissionRefused);
+    expect((error as SubmissionRefused).message).toBe(ASHBY_BLOCKED_MESSAGE);
+    expect(postSubmitEvidenceOf(error)?.outcome).toBe("refused");
+  });
+
+  it("never clicks again once a submit request went out after the click", async () => {
+    const sentNoAnswer = network([submit({ status: null })]);
+    const { page, clicks } = ashbyPage({ network: (count) => (count > 0 ? sentNoAnswer : null), busyAtClick: 1 });
+    const error = await submitAndConfirm(page, FAST).then(() => null, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SubmissionUnconfirmed);
+    expect(clicks()).toBe(1);
+  });
+
+  it("fails closed when the record shows no verdict, keeping the record", async () => {
+    const serverError = network([submit({ status: 500, errorMessages: ["Internal error"] })]);
+    const { page } = ashbyPage({ network: (count) => (count > 0 ? serverError : null) });
+    const error = await submitAndConfirm(page, FAST).then(() => null, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SubmissionUnconfirmed);
+    expect((error as SubmissionUnconfirmed).evidence.ashbyNetwork).toEqual(serverError);
   });
 });

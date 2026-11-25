@@ -1,5 +1,6 @@
 import type { BrowserField, FillDecision, PauseRecord, RecognizedForm } from "@internship-agent/domain";
 
+import type { AshbySubmitNetwork } from "./ats/ashby-network";
 import { classifyFieldRole, isSensitiveRole } from "./ats/field-roles";
 import { SubmissionHeld } from "./challenge";
 import { stripRequiredMarker } from "./form-recognition";
@@ -56,6 +57,8 @@ export type PostSubmitEvidence = {
    * writer then takes no screenshot, and every text was scrubbed of the code.
    */
   securityCodeEntered?: boolean;
+  /** Ashby only: the watch's record of Ashby's GraphQL calls and reCAPTCHA token requests (names, statuses, booleans, error codes and messages; never bodies). */
+  ashbyNetwork?: AshbySubmitNetwork | null;
 };
 
 const MAX_BODY_TEXT = 20_000;
@@ -360,7 +363,7 @@ export function postSubmitEvidenceOf(error: unknown): PostSubmitEvidence | null 
 export async function capturePostSubmitEvidence(
   page: BrowserPage,
   outcome: PostSubmitOutcome,
-  known: { bodyText?: string; invalidFields?: InvalidField[]; alertText?: string; challenge?: string | null; detail?: string | null } = {}
+  known: { bodyText?: string; invalidFields?: InvalidField[]; alertText?: string; challenge?: string | null; detail?: string | null; ashbyNetwork?: AshbySubmitNetwork | null } = {}
 ): Promise<PostSubmitEvidence> {
   let url = "";
   try {
@@ -395,6 +398,14 @@ export async function capturePostSubmitEvidence(
   if (isBenignAlertText(alertText)) {
     alertText = "";
   }
+  let ashbyNetwork = known.ashbyNetwork;
+  if (ashbyNetwork === undefined) {
+    try {
+      ashbyNetwork = page.ashbySubmitNetwork ? await page.ashbySubmitNetwork() : null;
+    } catch {
+      ashbyNetwork = null;
+    }
+  }
   return {
     outcome,
     url,
@@ -402,7 +413,8 @@ export async function capturePostSubmitEvidence(
     invalidFields,
     alertText,
     challenge: known.challenge ?? null,
-    detail: known.detail ?? null
+    detail: known.detail ?? null,
+    ...(ashbyNetwork ? { ashbyNetwork } : {})
   };
 }
 

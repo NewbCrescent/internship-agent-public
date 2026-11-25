@@ -103,6 +103,19 @@
  * submission arrives; a save that never ends fails closed after one click
  * with the notice in the evidence; Ashby's spam-check failure container is
  * held as challenged and a generic one refused, neither clicked again.
+ * Ashby's single- and multi-choice questions (fixtures/ashby-value-select.html,
+ * derived from Ashby's public bundle, Track 22) are drawn without the
+ * field-entry wrapper: the radio or checkbox group's `_required` title marks
+ * them required, and the short "Visa Support" title takes its question from
+ * Ashby's description. Ashby's submit on the network (fixture ?network=,
+ * answered by this harness's routes): the reCAPTCHA token request and the
+ * ApiSubmitSingleApplicationFormAction submit are recorded (operation names,
+ * statuses, booleans, codes and messages; never the answers, token, or
+ * fingerprint the body holds); FormSubmitSuccess confirms with no success
+ * container, RECAPTCHA_SCORE_BELOW_THRESHOLD is held as challenged after one
+ * click, FormRender field errors pause the named field, and a token request
+ * never followed by a submit or a 500 fails closed with the record in the
+ * evidence.
  *
  * Usage: pnpm test:browser:greenhouse
  */
@@ -125,6 +138,10 @@ import {
   planAutofill,
   postSubmitEvidenceOf,
   recognizeCurrentForm,
+  ASHBY_ACCEPTED_CONFIRMATION,
+  ASHBY_SPAM_CHECK_DETAIL,
+  invalidFieldPauses,
+  type AshbySubmitNetwork,
   submitAndConfirm,
   SubmissionChallenged,
   SubmissionCodeNotFound,
@@ -144,6 +161,9 @@ const SMARTRECRUITERS = "https://jobs.smartrecruiters.com/FixtureRobotics/744000
 const SMARTRECRUITERS_APPLY = "https://jobs.smartrecruiters.com/oneclick-ui/company/FixtureRobotics/publication/00000000-0000-4000-8000-000000000000";
 const ASHBY = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a1/application";
 const ASHBY_TEXTING = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a2/application";
+const ASHBY_VALUE_SELECT = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a3/application";
+/** The Visa Support question's field-entry id in fixtures/ashby-value-select.html (its radios' name). */
+const ASHBY_VISA_ENTRY = "9a0b1c2d-0000-4000-8000-0000000000d1_0b1c2d3e-0000-4000-8000-0000000000d2";
 const LEVER = "https://jobs.lever.co/fixturerobotics/00000000-0000-4000-8000-0000000000b1/apply";
 /** Where app.dover.io application links land (they redirect to jobs.dover.com/job/<id>). */
 const DOVER = "https://jobs.dover.com/job/00000000-0000-4000-8000-0000000000d1";
@@ -202,6 +222,7 @@ async function main(): Promise<void> {
       "jobs.jobvite.com/fixturerobotics/job/oFixture1": fixture("jobvite-posting.html"),
       "jobs.jobvite.com/fixturerobotics/job/oFixture1/apply": fixture("jobvite-consent.html"),
       "jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a2/application": fixture("ashby-texting-consent.html"),
+      "jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a3/application": fixture("ashby-value-select.html"),
       // Post-submit confirmation pages.
       "job-boards.greenhouse.io/fixturerobotics/jobs/1000001/confirmation": fixture("greenhouse-confirmation.html"),
       "jobs.lever.co/fixturerobotics/00000000-0000-4000-8000-0000000000b1/thanks": fixture("lever-thanks.html")
@@ -215,6 +236,45 @@ async function main(): Promise<void> {
       let url: URL | null = null;
       try { url = new URL(request.url()); } catch { /* not a URL */ }
       if (url && request.resourceType() === "document") documentRequests.push(url.href);
+      // Ashby's submit on the network (fixtures/ashby-value-select.html): reCAPTCHA's token request, then the
+      // submit mutation, answered per the requesting page's ?network= scenario.
+      if (url && url.hostname === "www.recaptcha.net" && url.pathname === "/recaptcha/enterprise/reload") {
+        await route.fulfill({ status: 200, contentType: "text/plain", body: ")]}'\n[\"rresp\",\"fixture-rresp\"]" });
+        return;
+      }
+      if (url && url.hostname === "jobs.ashbyhq.com" && url.pathname === "/api/non-user-graphql") {
+        let pageUrl = "";
+        try { pageUrl = request.frame().url(); } catch { pageUrl = ""; }
+        if (!pageUrl) pageUrl = request.headers()["referer"] ?? "";
+        let scenario: string | null = null;
+        try { scenario = new URL(pageUrl).searchParams.get("network"); } catch { scenario = null; }
+        let answers: { name?: unknown; email?: unknown } = {};
+        try { answers = (JSON.parse(request.postData() ?? "{}") as { variables?: { answers?: typeof answers } }).variables?.answers ?? {}; } catch { answers = {}; }
+        const json = (status: number, payload: unknown) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify(payload) });
+        if (scenario === "accepted") {
+          await json(200, { data: { submitApplicationFormAction: { applicationFormResult: { __typename: "FormSubmitSuccess" }, messages: { blockMessageForCandidateHtml: null } } } });
+        } else if (scenario === "recaptcha") {
+          await json(200, { data: null, errors: [{ message: "fixture refusal", extensions: { ashbyErrorType: "RECAPTCHA_SCORE_BELOW_THRESHOLD", message: "Your application could not be verified." } }] });
+        } else if (scenario === "form-errors") {
+          // Ashby's FormRender echoes the form's values back; the record must never keep them.
+          await json(200, { data: { submitApplicationFormAction: {
+            applicationFormResult: {
+              __typename: "FormRender",
+              id: "fixture-render",
+              sections: [{ title: "Fixture section", fieldEntries: [] }],
+              fieldValues: { _systemfield_name: answers.name ?? null, _systemfield_email: answers.email ?? null },
+              errorMessages: ["Missing entry for required field: Visa Support"],
+              formErrors: [{ message: "Missing entry for required field: Visa Support", fieldEntryId: ASHBY_VISA_ENTRY }]
+            },
+            messages: { blockMessageForCandidateHtml: null }
+          } } });
+        } else if (scenario === "server-error") {
+          await json(500, { errors: [{ message: "Internal fixture error" }] });
+        } else {
+          await route.abort();
+        }
+        return;
+      }
       // iCIMS answers its Apply link with a redirect to the account step.
       if (url && request.resourceType() === "document" && url.hostname === "careers-fixture.icims.com" && url.searchParams.get("mode") === "apply") {
         await route.fulfill({ status: 302, headers: { location: "http://careers-fixture.icims.com/jobs/9001/intern/login?in_iframe=1" } });
@@ -637,6 +697,82 @@ async function main(): Promise<void> {
         if (failure === "spam") check(postSubmitEvidenceOf(outcome)?.challenge === "Ashby's spam check (reCAPTCHA Enterprise)", `Ashby ?failure=spam challenge: ${postSubmitEvidenceOf(outcome)?.challenge}`);
         const sent = await submits(tab);
         check(sent.submitClicks === 1 && !sent.submitted, `Ashby ?failure=${failure} clicked again: ${JSON.stringify(sent)}`);
+        await tab.close();
+      }
+    }
+
+    // Ashby's single- and multi-choice questions (fixtures/ashby-value-select.html, derived from Ashby's public bundle and
+    // checked against the First Resonance evidence): drawn without the field-entry wrapper, they take their required mark
+    // from the radio or checkbox group's `_required` title, and the short "Visa Support" title takes the question from
+    // its description. Then Ashby's submit on the network (Track 22): the server's answer is recorded (names, statuses,
+    // booleans, codes and messages; never a body) and judged: FormSubmitSuccess confirms, the reCAPTCHA rejection is held
+    // as challenged, FormRender field errors pause the named field, and a hang or a 5xx fails closed.
+    {
+      const VISA = "Visa Support: Do you require any visa support to work in the U.S.?";
+      const TEAM = "Preferred team";
+      const TOOLS = "Which of these tools have you used?";
+      const recognizeValueSelect = async (query: string) => {
+        const tab = await open(`${ASHBY_VALUE_SELECT}${query}`);
+        const page = createPlaywrightPage(tab);
+        return { tab, page, form: await recognizeCurrentForm(page) };
+      };
+      {
+        const { tab, form } = await recognizeValueSelect("");
+        const labels = form.fields.map((field) => field.label);
+        check(labels.join("|") === ["Name", "Email", VISA, TEAM, TOOLS].join("|"), `Ashby value-select labels: ${labels.join("|")}`);
+        const visa = form.fields.find((field) => field.label === VISA);
+        check(visa?.kind === "radio" && visa.required && visa.options?.join("|") === "Yes|No" && visa.id === ASHBY_VISA_ENTRY, `Ashby Visa Support: ${JSON.stringify(visa)}`);
+        const team = form.fields.find((field) => field.label === TEAM);
+        check(team?.kind === "radio" && !team.required, `Ashby optional single choice: ${JSON.stringify(team)}`);
+        const tools = form.fields.find((field) => field.label === TOOLS);
+        check(tools?.kind === "checkbox" && tools.required && tools.options?.join("|") === "ROS|Git|Docker", `Ashby required multi choice: ${JSON.stringify(tools)}`);
+        await tab.close();
+      }
+      const leaked = (network: AshbySubmitNetwork | null | undefined): string[] => {
+        const text = JSON.stringify(network ?? null);
+        return [PROFILE.fullName, PROFILE.email, "fixture-token", "UNIVERSAL_ENT", "fixture-fingerprint"].filter((secret) => text.includes(secret));
+      };
+      for (const scenario of ["accepted", "recaptcha", "form-errors", "hang", "server-error"] as const) {
+        const { tab, page, form } = await recognizeValueSelect(`?network=${scenario}`);
+        const id = (label: string) => form.fields.find((field) => field.label === label)?.id ?? `missing-${label}`;
+        const filled = await applyDecisions(page, form, [
+          { fieldId: id("Name"), action: "fill", value: PROFILE.fullName, basis: null, reason: "fixture", pause: null },
+          { fieldId: id("Email"), action: "fill", value: PROFILE.email, basis: null, reason: "fixture", pause: null },
+          { fieldId: id(VISA), action: "choose", value: "No", basis: null, reason: "fixture", pause: null }
+        ]);
+        check(filled.unfilled.length === 0, `Ashby ?network=${scenario} unfilled: ${JSON.stringify(filled.unfilled)}`);
+        const outcome = await submitAndConfirm(page, { timeoutMs: scenario === "hang" ? 2_000 : 3_000, pollMs: 100, atsKind: "ashby" })
+          .then((text) => text, (error: unknown) => error);
+        const evidence = postSubmitEvidenceOf(outcome);
+        const sent = await tab.evaluate(() => (window as unknown as { fixture: { submitClicks: number; radios: Record<string, string> } }).fixture);
+        check(sent.radios[ASHBY_VISA_ENTRY] === "No", `Ashby ?network=${scenario} Visa Support chosen: ${JSON.stringify(sent.radios)}`);
+        const described = outcome instanceof Error ? `${outcome.constructor.name}: ${outcome.message}` : String(outcome);
+        if (scenario === "accepted") {
+          check(outcome === ASHBY_ACCEPTED_CONFIRMATION, `Ashby ?network=accepted: ${described}`);
+          const network = await page.ashbySubmitNetwork!();
+          const submit = network?.submits[0];
+          check(network?.submits.length === 1 && submit?.operation === "ApiSubmitSingleApplicationFormAction" && submit.clicks === 1 && submit.status === 200
+            && submit.success && submit.recaptchaToken === "present", `Ashby ?network=accepted submit: ${JSON.stringify(network?.submits)}`);
+          check(network?.recaptchaTokenRequests === 1 && JSON.stringify(network.recaptchaTokenStatuses) === "[200]", `Ashby ?network=accepted token requests: ${JSON.stringify(network)}`);
+          check(leaked(network).length === 0, `Ashby ?network=accepted record kept: ${leaked(network).join(", ")}`);
+        } else if (scenario === "recaptcha") {
+          check(outcome instanceof SubmissionChallenged && evidence?.challenge === ASHBY_SPAM_CHECK_DETAIL, `Ashby ?network=recaptcha: ${described}`);
+          check(JSON.stringify(evidence?.ashbyNetwork?.submits[0]?.errorCodes) === JSON.stringify(["RECAPTCHA_SCORE_BELOW_THRESHOLD"]), `Ashby ?network=recaptcha codes: ${JSON.stringify(evidence?.ashbyNetwork)}`);
+          check(sent.submitClicks === 1, `Ashby ?network=recaptcha clicked again: ${sent.submitClicks}`);
+        } else if (scenario === "form-errors") {
+          check(outcome instanceof SubmissionNeedsInput, `Ashby ?network=form-errors: ${described}`);
+          const invalid = outcome instanceof SubmissionNeedsInput ? outcome.invalidFields : [];
+          check(invalid[0]?.ref === id(VISA) && invalid[0]?.error === "Missing entry for required field: Visa Support", `Ashby ?network=form-errors fields: ${JSON.stringify(invalid)}`);
+          const paused = invalidFieldPauses(form, [], [], invalid);
+          check(paused.pauses.length === 1 && paused.pauses[0]!.fieldId === id(VISA) && !paused.pauses[0]!.safeguard, `Ashby ?network=form-errors pauses: ${JSON.stringify(paused.pauses)}`);
+        } else if (scenario === "hang") {
+          check(outcome instanceof SubmissionUnconfirmed, `Ashby ?network=hang: ${described}`);
+          check(JSON.stringify(evidence?.ashbyNetwork?.submits) === "[]" && evidence?.ashbyNetwork?.recaptchaTokenRequests === 1, `Ashby ?network=hang record: ${JSON.stringify(evidence?.ashbyNetwork)}`);
+        } else {
+          check(outcome instanceof SubmissionUnconfirmed, `Ashby ?network=server-error: ${described}`);
+          check(evidence?.ashbyNetwork?.submits[0]?.status === 500 && evidence.ashbyNetwork.submits[0].success === false, `Ashby ?network=server-error record: ${JSON.stringify(evidence?.ashbyNetwork)}`);
+        }
+        if (scenario !== "accepted") check(leaked(evidence?.ashbyNetwork).length === 0, `Ashby ?network=${scenario} record kept: ${leaked(evidence?.ashbyNetwork).join(", ")}`);
         await tab.close();
       }
     }

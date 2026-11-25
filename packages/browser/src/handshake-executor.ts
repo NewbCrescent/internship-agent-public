@@ -5,6 +5,17 @@ import { promptSearchTerms, type AtsKind, type BrowserField, type FillDecision, 
 import { chooseApplyEntry, dismissCookieBanner, type ApplyEntryCandidate } from "./apply-entry";
 import { isDoverOrAshby } from "./ats/adapters";
 import {
+  ASHBY_ACCEPTED_CONFIRMATION,
+  ASHBY_BLOCKED_MESSAGE,
+  ashbyFormErrorsMessage,
+  ashbyNetworkInvalidFields,
+  ashbyNetworkVerdict,
+  ashbySubmitSentAfter,
+  createAshbyNetworkRecorder,
+  type AshbyNetworkRecorder,
+  type AshbySubmitNetwork
+} from "./ats/ashby-network";
+import {
   ASHBY_BUSY_DETAIL,
   ASHBY_RECLICK_SETTLE_MS,
   ASHBY_SAVE_SETTLE_MS,
@@ -98,6 +109,17 @@ export type BrowserPage = {
    * (and is still shown), and its failure container's text.
    */
   ashbySubmitState?(): Promise<AshbySubmitState>;
+  /**
+   * Ashby only (ats/ashby-network.ts): starts recording Ashby's GraphQL calls
+   * and reCAPTCHA token requests: operation names, HTTP statuses, booleans,
+   * error codes and messages; never a request or response body.
+   */
+  watchAshbyNetwork?(): Promise<void>;
+  /**
+   * What the Ashby watch recorded, waiting at most waitMs (default 2,000) for
+   * answers still being read; null when no watch was started.
+   */
+  ashbySubmitNetwork?(waitMs?: number): Promise<AshbySubmitNetwork | null>;
   /**
    * Follows the posting's Apply entry once (chooseApplyEntry) and returns the
    * URL it reached, or null when the page has none.
@@ -266,7 +288,12 @@ export async function applyDecisions(
  *   "We're updating your application" notice, which means that click sent
  *   nothing, has gone. Ashby's spam-check failure is held as challenged and
  *   any other failure container as refused (never clicked again); a closed
- *   dialog never counts as a confirmation there.
+ *   dialog never counts as a confirmation there. Ashby's network record
+ *   (ats/ashby-network.ts) is watched from before the first click: its
+ *   server's FormSubmitSuccess confirms, a FormRender naming fields pauses
+ *   them (approval withdrawn), a `RECAPTCHA_SCORE_BELOW_THRESHOLD` error is
+ *   held as challenged, and the block message is refused; once a submit
+ *   request went out after a click, the agent never clicks again.
  *
  * Every error after the click carries the page's evidence; the agent writes it
  * to the run's local folder.
@@ -276,6 +303,8 @@ export async function submitAndConfirm(
   options: { timeoutMs?: number; pollMs?: number; securityCode?: SecurityCodeLookup | null; atsKind?: AtsKind | null } = {}
 ): Promise<string> {
   const ashby = isAshbyApplication(page.url(), options.atsKind);
+  // Ashby's submit is judged by its server's answer too: record its GraphQL calls from before the first click.
+  if (ashby && page.watchAshbyNetwork) await page.watchAshbyNetwork().catch(() => undefined);
   // Ashby refuses a submit click while an answer is still saving: let its saves finish first.
   if (ashby && page.settleAshbySaves) await page.settleAshbySaves(ASHBY_SAVE_SETTLE_MS);
   const before = await page.bodyText();
@@ -317,6 +346,28 @@ export async function submitAndConfirm(
           scrubbed(await capturePostSubmitEvidence(page, "challenged", { bodyText: body, challenge: challenge.detail }))
         );
       }
+      // Ashby's server answer to the submit (ats/ashby-network.ts), read before its page feedback.
+      let network: AshbySubmitNetwork | null = null;
+      if (ashby && page.ashbySubmitNetwork) {
+        network = await page.ashbySubmitNetwork(0).catch(() => null);
+        const verdict = ashbyNetworkVerdict(network);
+        if (verdict === "recaptcha-rejected") {
+          // Ashby's reCAPTCHA Enterprise spam check refused the submit: never worked around, held for the candidate.
+          throw new SubmissionChallenged(ASHBY_SPAM_CHECK_MESSAGE, scrubbed(await capturePostSubmitEvidence(page, "challenged", { bodyText: body, challenge: ASHBY_SPAM_CHECK_DETAIL })));
+        }
+        if (verdict === "accepted") {
+          const success = page.successText ? (await page.successText().catch(() => "")).trim() : "";
+          return scrubSecret(success || ASHBY_ACCEPTED_CONFIRMATION, secret).slice(0, 2_000);
+        }
+        if (verdict === "blocked") {
+          throw new SubmissionRefused(ASHBY_BLOCKED_MESSAGE, scrubbed(await capturePostSubmitEvidence(page, "refused", { bodyText: body })));
+        }
+        if (verdict === "form-errors") {
+          const invalid = ashbyNetworkInvalidFields(network);
+          const evidence = scrubbed(await capturePostSubmitEvidence(page, "field-errors", { bodyText: body, invalidFields: invalid }));
+          throw new SubmissionNeedsInput(ashbyFormErrorsMessage(invalid.length), evidence, evidence.invalidFields);
+        }
+      }
       // Ashby's own submit feedback: its spam check or an error refuses the submission; a click made while an
       // answer was still saving sent nothing, so it is made again once Ashby has finished saving.
       if (ashby && page.ashbySubmitState) {
@@ -334,7 +385,8 @@ export async function submitAndConfirm(
             scrubbed(await capturePostSubmitEvidence(page, "refused", { bodyText: body, alertText: state.failureText }))
           );
         }
-        if (step === "click-again") {
+        // Never a second submit: once a submit request went out after the latest click, keep waiting instead.
+        if (step === "click-again" && !ashbySubmitSentAfter(network, clicks)) {
           await page.settleAshbySaves?.(ASHBY_RECLICK_SETTLE_MS);
           try {
             await page.clickSubmit();
@@ -479,6 +531,8 @@ export function createPlaywrightPage(page: Page): BrowserPage {
   let scope: Locator | null = null;
   const root = () => scope ?? page.locator("body");
   const within = () => scope ?? page;
+  // Ashby's network record, once watchAshbyNetwork started it (ats/ashby-network.ts).
+  let ashbyNetwork: AshbyNetworkRecorder | null = null;
   // The field's own element by id, so two fields with one label ("Attach")
   // never hit the same control; the label is the fallback.
   const locateField = async (field: BrowserField): Promise<Locator> => {
@@ -612,7 +666,13 @@ export function createPlaywrightPage(page: Page): BrowserPage {
       await ensureNameShim(page);
       const index = await root().evaluate(findSubmitIndex);
       if (index < 0) throw new Error("No submit control was found.");
-      await root().locator(SUBMIT_SELECTOR).nth(index).click();
+      ashbyNetwork?.noteClick();
+      try {
+        await root().locator(SUBMIT_SELECTOR).nth(index).click();
+      } catch (error) {
+        ashbyNetwork?.cancelClick();
+        throw error;
+      }
     },
     screenshot: async (path, options) => {
       await page.screenshot({ path, fullPage: options?.fullPage ?? false });
@@ -709,6 +769,33 @@ export function createPlaywrightPage(page: Page): BrowserPage {
         return EMPTY_ASHBY_SUBMIT_STATE;
       }
     },
+    watchAshbyNetwork: async () => {
+      if (ashbyNetwork) return;
+      const recorder = createAshbyNetworkRecorder();
+      ashbyNetwork = recorder;
+      page.on("request", (request) => {
+        try {
+          recorder.request(request, request.url(), () => request.postData());
+        } catch {
+          // The record never breaks the page.
+        }
+      });
+      page.on("response", (response) => {
+        try {
+          recorder.response(response.request(), response.status(), () => response.text());
+        } catch {
+          // The record never breaks the page.
+        }
+      });
+      page.on("requestfailed", (request) => {
+        try {
+          recorder.failed(request);
+        } catch {
+          // The record never breaks the page.
+        }
+      });
+    },
+    ashbySubmitNetwork: async (waitMs) => (ashbyNetwork ? ashbyNetwork.snapshot(waitMs) : null),
     followApplyEntry: async () => {
       // The whole page, not a dialog scope: the main frame plus same-host frames
       // (iCIMS draws the job inside a same-host iframe). One entry, at most.
@@ -1244,7 +1331,11 @@ export function attachedNamesFromText(text: string): string[] {
  * input, a resume-autofill drop zone's input (a `role="button"` box whose text
  * says "autofill", as Dover's), and the CAPTCHA token field are not controls. Ashby's Yes/No button
  * pairs are read as one radio question, its `_required` question-title class
- * marks a question required, and a fieldset's question-title label (not one
+ * marks a question required (single- and multi-choice questions, which Ashby
+ * draws without the field-entry wrapper, take it from the radio or checkbox
+ * group's title), a short Ashby title with no "?" takes the question from
+ * Ashby's description ("Visa Support: Do you require any visa support…?"),
+ * and a fieldset's question-title label (not one
  * for its radios) labels the radio group. Ashby's text-message consent radios
  * (in `.ashby-application-form-texting-consent-description`, inside the phone
  * field's entry) take the consent text as their question (a channel heading in
@@ -1424,10 +1515,27 @@ export function collectControlsIn(root: Element): RawControl[] {
     }
     return own;
   };
-  /** Ashby marks a required question with a `_required` class on its question title. */
+  /**
+   * Ashby's question entry. Ashby draws single- and multi-choice questions (ValueSelect,
+   * MultiValueSelect) without the field-entry wrapper: the radio or checkbox group fieldset holds
+   * the title, inside a bare `[data-field-entry-id]` div.
+   */
+  const ASHBY_ENTRY = ".ashby-application-form-field-entry, [data-field-entry-id], .ashby-application-form-input-radio-group, .ashby-application-form-input-checkbox-group";
+  /** Ashby marks a required question with a `_required` class on its question title (in its field entry or choice group). */
   const ashbyRequired = (element: Element): boolean => {
-    const title = element.closest(".ashby-application-form-field-entry")?.querySelector(".ashby-application-form-question-title");
+    const title = element.closest(ASHBY_ENTRY)?.querySelector(".ashby-application-form-question-title");
     return Boolean(title && Array.from(title.classList).some((name) => /^_required(?:_|$)/.test(name)));
+  };
+  /**
+   * Ashby's short titles ("Visa Support") put the question in the description: a label with no "?"
+   * of at most 60 characters takes its entry's description of at most 240 characters that ends in
+   * "?" (a trailing ":" is dropped).
+   */
+  const ashbyDescribed = (element: Element, label: string): string => {
+    if (!label || label.includes("?") || label.length > 60) return label;
+    const description = textOf(element.closest(ASHBY_ENTRY)?.querySelector(".ashby-application-form-question-description") ?? null).replace(/:\s*$/, "").trim();
+    if (!description || description.length > 240 || !description.endsWith("?")) return label;
+    return `${label}: ${description}`;
   };
   /** Ashby's text-message consent block, drawn inside the phone field's entry: its radios are not the phone question. */
   const TEXTING_CONSENT = ".ashby-application-form-texting-consent-description";
@@ -1571,7 +1679,7 @@ export function collectControlsIn(root: Element): RawControl[] {
         type: "radio",
         id: input.name,
         name: input.name,
-        label: unstar(rawLabel) || undefined,
+        label: (consentBlock ? unstar(rawLabel) : ashbyDescribed(input, unstar(rawLabel))) || undefined,
         required: radios.some((radio) => radio.required) || group?.getAttribute("aria-required") === "true" || (!consentBlock && ashbyRequired(input)) || MARKER.test(rawLabel),
         options: options.filter(Boolean),
         value: checked ? optionLabel(checked) || undefined : undefined
@@ -1590,7 +1698,7 @@ export function collectControlsIn(root: Element): RawControl[] {
           type: "radio",
           id: input.id || undefined,
           name: input.name || undefined,
-          label: unstar(ownLabel ?? "") || undefined,
+          label: ashbyDescribed(input, unstar(ownLabel ?? "")) || undefined,
           required: requiredOf(input, ownLabel),
           options: choices.map((choice) => choice.text),
           value: pressed?.text
@@ -1613,7 +1721,8 @@ export function collectControlsIn(root: Element): RawControl[] {
           widget: "checkbox-group",
           id: group.id || boxes[0]!.name || `checkbox-group-${groupsDone.size}`,
           label: unstar(rawLabel) || undefined,
-          required: group.getAttribute("aria-required") === "true" || boxes.some((box) => box.required) || MARKER.test(rawLabel),
+          required: group.getAttribute("aria-required") === "true" || boxes.some((box) => box.required) || MARKER.test(rawLabel)
+            || (!group.closest(TEXTING_CONSENT) && ashbyRequired(group)),
           options: boxes.map(optionLabel).filter(Boolean),
           value: checked.length ? checked.join(", ") : undefined
         });

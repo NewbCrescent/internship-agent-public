@@ -1,6 +1,7 @@
 import {
   ASHBY_BUSY_DETAIL,
   ASHBY_BUSY_NOTICE,
+  ASHBY_RECAPTCHA_REJECTED,
   isAshbyApplicationUrl,
   isAshbySpamCheck,
   readConfirmationFromText
@@ -26,6 +27,13 @@ import type { StoredSubmitEvidence } from "./submit-evidence";
  * confirmation, failure, correction, invalid field, or other challenge, and
  * still show the submit control. Anything else is refused with the signal
  * that is missing.
+ *
+ * An Ashby capture with a network record (Track 22) is refused when the record
+ * shows Ashby's reCAPTCHA rejection (a bot check is never retried), Ashby's
+ * server accepting the submission, its application-limit block message, or
+ * any submit request whose answer does not show that Ashby refused it; a
+ * record with no submit request, or only submits Ashby answered with field
+ * errors, goes on to the checks above.
  */
 
 /** The challenge detail challenge.ts and handshake-executor.ts record for a shown Turnstile frame (greenhouse-fixture-run.ts asserts it). */
@@ -41,7 +49,8 @@ export const NEVER_TAKEN_TEXT: Record<NeverTakenKind, string> = {
 
 export type CaptureVerdict = { kind: NeverTakenKind; text: string } | { refusal: string };
 
-type Capture = Pick<StoredSubmitEvidence, "outcome" | "url" | "invalidFields" | "alertText" | "challenge" | "text" | "detail">;
+type Capture = Pick<StoredSubmitEvidence, "outcome" | "url" | "invalidFields" | "alertText" | "challenge" | "text" | "detail">
+  & Partial<Pick<StoredSubmitEvidence, "ashbyNetwork">>;
 
 const DOVER_APPLY_PATH = /^\/apply\/job\/([0-9a-f-]{36})$/i;
 const DOVER_JOB_PATH = /^\/job\/([0-9a-f-]{36})$/i;
@@ -100,6 +109,22 @@ function clip(text: string, max: number): string {
 export function judgeSubmitCapture(run: Pick<BrowserRun, "applicationUrl">, capture: Capture): CaptureVerdict {
   const site = captureSite(run.applicationUrl, capture.url);
   if (site === null) return { refusal: "is read as never taken only on an Ashby or Dover application page" };
+
+  // Ashby's network record (Track 22): what its server answered outranks what the page showed.
+  const network = capture.ashbyNetwork ?? null;
+  if (network !== null) {
+    const submits = network.submits;
+    if (submits.some((submit) => submit.errorCodes.includes(ASHBY_RECAPTCHA_REJECTED))) {
+      return { refusal: "records Ashby's reCAPTCHA (spam check) rejection of the submit; the agent never retries a bot check" };
+    }
+    if (submits.some((submit) => submit.success)) return { refusal: "records Ashby's server accepting the submission" };
+    if (submits.some((submit) => submit.blockMessage)) return { refusal: "records Ashby's application-limit block message" };
+    const refusedWithErrors = (submit: (typeof submits)[number]) =>
+      submit.resultType === "FormRender" && (submit.fieldErrors.length > 0 || submit.formErrorMessages.length > 0);
+    if (submits.some((submit) => !refusedWithErrors(submit))) {
+      return { refusal: "records a submit request whose answer does not show that Ashby refused it" };
+    }
+  }
 
   let kind: NeverTakenKind | "intact-form";
   if (capture.outcome === "unknown" && capture.detail === ASHBY_BUSY_DETAIL) {

@@ -19,6 +19,7 @@ import {
   capturePostSubmitEvidence,
   captureWorkdayEvidence,
   submitEvidenceRoot,
+  type AshbySubmitNetwork,
   type BrowserPage,
   type PostSubmitEvidence,
   type WorkdayPage,
@@ -42,6 +43,11 @@ import { redactNoticeText } from "./pass-notice";
  * iCIMS stops are saved for the job too: `icims-account` when the account
  * step held the host and `icims-application` when the agent reached iCIMS's
  * application and stopped there (folder `<time>-<outcome>`, no run id).
+ *
+ * An Ashby submit also keeps its network record (`ashbyNetwork`, Track 22):
+ * Ashby's GraphQL operation names and HTTP statuses, the submit's token kind,
+ * result type, success, Ashby's error codes and (redacted) messages, and the
+ * reCAPTCHA token requests; never a request or response body.
  */
 
 export const SUBMIT_EVIDENCE_EVENT = "Post-submit evidence saved";
@@ -62,6 +68,36 @@ export function redactEvidenceText(text: string, max = MAX_TEXT): string {
     .slice(0, max);
 }
 
+const OPERATION_NAME = /^[A-Za-z][A-Za-z0-9_]{0,79}$/;
+const ERROR_CODE = /^[A-Z][A-Z0-9_]{0,79}$/;
+const RESULT_TYPE = /^[A-Za-z]{1,80}$/;
+const FIELD_ENTRY_ID = /^[A-Za-z0-9_-]{1,200}$/;
+
+const networkCall = {
+  operation: z.string().regex(OPERATION_NAME),
+  status: z.number().int().min(0).max(999).nullable(),
+  failed: z.boolean(),
+  clicks: z.number().int().min(0).max(20)
+};
+
+/** Ashby's submit on the network, as stored (ats/ashby-network.ts): names, statuses, booleans, codes, and redacted messages. */
+export const ashbyNetworkFileSchema = z.object({
+  calls: z.array(z.object(networkCall)).max(40),
+  submits: z.array(z.object({
+    ...networkCall,
+    recaptchaToken: z.enum(["present", "dummy", "missing", "unknown"]),
+    resultType: z.string().max(80).nullable(),
+    success: z.boolean(),
+    errorCodes: z.array(z.string().max(80)).max(10),
+    errorMessages: z.array(z.string().max(200)).max(10),
+    formErrorMessages: z.array(z.string().max(200)).max(10),
+    fieldErrors: z.array(z.object({ fieldEntryId: z.string().max(200).nullable(), message: z.string().max(200) })).max(10),
+    blockMessage: z.boolean()
+  })).max(5),
+  recaptchaTokenRequests: z.number().int().min(0),
+  recaptchaTokenStatuses: z.array(z.number().int().min(0).max(999).nullable()).max(5)
+});
+
 export const submitEvidenceFileSchema = z.object({
   version: z.literal(1),
   /** Null for a Workday account-step stop: no run was saved yet. */
@@ -80,10 +116,75 @@ export const submitEvidenceFileSchema = z.object({
   text: z.string().max(MAX_TEXT),
   screenshot: z.string().nullable(),
   /** What the agent says happened (a Workday hold reason); null on older files. */
-  detail: z.string().max(500).nullable().default(null)
+  detail: z.string().max(500).nullable().default(null),
+  /** Ashby only: what the submit sent and got back (Track 22); null on other sites and older files. */
+  ashbyNetwork: ashbyNetworkFileSchema.nullable().default(null)
 });
 
 export type StoredSubmitEvidence = z.infer<typeof submitEvidenceFileSchema>;
+type StoredAshbyNetwork = z.infer<typeof ashbyNetworkFileSchema>;
+
+const httpStatus = (status: number | null): number | null =>
+  status !== null && Number.isInteger(status) && status >= 0 && status <= 999 ? status : null;
+
+/**
+ * The network record as stored: every list cut to its bound, operation names
+ * and error codes kept only in their expected shape, and every message
+ * redacted like the pipeline's notices.
+ */
+function storedAshbyNetwork(network: AshbySubmitNetwork, scrub: (text: string) => string): StoredAshbyNetwork {
+  const message = (text: string) => clip(redactNoticeText(scrub(text)), 200);
+  const call = (entry: AshbySubmitNetwork["calls"][number]) => ({
+    operation: entry.operation,
+    status: httpStatus(entry.status),
+    failed: entry.failed,
+    clicks: Math.min(20, Math.max(0, Math.trunc(entry.clicks)))
+  });
+  return {
+    calls: network.calls.filter((entry) => OPERATION_NAME.test(entry.operation)).slice(0, 40).map(call),
+    submits: network.submits.filter((entry) => OPERATION_NAME.test(entry.operation)).slice(0, 5).map((entry) => ({
+      ...call(entry),
+      recaptchaToken: entry.recaptchaToken,
+      resultType: entry.resultType !== null && RESULT_TYPE.test(entry.resultType) ? entry.resultType : null,
+      success: entry.success,
+      errorCodes: entry.errorCodes.filter((code) => ERROR_CODE.test(code)).slice(0, 10),
+      errorMessages: entry.errorMessages.slice(0, 10).map(message),
+      formErrorMessages: entry.formErrorMessages.slice(0, 10).map(message),
+      fieldErrors: entry.fieldErrors.slice(0, 10).map((error) => ({
+        fieldEntryId: error.fieldEntryId !== null && FIELD_ENTRY_ID.test(error.fieldEntryId) ? error.fieldEntryId : null,
+        message: message(error.message)
+      })),
+      blockMessage: entry.blockMessage
+    })),
+    recaptchaTokenRequests: Math.max(0, Math.trunc(network.recaptchaTokenRequests)),
+    recaptchaTokenStatuses: network.recaptchaTokenStatuses.slice(0, 5).map(httpStatus)
+  };
+}
+
+/** The lines `pnpm run:evidence` prints for an Ashby network record. */
+export function describeAshbyNetwork(network: StoredSubmitEvidence["ashbyNetwork"]): string[] {
+  if (network === null) return [];
+  const statuses = network.recaptchaTokenStatuses;
+  const lines = [
+    `Ashby network: ${network.calls.length} GraphQL call(s) recorded; reCAPTCHA token requests: ${network.recaptchaTokenRequests}${statuses.length ? ` (HTTP ${statuses.map((status) => status ?? "no answer").join(", ")})` : ""}`
+  ];
+  if (network.submits.length === 0) {
+    lines.push("  - no submit request was sent");
+    return lines;
+  }
+  for (const submit of network.submits) {
+    const answer = submit.status === null ? (submit.failed ? "request failed" : "no answer") : `HTTP ${submit.status}`;
+    const codes = submit.errorCodes.join(", ");
+    lines.push(
+      `  - ${submit.operation} after click ${submit.clicks}: ${answer}; token ${submit.recaptchaToken}; result ${submit.resultType ?? "none"}${submit.success ? " (accepted)" : ""}; error codes: ${codes || "none"}`
+      + `${submit.errorMessages.length ? `; errors: ${submit.errorMessages.join(" | ")}` : ""}`
+      + `${submit.formErrorMessages.length ? `; form errors: ${submit.formErrorMessages.join(" | ")}` : ""}`
+      + `${submit.fieldErrors.length ? `; field errors: ${submit.fieldErrors.length}` : ""}`
+      + `${submit.blockMessage ? "; block message shown" : ""}`
+    );
+  }
+  return lines;
+}
 
 function clip(value: string, max: number): string {
   return value.length <= max ? value : value.slice(0, max - 1).trimEnd() + "…";
@@ -176,7 +277,8 @@ export async function savePostSubmitEvidence(input: SaveSubmitEvidenceInput): Pr
     challenge: evidence.challenge === null ? null : clip(evidence.challenge, 300),
     text: redactEvidenceText(scrub(evidence.bodyText)),
     screenshot: screenshotSaved ? "screenshot.png" : null,
-    detail: typeof evidence.detail === "string" ? clip(redactNoticeText(scrub(evidence.detail)), 500) : null
+    detail: typeof evidence.detail === "string" ? clip(redactNoticeText(scrub(evidence.detail)), 500) : null,
+    ashbyNetwork: evidence.ashbyNetwork ? storedAshbyNetwork(evidence.ashbyNetwork, scrub) : null
   } satisfies StoredSubmitEvidence);
   writePrivateAtomic(join(dir, "evidence.json"), JSON.stringify(stored, null, 2) + "\n");
 
@@ -456,6 +558,7 @@ export async function runEvidenceCommand(argv: string[], deps: Partial<RunEviden
       }
       if (entry.alertText) io.log(`Site error text: ${entry.alertText}`);
       if (entry.challenge !== null) io.log(`Challenge: ${entry.challenge}`);
+      if (entry.ashbyNetwork !== null) for (const line of describeAshbyNetwork(entry.ashbyNetwork)) io.log(line);
       io.log(entry.screenshot ? `Screenshot: ${join(entry.dir, entry.screenshot)}` : "Screenshot: not saved");
       io.log("Visible text (redacted):");
       io.log(entry.text);
