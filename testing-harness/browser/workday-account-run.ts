@@ -27,8 +27,15 @@
  * after its form appears (the candidate's choice, 2026-11-24): under the
  * fixture's dwell mode, which drops a submit clicked under 500 ms after its
  * button mounts as Workday's sign-in widget does, the account is created and
- * the sign-in drawn right after it signs in (dwell). Never reads process.env
- * for accounts or Gmail.
+ * the sign-in drawn right after it signs in (dwell). Workday's generic sign-in
+ * failure ("…or your account might be locked") is a refused sign-in, not a
+ * lockout: with a pending saved password the agent submits the create form
+ * once with it and never signs in twice in a call (signed in; created or
+ * verified, then held for a later pass; "already exists" held), a saved
+ * created account is held as a refused password, and a real lockout message
+ * still holds as locked (pending-generic, pending-locked, created-generic,
+ * pending-generic-exists, pending-generic-later, pending-generic-verify).
+ * Never reads process.env for accounts or Gmail.
  *
  * Usage: pnpm test:browser:workday-account
  */
@@ -41,6 +48,7 @@ import { chromium, type Page } from "playwright-core";
 import {
   ensureWorkdayAccount,
   getWorkdayAccount,
+  putWorkdayAccount,
   readWorkdayAccounts,
   WorkdayAccountHeld,
   workdayAccountWait,
@@ -54,6 +62,8 @@ import { createDatabase, getBrowserSession, seedDevelopmentData } from "@interns
 const PREFIX = "internship-agent-workday-account-";
 const EMAIL = "jordan@example.test";
 const COMPANY = "Fixture Aerospace";
+/** The password an earlier run saved for a seeded entry (meets the fixture's create rule). */
+const SEEDED_PASSWORD = "Pending-Pass-1234!";
 const PASSWORD_RULE = /^(?=.*[A-HJ-NP-Z])(?=.*[a-km-z])(?=.*[2-9])(?=.*[!@#$%^&*])[A-HJ-NP-Za-km-z2-9!@#$%^&*]{16}$/;
 
 type FixtureAccount = { honeypotTyped: boolean; termsChecked: boolean; creates: number; signIns: number; emailMethodClicks: number; headerClicks: number; ignoredSubmits: number; submitDelays: number[] };
@@ -180,6 +190,11 @@ async function main(): Promise<void> {
     const held = (name: string, outcome: { error: Error | null; result: string | null }, text: string) => {
       if (!(outcome.error instanceof WorkdayAccountHeld)) failures.push(`${name}: expected a hold, got ${outcome.result ?? outcome.error?.message}`);
       else if (!outcome.error.message.includes(text)) failures.push(`${name}: the hold does not mention "${text}"`);
+    };
+    // An entry an earlier run left: a saved password, account "pending" (create never confirmed) or "created".
+    const seedAccount = (host: string, account: "pending" | "created") => {
+      const stamp = new Date(Date.now() - 3_600_000).toISOString();
+      putWorkdayAccount(file, { host, email: EMAIL, password: SEEDED_PASSWORD, account, hold: null, createdAt: stamp, updatedAt: stamp });
     };
 
     // Create: password saved first, terms logged, honeypot untouched, signed in.
@@ -563,6 +578,110 @@ async function main(): Promise<void> {
     held("sms", sms, "text-message");
     if (getWorkdayAccount(file, smsHost)?.hold?.kind !== "unexpected") failures.push("sms: the hold is not unexpected");
 
+    // Workday's generic sign-in failure (11 tenants, 2026-11-25) with a pending saved password: a refused
+    // sign-in, not a lockout. The agent submits the create form once with the saved password and signs in.
+    const pendingGenericHost = "fixture-pending-generic.wd1.myworkdayjobs.com";
+    seedAccount(pendingGenericHost, "pending");
+    const pendingGeneric = await scenario("pending-generic", pendingGenericHost, "create&signin-error=generic");
+    if (pendingGeneric.result !== "created") failures.push(`pending-generic: expected "created", got ${pendingGeneric.result ?? pendingGeneric.error?.message}`);
+    const pendingGenericState = await fixtureState(pendingGeneric.tab);
+    if (pendingGenericState.signIns !== 1 || pendingGenericState.creates !== 1) {
+      failures.push(`pending-generic: ${pendingGenericState.signIns} sign-ins and ${pendingGenericState.creates} creates`);
+    }
+    if (accountSubmits.get(pendingGenericHost)?.join(",") !== "Sign In,Create Account") failures.push(`pending-generic: account submits ${accountSubmits.get(pendingGenericHost)?.join(",")}`);
+    if (savedBeforeSubmit.get(pendingGenericHost) !== true) failures.push("pending-generic: the password was not saved before the create submit");
+    const pendingGenericEntry = getWorkdayAccount(file, pendingGenericHost);
+    if (pendingGenericEntry?.account !== "created" || pendingGenericEntry.hold !== null || pendingGenericEntry.password !== SEEDED_PASSWORD) {
+      failures.push(`pending-generic: entry is ${pendingGenericEntry?.account} with hold ${pendingGenericEntry?.hold?.kind}`);
+    }
+    if ((await storedAccount(pendingGeneric.tab))?.password !== SEEDED_PASSWORD) failures.push("pending-generic: Workday holds a different password than the saved one");
+    if (getBrowserSession(database, `workday:${pendingGenericHost}/External`)?.status !== "connected") failures.push("pending-generic: the session is not connected");
+    if (!events().includes(`Workday ${pendingGenericHost}: Workday did not accept the saved password for the account an earlier run started to create, so the agent submits the create-account form once with it.`)) {
+      failures.push("pending-generic: no create-after-refused-sign-in event");
+    }
+    if (!events().includes(`Workday ${pendingGenericHost}: account created with your email; the password is saved locally.`)) failures.push("pending-generic: no account-created event");
+    if (pendingGenericState.honeypotTyped) failures.push("pending-generic: the robot honeypot was typed in");
+    await opensFlow("pending-generic", pendingGeneric.page);
+
+    // A real lockout message is still a lockout: held as locked, never retried, and no create.
+    const pendingLockedHost = "fixture-pending-locked.wd1.myworkdayjobs.com";
+    seedAccount(pendingLockedHost, "pending");
+    const pendingLocked = await scenario("pending-locked", pendingLockedHost, "create&signin-error=locked");
+    held("pending-locked", pendingLocked, "locked or disabled");
+    const pendingLockedEntry = getWorkdayAccount(file, pendingLockedHost);
+    if (pendingLockedEntry?.hold?.kind !== "locked" || pendingLockedEntry.account !== "pending") {
+      failures.push(`pending-locked: entry is ${pendingLockedEntry?.account} with hold ${pendingLockedEntry?.hold?.kind}`);
+    }
+    const pendingLockedState = await fixtureState(pendingLocked.tab);
+    if (pendingLockedState.signIns !== 1 || pendingLockedState.creates !== 0) {
+      failures.push(`pending-locked: ${pendingLockedState.signIns} sign-ins and ${pendingLockedState.creates} creates`);
+    }
+    if (workdayAccountWait(gate, pendingLockedHost, EMAIL) === null) failures.push("pending-locked: the gate does not hold");
+    if (workdayAccountWait(gate, pendingLockedHost, EMAIL, new Date(Date.now() + 25 * 3_600_000)) === null) failures.push("pending-locked: the gate opens after 25 hours");
+
+    // The generic message for an account the agent saved as created: a refused password, not a lockout.
+    const createdGenericHost = "fixture-created-generic.wd1.myworkdayjobs.com";
+    seedAccount(createdGenericHost, "created");
+    const createdGeneric = await scenario("created-generic", createdGenericHost, "create&signin-error=generic");
+    held("created-generic", createdGeneric, "refused the saved password");
+    if (getWorkdayAccount(file, createdGenericHost)?.hold?.kind !== "wrong-password") failures.push("created-generic: the hold is not wrong-password");
+    const createdGenericState = await fixtureState(createdGeneric.tab);
+    if (createdGenericState.signIns !== 1 || createdGenericState.creates !== 0) {
+      failures.push(`created-generic: ${createdGenericState.signIns} sign-ins and ${createdGenericState.creates} creates`);
+    }
+
+    // The generic message, then "already exists" on the one create: held, account refused, never reset.
+    const pendingExistsHost = "fixture-pending-generic-exists.wd1.myworkdayjobs.com";
+    seedAccount(pendingExistsHost, "pending");
+    const pendingExists = await scenario("pending-generic-exists", pendingExistsHost, "exists&signin-error=generic");
+    held("pending-generic-exists", pendingExists, "already exists");
+    const pendingExistsEntry = getWorkdayAccount(file, pendingExistsHost);
+    if (pendingExistsEntry?.hold?.kind !== "exists" || pendingExistsEntry.account !== "refused") {
+      failures.push(`pending-generic-exists: entry is ${pendingExistsEntry?.account} with hold ${pendingExistsEntry?.hold?.kind}`);
+    }
+    const pendingExistsState = await fixtureState(pendingExists.tab);
+    if (pendingExistsState.signIns !== 1 || pendingExistsState.creates !== 1) {
+      failures.push(`pending-generic-exists: ${pendingExistsState.signIns} sign-ins and ${pendingExistsState.creates} creates`);
+    }
+
+    // The generic message, then a create that shows the sign-in form: no second sign-in in this call;
+    // the account is saved as created and the host waits an hour for a later pass.
+    const pendingLaterHost = "fixture-pending-generic-later.wd1.myworkdayjobs.com";
+    seedAccount(pendingLaterHost, "pending");
+    const pendingLater = await scenario("pending-generic-later", pendingLaterHost, "signin-after&signin-error=generic");
+    held("pending-generic-later", pendingLater, "signs in on a later pass");
+    const pendingLaterEntry = getWorkdayAccount(file, pendingLaterHost);
+    if (pendingLaterEntry?.account !== "created" || pendingLaterEntry.hold?.kind !== "verify-email" || pendingLaterEntry.hold.attempts !== 1) {
+      failures.push(`pending-generic-later: entry is ${pendingLaterEntry?.account} with hold ${pendingLaterEntry?.hold?.kind}`);
+    }
+    const pendingLaterState = await fixtureState(pendingLater.tab);
+    if (pendingLaterState.signIns !== 1 || pendingLaterState.creates !== 1) {
+      failures.push(`pending-generic-later: ${pendingLaterState.signIns} sign-ins and ${pendingLaterState.creates} creates`);
+    }
+    if (workdayAccountWait(gate, pendingLaterHost, EMAIL) === null) failures.push("pending-generic-later: the gate does not hold now");
+    if (workdayAccountWait(gate, pendingLaterHost, EMAIL, new Date(Date.now() + 61 * 60_000)) !== null) failures.push("pending-generic-later: the gate still holds after an hour");
+
+    // The generic message, then a create that asks to verify the email: the link is opened, and the
+    // agent does not sign in again in this call.
+    const pendingVerifyHost = "fixture-pending-generic-verify.wd1.myworkdayjobs.com";
+    seedAccount(pendingVerifyHost, "pending");
+    let pendingVerifyTab: Page | null = null;
+    mail = linkFor(pendingVerifyHost, () => pendingVerifyTab);
+    const pendingVerify = await scenario("pending-generic-verify", pendingVerifyHost, "verify&signin-error=generic", undefined, (tab) => { pendingVerifyTab = tab; });
+    held("pending-generic-verify", pendingVerify, "signs in on a later pass");
+    const pendingVerifyEntry = getWorkdayAccount(file, pendingVerifyHost);
+    if (pendingVerifyEntry?.account !== "created" || pendingVerifyEntry.hold?.kind !== "verify-email") {
+      failures.push(`pending-generic-verify: entry is ${pendingVerifyEntry?.account} with hold ${pendingVerifyEntry?.hold?.kind}`);
+    }
+    if (!events().includes(`Workday ${pendingVerifyHost}: verification email found and opened.`)) failures.push("pending-generic-verify: no verification event");
+    if (!(await storedAccount(pendingVerify.tab))?.verified) failures.push("pending-generic-verify: the fixture account was not verified");
+    // The flow reloads the tab after opening the link (resetting the fixture's counters), so the submits are
+    // counted across pages: one sign-in, one create, and no sign-in after the verification.
+    if (accountSubmits.get(pendingVerifyHost)?.join(",") !== "Sign In,Create Account") {
+      failures.push(`pending-generic-verify: account submits ${accountSubmits.get(pendingVerifyHost)?.join(",")}`);
+    }
+    mail = async () => [];
+
     // No password anywhere it must not be.
     const passwords = Object.values(readWorkdayAccounts(file)).map((entry) => entry.password).filter((value): value is string => Boolean(value));
     if (passwords.length < 5) failures.push(`expected at least 5 saved passwords, found ${passwords.length}`);
@@ -583,7 +702,7 @@ async function main(): Promise<void> {
     console.error(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"failed","failures":${JSON.stringify(failures)}}`);
     process.exit(1);
   }
-  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":30}`);
+  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":36}`);
 }
 
 main().catch((error) => {

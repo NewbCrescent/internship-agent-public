@@ -27,6 +27,9 @@
     //   form shows, and signing in to it writes a plain-text "not been verified" notice (not an
     //   error element) and keeps the form; quiet: the same, but signing in to the unverified
     //   account changes nothing on screen.
+    // &signin-error=generic|locked: a failed sign-in shows Workday's generic message (generic: "You may
+    // have entered the wrong email address or password or your account might be locked.", seen on 11
+    // tenants on 2026-11-25) or a real lockout message (locked) instead of "Wrong email address or password.".
     // ?header=filter (synthetic, not seen on a capture: the 2026-11-20 read-only capture of
     // employer-g.wd5's /login showed only the form's own "Sign In" filter, beside
     // signInSubmitButton in noCaptchaWrapper): the header's Sign In is drawn under its own
@@ -54,6 +57,7 @@
       document.getElementById("app").innerHTML = "<h2>Your account has been verified.</h2>";
     }
     const accountMode = params.get("account");
+    const signInError = params.get("signin-error");
     window.fixtureAccount = { honeypotTyped: false, termsChecked: false, creates: 0, signIns: 0, emailMethodClicks: 0, headerClicks: 0, ignoredSubmits: 0, submitDelays: [] };
     const dwellMode = params.get("dwell") === "1";
     const submitMounts = new WeakMap();
@@ -379,7 +383,11 @@
         return accountError("Something went wrong.");
       }
       const account = readAccounts()[email];
-      if (!account || account.password !== password) return accountError("Wrong email address or password.");
+      if (!account || account.password !== password) {
+        if (signInError === "locked") return accountError("Your account has been locked because of too many failed sign-in attempts.");
+        if (signInError === "generic") return accountError("You may have entered the wrong email address or password or your account might be locked.");
+        return accountError("Wrong email address or password.");
+      }
       if (!account.verified && accountMode === "notice") {
         document.getElementById("account-notice").innerHTML = "<p>Your account has not been verified. Check your email for the verification link.</p>";
         return;

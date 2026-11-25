@@ -214,6 +214,7 @@ export async function ensureWorkdayAccount(
     session("connected", detail);
     event(eventText);
   };
+  const created = `Workday ${host}: account created with your email; the password is saved locally.`;
 
   const accountScreen = page.accountScreen?.bind(page);
   const signInToAccount = page.signInToAccount?.bind(page);
@@ -231,7 +232,7 @@ export async function ensureWorkdayAccount(
     throw new WorkdayAccountHeld(reason);
   }
 
-  const verifyFlow = async (unconfirmedCreateHold?: () => never): Promise<"signed-in"> => {
+  const verifyFlow = async (unconfirmedCreateHold?: () => never, signInAfter = true): Promise<"signed-in" | "created"> => {
     if (!runtime.mailbox) {
       return hold("verify-email", `Workday ${host}: verify the account email Workday sent you; the agent signs in again on a later pass.`);
     }
@@ -273,6 +274,9 @@ export async function ensureWorkdayAccount(
       connected(`The agent signed in to ${company}'s Workday with the saved account.`, `Workday ${host}: signed in with the saved account.`);
       return "signed-in";
     }
+    if (!signInAfter) {
+      return hold("verify-email", `Workday ${host}: the verification email was opened; the agent signs in on a later pass, since it signs in at most once per pass.`);
+    }
     return signInFlow(true);
   };
 
@@ -281,7 +285,7 @@ export async function ensureWorkdayAccount(
    * not answer then may be one it ignores until the email is verified, so with
    * a mailbox the agent looks for the verification email instead of holding.
    */
-  const signInFlow = async (afterVerify = false, afterCreate = false): Promise<"signed-in"> => {
+  const signInFlow = async (afterVerify = false, afterCreate = false): Promise<"signed-in" | "created"> => {
     const entry = current!;
     const outcome: WorkdayAccountOutcome = await safely(() => signInToAccount({ email: entry.email, password: entry.password! }, host, runtime.accountWait));
     switch (outcome.result) {
@@ -294,6 +298,9 @@ export async function ensureWorkdayAccount(
       case "wrong-password":
       case "no-account":
         if (entry.account === "pending") {
+          // Never confirmed as created: Workday dropped the earlier create submit (see the one-second wait), so on an
+          // automatic run the agent submits the create form once with the saved password, and does not sign in again.
+          if (mode === "create" && !afterVerify && !afterCreate) return createAfterRefusedSignIn();
           return hold("interrupted", `Workday ${host}: an earlier account creation did not finish, and Workday does not accept the saved password. ${YOURSELF}`);
         }
         return hold("wrong-password", `Workday ${host}: Workday refused the saved password; the agent does not try it again. ${YOURSELF}`);
@@ -308,6 +315,43 @@ export async function ensureWorkdayAccount(
           event(`Workday ${host}: Workday did not answer the sign-in after the account was created; the agent looks for the verification email.`);
           return verifyFlow();
         }
+        return unexpected(outcome.detail);
+    }
+  };
+
+  /** A pending account's saved password was refused at sign-in: one create submit with it, and no second sign-in in this call. */
+  const createAfterRefusedSignIn = async (): Promise<"signed-in" | "created"> => {
+    const entry = current!;
+    const password = entry.password!;
+    event(`Workday ${host}: Workday did not accept the saved password for the account an earlier run started to create, so the agent submits the create-account form once with it.`);
+    const { outcome, termsLabel } = await safely(() => createAccount({ email: entry.email, password }, host, runtime.accountWait));
+    if (termsLabel) {
+      event(`Workday ${host}: checked "${termsLabel}" on the create-account form, as part of your request that the agent create the account.`);
+    }
+    const later = "the agent signs in on a later pass, since it signs in at most once per pass";
+    switch (outcome.result) {
+      case "signed-in":
+        connected(`The agent created a Workday account for ${host} and signed in.`, created);
+        return "created";
+      case "created":
+        save({ account: "created" });
+        event(created);
+        return hold("verify-email", `Workday ${host}: account created with the saved password; ${later}.`);
+      case "verify-email":
+        save({ account: "created" });
+        event(`Workday ${host}: account created; Workday asks to verify the email.`);
+        return verifyFlow(undefined, false);
+      case "exists":
+        return hold("exists", `Workday ${host}: Workday did not accept the saved password and says an account already exists for this email; the agent never resets passwords. ${YOURSELF}`, { account: "refused" });
+      case "no-answer":
+        return hold("interrupted", `Workday ${host}: Workday did not accept the saved password, and ${outcome.detail ?? "the create-account submit got no answer"}, so the account was probably not created. ${YOURSELF}`);
+      case "error":
+        return workdayError("the create-account submit", outcome);
+      case "password-refused":
+        return hold("password-refused", `Workday ${host}: Workday refused the generated password; the agent does not try another. Create the account yourself with Open sign-in on the Workday accounts page.`, { account: "refused" });
+      case "captcha":
+        return hold("captcha", `Workday ${host}: after the create-account submit Workday shows a CAPTCHA, and the agent never solves CAPTCHAs. ${YOURSELF}`);
+      default:
         return unexpected(outcome.detail);
     }
   };
@@ -334,7 +378,6 @@ export async function ensureWorkdayAccount(
   if (termsLabel) {
     event(`Workday ${host}: checked "${termsLabel}" on the create-account form, as part of your request that the agent create the account.`);
   }
-  const created = `Workday ${host}: account created with your email; the password is saved locally.`;
   // "Already exists" or no answer: the account may exist with the password
   // just saved, so the agent signs in once with it (it never resets a
   // password and never submits the create form again).

@@ -1,17 +1,20 @@
 import { parseWorkdayUrl, workspaceProfileSchema } from "@internship-agent/domain";
 
 import { gmailMailboxFactory } from "../src/gmail-mailbox";
-import { getWorkdayAccount, listWorkdayAccounts, workdayAccountsFile, WorkdayAccountsFileError } from "../src/workday-account-store";
+import { clearWorkdayAccountHold, getWorkdayAccount, listWorkdayAccounts, workdayAccountsFile, WorkdayAccountsFileError } from "../src/workday-account-store";
 import { MailboxUnavailable, relevantWorkdayHeader } from "../src/workday-verification-mail";
 
 /**
  * The Workday accounts the agent created. Without options it lists hosts and
  * their state (no emails or passwords). `--site <host or Workday URL>` prints
  * that one host's email and password for you to sign in yourself.
+ * `--site <host> --clear-hold` clears that host's hold instead (the email,
+ * password, and account state stay; nothing secret is printed), so the next
+ * pass retries it; use it only for a hold known to be wrong.
  * `--check-mail` checks that the Gmail app password opens the mailbox
  * (read-only) and counts recent messages that mention Workday.
  *
- * Usage: pnpm workday:account [--profile real|demo] [--site <host>] [--check-mail]
+ * Usage: pnpm workday:account [--profile real|demo] [--site <host> [--clear-hold]] [--check-mail]
  */
 const WORKDAY_HOST = /^[a-z0-9-]+\.wd\d{1,3}\.myworkdayjobs\.com$/;
 const args = process.argv.slice(2);
@@ -50,6 +53,14 @@ async function main(): Promise<number> {
       const raw = (site ?? "").trim();
       const host = raw.startsWith("https://") ? parseWorkdayUrl(raw)?.host : raw.toLocaleLowerCase("en-US");
       if (!host || !WORKDAY_HOST.test(host)) { console.log("Give a Workday host like acme.wd1.myworkdayjobs.com or a Workday job URL."); return 1; }
+      if (args.includes("--clear-hold")) {
+        const entry = getWorkdayAccount(file, host);
+        if (!entry) { console.log(`No saved account for ${host}.`); return 1; }
+        if (!entry.hold) { console.log(`No hold for ${host}.`); return 0; }
+        clearWorkdayAccountHold(file, host);
+        console.log(`Cleared the ${entry.hold.kind} hold for ${host}; the next pipeline pass retries it.`);
+        return 0;
+      }
       const entry = getWorkdayAccount(file, host);
       if (!entry?.password) { console.log(`No saved account for ${host}.`); return 1; }
       console.log(`email: ${entry.email}`);

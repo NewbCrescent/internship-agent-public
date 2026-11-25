@@ -55,6 +55,16 @@ describe("Workday career sites", () => {
     expect(classifyWorkdayAccountMessage("sign-in", "Enter website. This input is for robots only, do not enter if you're human.")).toBeNull();
     expect(classifyWorkdayAccountMessage("create", "Enter website. This input is for robots only, do not enter if you're human.")).toBeNull();
     expect(classifyWorkdayAccountMessage("sign-in", "Welcome back")).toBeNull();
+    // Workday's generic sign-in failure only hedges a lock: a refused sign-in (11 tenants, 2026-11-25).
+    expect(classifyWorkdayAccountMessage("sign-in", "You may have entered the wrong email address or password or your account might be locked.")).toBe("wrong-password");
+    expect(classifyWorkdayAccountMessage("sign-in", "The email address or password you entered is incorrect, or your account may be locked.")).toBe("wrong-password");
+    expect(classifyWorkdayAccountMessage("sign-in", "Your account might be locked, or you may have entered the wrong password.")).toBe("wrong-password");
+    expect(classifyWorkdayAccountMessage("sign-in", "Your account has been locked.")).toBe("locked");
+    expect(classifyWorkdayAccountMessage("sign-in", "Too many failed sign-in attempts. Try again later.")).toBe("locked");
+    expect(classifyWorkdayAccountMessage("sign-in", "Your account has been temporarily disabled.")).toBe("locked");
+    expect(classifyWorkdayAccountMessage("sign-in", "Your account has been locked. You may have entered the wrong email address or password or your account might be locked.")).toBe("locked");
+    expect(classifyWorkdayAccountMessage("sign-in", "Your account may be locked.")).toBe("locked");
+    expect(classifyWorkdayAccountMessage("sign-in", "Verify your account before you sign in or request a verification email.")).toBe("verify-email");
   });
 
   it("reads a not-verified account as the verification step, even when the message mentions the password", () => {

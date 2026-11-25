@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  clearWorkdayAccountHold,
   getWorkdayAccount,
   listWorkdayAccounts,
   MailboxUnavailable,
@@ -110,6 +111,18 @@ describe("the Workday account gate", () => {
     hold(10);
     expect(workdayAccountWait(runtime(file), HOST, "jordan@example.test", later(24 * hour - 1))).not.toBeNull();
     expect(workdayAccountWait(runtime(file), HOST, "jordan@example.test", later(24 * hour))).toBeNull();
+  });
+
+  it("clears one host's hold, keeping the password and account state, and returns false for an unknown host", () => {
+    const file = join(scratch(), "workday-accounts.json");
+    putWorkdayAccount(file, entry({ account: "pending", hold: { kind: "locked", reason: "Workday acme: locked.", at, attempts: 1 } }));
+    expect(workdayAccountWait(runtime(file), HOST, "jordan@example.test")).toBe("Workday acme: locked.");
+    expect(clearWorkdayAccountHold(file, HOST, new Date("2026-11-25T03:00:00.000Z"))).toBe(true);
+    expect(getWorkdayAccount(file, HOST)).toEqual(entry({ account: "pending", hold: null, updatedAt: "2026-11-25T03:00:00.000Z" }));
+    expect(workdayAccountWait(runtime(file), HOST, "jordan@example.test")).toBeNull();
+    expect(clearWorkdayAccountHold(file, "missing.wd1.myworkdayjobs.com")).toBe(false);
+    expect(getWorkdayAccount(file, "missing.wd1.myworkdayjobs.com")).toBeNull();
+    expect(Object.keys(readWorkdayAccounts(file))).toEqual([HOST]);
   });
 });
 

@@ -47,11 +47,16 @@ export const WORKDAY_ACCOUNT_PATTERNS = {
   ROBOT: /not a robot|verify (that )?you('re| are) (a )?human|complete the captcha|security check/i,
   VERIFY: /\b(account|e-?mail|address)\b[^.]{0,80}\b(verif|activat)|\b(verif|activat)\w*\b[^.]{0,80}\b(account|e-?mail|address)\b/i,
   ABOUT_PASSWORD: /\b(password|credentials|user ?name)\b/i,
-  LOCKED: /\block(ed|out)\b|too many (failed )?(attempts|tries|sign-?ins|log-?ins)|temporarily (disabled|suspended)|\b(disabled|suspended)\b[^.]{0,30}\baccount|\baccount\b[^.]{0,30}\b(disabled|suspended)/i,
+  LOCKED: /\block(ed|out)\b|too many (?:failed |unsuccessful |incorrect )?(?:sign-?in |log-?in |login )?(?:attempts|tries|sign-?ins|log-?ins)|temporarily (disabled|suspended)|\b(disabled|suspended)\b[^.]{0,30}\baccount|\baccount\b[^.]{0,30}\b(disabled|suspended)/i,
   WRONG: /\b(invalid|incorrect|wrong)\b[^.]{0,40}\b(user ?name|e-?mail|address|password|credentials|log-?in|sign-?in)|\b(user ?name|e-?mail|address|password|credentials)\b[^.]{0,40}\b(is|are|was)? ?(invalid|incorrect|wrong|not recogni[sz]ed)|(does not|doesn['’]t|do not|don['’]t) match/i,
   MISSING: /account (does not exist|not found)|no account (found|exists)|(could not|couldn['’]t) find an account/i,
   EXISTS: /already (exists|registered|in use|been used|have an account)|account (already )?exists|existing account/i,
   PASSWORD_RULE: /password (must|should|does not|doesn['’]t|requirements?|is too)|must (contain|include|be at least)/i,
+  /**
+   * A lock Workday only hedges ("…or your account might be locked"): its generic sign-in failure.
+   * A sentence with this and a wrong-credentials phrase is a refused sign-in, not a lockout.
+   */
+  HEDGED_LOCK: /\b(?:might|may|could)\s+(?:be|have\s+been)\s+(?:locked(?:\s+out)?|disabled|suspended)\b/i,
   ELSEWHERE: /passkey|security key|single sign-on|\bsso\b|text message|\bsms\b|phone number to verify|authenticator/i,
   /**
    * An account that must be verified before it signs in ("Your account has not
@@ -84,7 +89,20 @@ export function isWorkdayAccountStep(text: string): boolean {
   return WORKDAY_ACCOUNT_STEP.test(text);
 }
 
-/** Reads Workday's message after a sign-in or create submit; null when it means nothing the agent acts on. */
+/** The text without the sentences that only hedge a lock while naming wrong credentials (Workday's generic sign-in failure). */
+function withoutHedgedLock(text: string): string {
+  const p = WORKDAY_ACCOUNT_PATTERNS;
+  return text
+    .split(/(?<=[.!?])\s+/)
+    .filter((sentence) => !(p.HEDGED_LOCK.test(sentence) && (p.WRONG.test(sentence) || /\b(?:wrong|incorrect|invalid)\b/i.test(sentence))))
+    .join(" ");
+}
+
+/**
+ * Reads Workday's message after a sign-in or create submit; null when it means nothing the agent acts on.
+ * After a sign-in, a sentence that only hedges a lock ("…or your account might be locked") while naming
+ * wrong credentials is a refused sign-in (Workday's generic failure); only unambiguous lockout text is `locked`.
+ */
 export function classifyWorkdayAccountMessage(after: "sign-in" | "create", text: string): WorkdayAccountResult | null {
   const p = WORKDAY_ACCOUNT_PATTERNS;
   const clean = text.replace(HONEYPOT_PATTERN, " ").trim();
@@ -96,12 +114,14 @@ export function classifyWorkdayAccountMessage(after: "sign-in" | "create", text:
     if (p.VERIFY.test(clean) && !p.ABOUT_PASSWORD.test(clean)) return "verify-email";
     return null;
   }
-  if (p.LOCKED.test(clean)) return "locked";
+  const firm = withoutHedgedLock(clean);
+  if (p.LOCKED.test(firm)) return "locked";
   // Before the password checks: a not-verified message that also mentions the password is a verify outcome.
   if (p.VERIFY_REQUIRED.test(clean)) return "verify-email";
   if (p.VERIFY.test(clean) && !p.ABOUT_PASSWORD.test(clean)) return "verify-email";
   if (p.MISSING.test(clean)) return "no-account";
-  if (p.WRONG.test(clean) || p.ABOUT_PASSWORD.test(clean)) return "wrong-password";
+  // Workday's generic failure ("You may have entered the wrong email address or password or your account might be locked.").
+  if (firm !== clean || p.WRONG.test(clean) || p.ABOUT_PASSWORD.test(clean)) return "wrong-password";
   return null;
 }
 

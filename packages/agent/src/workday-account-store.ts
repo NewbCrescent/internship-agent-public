@@ -109,6 +109,14 @@ export function listWorkdayAccounts(file: string): Array<{ host: string; account
     .sort((left, right) => left.host.localeCompare(right.host));
 }
 
+/** Clears a host's hold so the next pass retries it; the email, password, account state, and creation time stay. False when the host has no entry. */
+export function clearWorkdayAccountHold(file: string, host: string, now: Date = new Date()): boolean {
+  const entry = getWorkdayAccount(file, host);
+  if (!entry) return false;
+  putWorkdayAccount(file, { ...entry, hold: null, updatedAt: now.toISOString() });
+  return true;
+}
+
 /**
  * The accounts file: INTERNSHIP_AGENT_WORKDAY_ACCOUNTS_FILE when set,
  * otherwise (only when INTERNSHIP_AGENT_DATA_DIR is unset) one per profile
