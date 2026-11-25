@@ -579,23 +579,95 @@ function otherFollowUpDecision(field: BrowserField, previous: BrowserField | und
   };
 }
 
+type PackageIntent = "interest" | "experience" | "authorization";
+
+/**
+ * A package answer fills a text box only when the box asks the same thing as
+ * the answer's prompt: the whole label (normalized by `packageQuestionText`)
+ * must be one of the phrasings below, never a label that merely contains a
+ * word such as "why", "company", "project", or "experience". Anything else
+ * (a technical "why" question, "Which company…", "Describe a project where…",
+ * "How many years of experience…", "Explain why…") falls through to the
+ * usual rules.
+ */
 function matchPackageAnswer(
   field: BrowserField,
   answers: PlannerInputs["packageAnswers"]
 ): PlannerInputs["packageAnswers"][number] | null {
   // A package answer is prose: only a text box or text area takes it, never a choice.
   if (field.kind !== "text" && field.kind !== "textarea") return null;
-  const label = field.label.toLocaleLowerCase("en-US");
-  const wantsInterest = /why|interest|motivat|company/.test(label);
-  // A background check is not an experience question.
-  const wantsExperience = /experience|background|relevant|project|qualification/.test(label) && !/\bbackground (?:check|screening|investigation)s?\b/.test(label);
-  const wantsAuth = /authoriz|sponsor|start|availab|eligible|work in/.test(label);
-  for (const answer of answers) {
-    const prompt = answer.prompt.toLocaleLowerCase("en-US");
-    if (wantsInterest && prompt.includes("interested")) return answer;
-    if (wantsExperience && prompt.includes("relevant experience")) return answer;
-    if (wantsAuth && prompt.includes("authorization")) return answer;
-  }
+  const intent = packageQuestionIntent(field.label);
+  if (!intent) return null;
+  return answers.find((answer) => packagePromptIntent(answer.prompt) === intent) ?? null;
+}
+
+/** Which package answer a prompt is (the writer's three prompts); null for any other prompt. */
+function packagePromptIntent(prompt: string): PackageIntent | null {
+  const text = prompt.toLocaleLowerCase("en-US");
+  if (text.includes("interested")) return "interest";
+  if (text.includes("relevant experience")) return "experience";
+  if (text.includes("authorization")) return "authorization";
+  return null;
+}
+
+/** Lowercase, no required marker or "(optional)", straight apostrophes, no trailing length hint or end punctuation. */
+function packageQuestionText(label: string): string {
+  return normalizedLabel(label)
+    .replace(/[‘’]/g, "'")
+    .replace(/\s*\([^()]*\b(?:words?|characters?|chars?)\b[^()]*\)\s*$/, "")
+    .replace(/[\s?.!:]+$/, "")
+    .trim();
+}
+
+// One word of a role description or an employer's name: never a connective or
+// question word, so "CPX vs NVL72" or "this role and why" is not a name.
+const PACKAGE_WORD = String.raw`(?!(?:and|or|vs|versus|which|what|how|why|that|who|whom|where|when|if|explain|describe|compare|compared)\b)[\p{L}\p{N}][\p{L}\p{N}&.'-]*`;
+const PACKAGE_NAME = String.raw`${PACKAGE_WORD}(?: ${PACKAGE_WORD}){0,4}`;
+const PACKAGE_ROLE_NOUN = String.raw`(?:role|position|job|internship|opportunity|program|programme|team|company|organization|organisation|firm)`;
+const PACKAGE_ROLE = String.raw`(?:this|the|our) (?:${PACKAGE_WORD} ){0,4}?${PACKAGE_ROLE_NOUN}(?: (?:at|with) ${PACKAGE_NAME})?`;
+const PACKAGE_PLACE = String.raw`(?:us|${PACKAGE_ROLE}|${PACKAGE_NAME})`;
+const packagePattern = (source: string) => new RegExp(`^(?:${source})$`, "u");
+
+/** Whole-label phrasings of "why are you interested in this role / company, what motivates you to apply". */
+const PACKAGE_INTEREST: readonly RegExp[] = [
+  packagePattern(String.raw`why (?:are|were) you (?:so )?(?:interested in|excited about|drawn to|applying (?:for|to)) ${PACKAGE_ROLE}`),
+  packagePattern(String.raw`why (?:are|were) you (?:so )?(?:interested in|excited about) (?:joining|working (?:at|for|with)) ${PACKAGE_PLACE}`),
+  packagePattern(String.raw`why (?:do you want|would you like) (?:to apply (?:for|to) )?${PACKAGE_ROLE}`),
+  packagePattern(String.raw`why (?:do you want|would you like) to (?:(?:work|intern) (?:here|(?:at|for|with) ${PACKAGE_PLACE})|join ${PACKAGE_PLACE})`),
+  packagePattern(String.raw`why (?:this|the|our) ${PACKAGE_ROLE_NOUN}(?: (?:at|with) ${PACKAGE_NAME})?|why us`),
+  packagePattern(String.raw`what (?:interests|excites|motivates|attracts|draws) you (?:to|about) (?:${PACKAGE_ROLE}|(?:working (?:at|for|with)|joining) ${PACKAGE_PLACE})`),
+  packagePattern(String.raw`what makes you (?:interested in|excited about) ${PACKAGE_ROLE}`),
+  packagePattern(String.raw`what (?:motivates|motivated|made|makes|prompted) you (?:to )?(?:want to )?apply(?: (?:for|to) ${PACKAGE_PLACE})?`),
+  packagePattern(String.raw`why (?:are you applying|did you apply)(?: (?:for|to) ${PACKAGE_PLACE})?`)
+];
+
+const EXPERIENCE_NOUN = String.raw`(?:experience|background|qualifications)`;
+
+/** Whole-label phrasings of "describe your (most) relevant experience / background". */
+const PACKAGE_EXPERIENCE: readonly RegExp[] = [
+  packagePattern(String.raw`(?:please )?(?:briefly )?(?:describe|summari[sz]e|tell us about|share|walk us through) (?:your|any) (?:most )?(?:relevant )?(?:(?:work|professional|prior|previous|past) )?${EXPERIENCE_NOUN}(?: (?:and|or) (?:${EXPERIENCE_NOUN}|skills))?(?: (?:for|relevant to|related to) ${PACKAGE_ROLE})?`),
+  packagePattern(String.raw`what (?:is|are) your (?:most )?relevant ${EXPERIENCE_NOUN}(?: (?:for|to) ${PACKAGE_ROLE})?`),
+  packagePattern(String.raw`what (?:relevant )?${EXPERIENCE_NOUN} do you have(?: (?:that (?:is|are) )?(?:relevant to|related to|for) ${PACKAGE_ROLE})?`),
+  packagePattern(String.raw`(?:your )?(?:most )?relevant (?:experience|background)`)
+];
+
+const AUTHORIZATION_NOUN = String.raw`(?:current )?work (?:authori[sz]ation|eligibility)(?: status)?(?: (?:and|&) (?:availability|start date|sponsorship(?: (?:needs|requirements|status))?))?`;
+
+/** Whole-label work-authorization or availability summary prompts; never a yes/no question, whose scope may differ. */
+const PACKAGE_AUTHORIZATION: readonly RegExp[] = [
+  packagePattern(String.raw`what (?:is|are) your ${AUTHORIZATION_NOUN}`),
+  packagePattern(String.raw`(?:please )?(?:describe|summari[sz]e|state|share) your ${AUTHORIZATION_NOUN}`),
+  packagePattern(AUTHORIZATION_NOUN),
+  packagePattern(String.raw`what is your availability|(?:please )?(?:describe|state|share) your availability`)
+];
+
+/** What a text question asks, when it is exactly one of the package's three questions; otherwise null. */
+function packageQuestionIntent(label: string): PackageIntent | null {
+  const text = packageQuestionText(label);
+  if (!text || text.length > 200) return null;
+  if (PACKAGE_INTEREST.some((pattern) => pattern.test(text))) return "interest";
+  if (PACKAGE_EXPERIENCE.some((pattern) => pattern.test(text))) return "experience";
+  if (PACKAGE_AUTHORIZATION.some((pattern) => pattern.test(text))) return "authorization";
   return null;
 }
 

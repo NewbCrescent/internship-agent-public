@@ -73,6 +73,7 @@ import {
   type PlannerInputs,
   type PostSubmitEvidence,
   type UnfilledField,
+  type VisibleChallenge,
   type WorkdayPage,
   type WorkdayWalkResult
 } from "@internship-agent/browser";
@@ -1329,6 +1330,18 @@ export function approveRunSubmissionAutomatically(
   return approved;
 }
 
+/** A challenge seen before the submit click: the approval is withdrawn and the run pauses with one safeguard; nothing is clicked. */
+function holdForChallengeBeforeClick(database: DatabaseSync, runId: string, run: BrowserRun, challenge: VisibleChallenge): SubmissionChallenged {
+  const held = challengePause(challenge);
+  updateBrowserRun(database, runId, {
+    status: "paused-needs-input",
+    submissionApprovedAt: null,
+    decisions: [...run.decisions.filter((decision) => decision.fieldId !== held.decision.fieldId), held.decision],
+    pauses: [...run.pauses.filter((pause) => pause.fieldId !== held.pause.fieldId), held.pause]
+  });
+  return new SubmissionChallenged(`Before the submit click the site showed ${challenge.detail}. The agent never solves CAPTCHAs, so this application is held for you: finish it in your own browser. The run is not marked submitted.`);
+}
+
 export async function submitBrowserRun(
   runId: string,
   options: {
@@ -1422,16 +1435,7 @@ export async function submitBrowserRun(
     await passJobviteConsentAgain(database, page, run.jobId, standing);
     // A challenge the candidate would see is never solved: the run goes back to them, approval withdrawn.
     const challenge = page.visibleChallenge ? await page.visibleChallenge() : null;
-    if (challenge) {
-      const held = challengePause(challenge);
-      updateBrowserRun(database, runId, {
-        status: "paused-needs-input",
-        submissionApprovedAt: null,
-        decisions: [...run.decisions.filter((decision) => decision.fieldId !== held.decision.fieldId), held.decision],
-        pauses: [...run.pauses.filter((pause) => pause.fieldId !== held.pause.fieldId), held.pause]
-      });
-      throw new SubmissionChallenged(`Before the submit click the site showed ${challenge.detail}. The agent never solves CAPTCHAs, so this application is held for you: finish it in your own browser. The run is not marked submitted.`);
-    }
+    if (challenge) throw holdForChallengeBeforeClick(database, runId, run, challenge);
     // The approved form must still be there: a page showing none of its fields is never submitted.
     let shown = await recognizeCurrentForm(page);
     if (!onHandshakeHost(page.url()) && hasSiteNavigation(page) && !hasApplicationFields(shown.fields)) {
@@ -1476,6 +1480,12 @@ export async function submitBrowserRun(
       const fields = new Map(form.fields.map((field) => [field.id, field.label]));
       const labels = unfilled.map((entry) => `"${fields.get(entry.fieldId) ?? entry.fieldId}"`).join(", ");
       throw new SubmissionHeld(`Before the submit click the agent could not fill ${unfilled.length} field(s) (${labels}); the application is held for you.`.slice(0, 600));
+    }
+    // A widget drawn while the form filled (Dover's Turnstile renders late) is read again right before the click.
+    const lateChallenge = page.visibleChallenge ? await page.visibleChallenge() : null;
+    if (lateChallenge) {
+      heldForInput = true;
+      throw holdForChallengeBeforeClick(database, runId, run, lateChallenge);
     }
     // Greenhouse's emailed security-code step: the code is read from the candidate's mailbox (read only, in memory).
     const securityCode = greenhouseSecurityCodeLookup({

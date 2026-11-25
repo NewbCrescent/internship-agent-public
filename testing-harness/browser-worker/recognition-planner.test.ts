@@ -9,6 +9,7 @@ import {
   hasTranscriptField,
   isChatbotControl,
   isSubmitControl,
+  isTurnstileFrameSource,
   planAutofill,
   readConfirmationFromText,
   readNewConfirmation,
@@ -595,6 +596,14 @@ describe("how did you hear about us", () => {
 });
 
 describe("CAPTCHA token fields and checkbox groups (Greenhouse's new board)", () => {
+  it("recognizes Turnstile's challenge frame by its address only", () => {
+    expect(isTurnstileFrameSource("https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2/av0/rcv/fixture/normal")).toBe(true);
+    expect(isTurnstileFrameSource("https://CHALLENGES.cloudflare.com/x")).toBe(true);
+    for (const other of ["https://challenges.cloudflare.com.example.test/x", "https://example.com/?u=challenges.cloudflare.com", "about:blank", "chrome-error://chromewebdata/", ""]) {
+      expect(isTurnstileFrameSource(other)).toBe(false);
+    }
+  });
+
   it("drops the hidden CAPTCHA token fields instead of reading them as a CAPTCHA question", () => {
     const fields = recognizeFields([
       control({ tag: "textarea", id: "g-recaptcha-response-100000", name: "g-recaptcha-response" }),
@@ -1090,6 +1099,65 @@ describe("known answers on common application questions (synthetic Greenhouse-st
     const background = control({ tag: "input", type: "text", id: "question_background", label: "Do you consent to a background check? Please explain.*", required: true });
     const decision = plan([background], { packageAnswers }).decisions[0]!;
     expect(decision.basis?.kind).not.toBe("package-answer");
+  });
+
+  it("gives a package answer only to a question that asks the same thing, never on a keyword", () => {
+    // The writer's three prompts (packages/writer package-builder), with synthetic texts.
+    const packageAnswers = [
+      { prompt: "Why are you interested in this role?", text: "INTEREST-ANSWER" },
+      { prompt: "Describe your most relevant experience.", text: "EXPERIENCE-ANSWER" },
+      { prompt: "What is your work authorization and availability?", text: "AUTHORIZATION-ANSWER" }
+    ];
+    const box = (label: string, index: number, tag: "input" | "textarea") =>
+      control(tag === "input" ? { tag, type: "text", id: `q${index}`, label, required: true } : { tag, id: `q${index}`, label, required: true });
+    const answerFor = (label: string, tag: "input" | "textarea" = "textarea") => {
+      const decision = plan([box(label, 0, tag)], { packageAnswers }).decisions[0]!;
+      return decision.basis?.kind === "package-answer" ? decision.value : decision.action;
+    };
+    const matches: Array<[string, string]> = [
+      ["Why are you interested in this role?*", "INTEREST-ANSWER"],
+      ["Why are you interested in the Summer Research Intern position at Fixture Labs?", "INTEREST-ANSWER"],
+      ["Why do you want to work at Fixture Robotics?", "INTEREST-ANSWER"],
+      ["Why do you want to work here?", "INTEREST-ANSWER"],
+      ["Why do you want to join Fixture Robotics?", "INTEREST-ANSWER"],
+      ["Why do you want this role?", "INTEREST-ANSWER"],
+      ["Why this internship?", "INTEREST-ANSWER"],
+      ["What interests you about this position?", "INTEREST-ANSWER"],
+      ["What motivates you to apply? (200 words max)", "INTEREST-ANSWER"],
+      ["Why are you interested in joining Fixture Labs\u2019 research team?", "INTEREST-ANSWER"],
+      ["Describe your most relevant experience.", "EXPERIENCE-ANSWER"],
+      ["Please describe your relevant background for this role", "EXPERIENCE-ANSWER"],
+      ["What relevant experience do you have?", "EXPERIENCE-ANSWER"],
+      ["What is your work authorization and availability?", "AUTHORIZATION-ANSWER"],
+      ["Work authorization status", "AUTHORIZATION-ANSWER"]
+    ];
+    for (const [label, expected] of matches) expect([label, answerFor(label)]).toEqual([label, expected]);
+    expect(answerFor("Why are you interested in this role?", "input")).toBe("INTEREST-ANSWER");
+
+    // Required questions a canned answer does not answer pause for the candidate instead.
+    const pauses = [
+      // The SemiAnalysis-style technical question (Track 10 evidence) and its variants.
+      "Why does CPX change prefill economics compared with an NVL72 rack?",
+      "Why are you interested in CPX vs NVL72 for long-context prefill?",
+      "Why would a disaggregated CPX prefill tier beat NVL72 on cost per token?",
+      "Which company do you think is best placed to win AI inference, and why?",
+      "Which company's accelerator roadmap do you find most compelling?",
+      "Describe a project where you used Python and why you chose it.",
+      "Describe a project where you used CUDA, including the problem, your role, and the result.",
+      "How many years of experience do you have with Python?",
+      "How many years of relevant experience do you have?",
+      "Explain why memory bandwidth limits decode throughput.",
+      "Explain why you chose your major.",
+      "What is your opinion of our latest report on token pricing?",
+      "Describe your experience with Kubernetes.",
+      "Tell us about a time you disagreed with a teammate and why.",
+      "Please share a link to a project you are proud of.",
+      "What company are you currently working for?",
+      "Are you authorized to work in Canada?",
+      "When can you start, and how many hours per week are you available?",
+      "Do you consent to a background check? Please explain."
+    ];
+    for (const label of pauses) expect([label, answerFor(label)]).toEqual([label, "pause"]);
   });
 
   it("declines a marketing opt-in list under either standing setting, even with a clipped label, and never an application-status question", () => {

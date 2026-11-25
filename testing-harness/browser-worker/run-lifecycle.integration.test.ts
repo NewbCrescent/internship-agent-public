@@ -424,6 +424,30 @@ describe("browser run lifecycle", () => {
     database.close();
   });
 
+  it("holds a run whose CAPTCHA appears while the form fills, before the submit click: nothing is clicked and the approval is withdrawn", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = approvedJobId(database);
+    const started = await startBrowserRun(jobId, "https://app.joinhandshake.com/apply/900001", { database, dataDir, openPage: async () => fakePage() });
+    expect(started.run.status).toBe("awaiting-approval");
+    approveRunSubmission(started.run.id, undefined, { database });
+    const flag = { clicked: false };
+    const page = fakePage({ submitted: flag });
+    // Like Dover's Turnstile: nothing on opening, the widget drawn once the form is being filled.
+    const late = { ...page, visibleChallenge: async () => (page.filled.size > 0 && !flag.clicked ? { kind: "turnstile" as const, detail: "a Cloudflare Turnstile challenge" } : null) };
+    const failure = await submitBrowserRun(started.run.id, { database, dataDir, openPage: async () => late }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(SubmissionChallenged);
+    expect(String((failure as Error).message)).toContain("Before the submit click the site showed a Cloudflare Turnstile challenge");
+    expect(flag.clicked).toBe(false);
+    const run = getBrowserRuns(jobId, database)[0]!;
+    expect(run.status).toBe("paused-needs-input");
+    expect(run.submissionApprovedAt).toBeNull();
+    expect(run.pauses).toEqual(expect.arrayContaining([expect.objectContaining({ fieldId: "site-challenge", safeguard: true, status: "open" })]));
+    expect(existsSync(join(dataDir, "applications", jobId, "submit-evidence"))).toBe(false);
+    expect((database.prepare("SELECT status FROM jobs WHERE id = ?").get(jobId) as { status: string }).status).not.toBe("SUBMITTED");
+    database.close();
+  });
+
   it("chooses an answered list option on continue, and reopens an answer that is not among the options", async () => {
     const controls: RawControl[] = [
       { tag: "select", id: "team", label: "Which team do you prefer?", required: true, options: ["Platform", "Data"] },

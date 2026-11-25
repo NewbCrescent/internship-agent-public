@@ -10,6 +10,11 @@
   UUIDs; the hidden Turnstile token; the Apply submit; and the footer.
   The script below stands in for Dover's: the submit draws "Thanks for
   applying!" in place of the form, and uploads are recorded on window.fixture.
+  ?turnstile=shown|hidden|after-submit draws Cloudflare Turnstile's frame
+  inside a closed shadow root on the empty div before the cf-turnstile-response
+  input (as Turnstile does since 2024, seen on Dover's pages 2026-11-24):
+  shown (300x65), hidden (display:none, invisible mode), or drawn by the Apply
+  click, which then sends nothing.
 -->
 <html lang="en">
 <head><meta charset="utf-8"><title>Apply for Software Engineering Intern at Fixture Robotics</title>
@@ -138,9 +143,30 @@
       const key = /autofill/i.test(zone?.textContent ?? "") ? "autofill" : "resume";
       state.uploads[key] = event.target.files[0]?.name ?? null;
     });
+    // ?turnstile=shown|hidden|after-submit: Turnstile's frame in a closed shadow root that page scripts cannot reach.
+    // Its address is never loaded here (the harness aborts it); only the element and its size matter.
+    const turnstile = new URLSearchParams(location.search).get("turnstile");
+    let turnstileDrawn = false;
+    const drawTurnstile = (shown) => {
+      if (turnstileDrawn) return;
+      turnstileDrawn = true;
+      const host = document.querySelector('input[name="cf-turnstile-response"]').previousElementSibling;
+      const root = host.attachShadow({ mode: "closed" });
+      const frame = document.createElement("iframe");
+      frame.src = "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2/av0/rcv/fixture/normal";
+      frame.title = "Widget containing a Cloudflare security challenge";
+      frame.width = shown ? "300" : "0";
+      frame.height = shown ? "65" : "0";
+      frame.style.border = "none";
+      if (!shown) frame.style.display = "none";
+      root.appendChild(frame);
+    };
+    if (turnstile === "shown") drawTurnstile(true);
+    if (turnstile === "hidden") drawTurnstile(false);
     // Dover draws its thank-you message in place of the form once the application is accepted.
     document.querySelector("form").addEventListener("submit", (event) => {
       event.preventDefault();
+      if (turnstile === "after-submit") { drawTurnstile(true); return; } // Dover asks for the challenge; nothing is sent.
       state.submitted = true;
       setTimeout(() => {
         document.getElementById("application").innerHTML = "<h2>Thanks for applying!</h2>";

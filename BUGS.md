@@ -217,6 +217,32 @@ form" in `testing-harness/browser-worker/run-lifecycle.integration.test.ts`
 (`pnpm test:browser:site-navigation`). Runs already saved in that state are
 not changed.
 
+### Package answers filled questions they do not answer
+
+Track 10's review of the two SemiAnalysis Dover runs (job <run id>, "Summer
+Intern - AI Tokenomics", and job <run id>, "Semiconductor & AI Research
+Intern") found required free-text questions filled with the package's generic
+"Why are you interested in this role?" answer ("I am applying for the <title>
+role at <company>. …"), one of them a technical question about CPX vs NVL72
+prefill. Cause: `matchPackageAnswer` in
+`packages/browser/src/autofill-planner.ts` matched on single word stems (why,
+interest, motivat, company; experience, background, relevant, project,
+qualification; authoriz, sponsor, start, availab, eligible, work in), so any
+text question containing one of them received a canned answer. Fixed
+2026-11-24: a package answer fills a text box only when the whole label
+(without its required marker, "(optional)", a trailing length hint, and end
+punctuation) is one of a fixed set of phrasings of the same question (why are
+you interested in this role or company, describe your relevant experience, a
+work-authorization or availability summary); a technical "why" question,
+"Which company…", "Describe a project where…", "How many years of
+experience…", "Explain why…", and every other label follow the usual rules
+(question memory, a voice draft, an optional skip, or a pause). The package
+contents are unchanged. Regressions: "gives a package answer only to a question
+that asks the same thing" in
+`testing-harness/browser-worker/recognition-planner.test.ts`
+(`pnpm test:browser-worker:fast`). Runs already saved with such fills are not
+changed.
+
 ### A Workday step was saved after reading no fields
 
 Two Workday runs (2026-11-20 and 2026-11-24) planned nothing on My
@@ -1464,6 +1490,32 @@ whose submit was approved, attempted, or may have reached the site, and
 run:answer prints what happens next. Regression:
 `testing-harness/agent/continued-auto-submit.integration.test.ts`
 (`pnpm test:agent:continued`).
+
+### Dover's Cloudflare Turnstile went unseen, so automatic submits failed unconfirmed
+
+On 2026-11-24 five automatic Dover submissions (jobs.dover.com, where
+app.dover.io links redirect) failed with "The submit button was clicked but
+no new confirmation appeared". Each post-submit screenshot shows the filled
+form, the Apply button, and an unchecked Cloudflare "Verify you are human"
+Turnstile widget above it (one with the widget's area still blank), and no
+thank-you, toast, or field error. Cause: Turnstile draws its frame inside a
+closed shadow root, so `findVisibleChallengeIn`'s iframe scan never saw it and
+its text is inside the frame, not the page body; `submitBrowserRun` also
+checked for a challenge only on opening, before the widget rendered. Fix: the
+Playwright page's `visibleChallenge` also reads the browser's frame tree and
+counts a shown `challenges.cloudflare.com` frame (visible, at least 20×20 px;
+never evaluated in, clicked, or typed into) as a Turnstile challenge, and
+`submitBrowserRun` reads the page again after filling, right before the click:
+a widget found there withdraws the approval and pauses the run as a safeguard
+with nothing clicked; one drawn by the click holds the run as challenged with
+evidence. The five runs stay failed with their possible-submission holds.
+Regressions: the Dover `?turnstile=` scenarios in
+`testing-harness/browser/greenhouse-fixture-run.ts`
+(`pnpm test:browser:greenhouse`), "holds a run whose CAPTCHA appears while the
+form fills" in `testing-harness/browser-worker/run-lifecycle.integration.test.ts`
+(`pnpm test:browser-worker:local`), and `isTurnstileFrameSource` in
+`testing-harness/browser-worker/recognition-planner.test.ts`
+(`pnpm test:browser-worker:fast`).
 
 ### Inline hard requirements were not extracted
 

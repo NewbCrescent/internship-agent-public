@@ -10,7 +10,10 @@ import type { PostSubmitEvidence } from "./submission-outcome";
  * reCAPTCHA badge are page machinery: the browser submits normally and the
  * site's own scoring decides. Only a challenge the candidate would see pauses
  * the run: a reCAPTCHA checkbox or image challenge, an hCaptcha or Turnstile
- * widget, a DataDome page, or a human-verification page.
+ * widget, a DataDome page, or a human-verification page. Turnstile's frame
+ * sits in a closed shadow root, so the Playwright page also reads the browser's
+ * frame tree for it (only the frame's address and its element's box; never
+ * inside the frame).
  */
 export type VisibleChallenge = { kind: "recaptcha" | "hcaptcha" | "turnstile" | "challenge-page"; detail: string };
 
@@ -19,6 +22,20 @@ export const CAPTCHA_TOKEN_NAME = /^(?:g-recaptcha-response|h-captcha-response|c
 
 export function isCaptchaTokenControl(control: { name?: string; id?: string }): boolean {
   return CAPTCHA_TOKEN_NAME.test(control.name ?? "") || CAPTCHA_TOKEN_NAME.test(control.id ?? "");
+}
+
+/**
+ * Whether a frame address is Cloudflare Turnstile's challenge frame. Turnstile
+ * draws that frame inside a closed shadow root (since 2024), which the in-page
+ * read below never reaches, so the Playwright page reads the browser's frame
+ * tree for it (handshake-executor.ts).
+ */
+export function isTurnstileFrameSource(source: string): boolean {
+  try {
+    return new URL(source).hostname.toLowerCase() === "challenges.cloudflare.com";
+  } catch {
+    return false;
+  }
 }
 
 /**

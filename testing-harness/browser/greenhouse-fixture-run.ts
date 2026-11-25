@@ -28,7 +28,10 @@
  * zone and the Turnstile token are not questions; it is classified dover with
  * the automatic flow; First and Last Name, Email, Phone Number, LinkedIn
  * Profile URL, and the resume fill from the profile, and the Apply submit's
- * "Thanks for applying!" is confirmed.
+ * "Thanks for applying!" is confirmed. Dover's Cloudflare Turnstile frame
+ * inside a closed shadow root (?turnstile=) is a challenge when shown and not
+ * when hidden, and one drawn by the Apply click holds the submit as challenged
+ * with evidence while nothing is sent.
  * Lever (fixtures/lever-application.html, derived) labels carry no "✱" or
  * widget status text; Full name and Phone map; a radio question is one field
  * and the right radio is checked; the data-retention consent checkbox pauses
@@ -597,6 +600,7 @@ async function main(): Promise<void> {
     {
       const doverTab = await open(DOVER);
       const dover = createPlaywrightPage(doverTab);
+      check(await dover.visibleChallenge!() === null, "Dover: the hidden Turnstile token was read as a challenge");
       const doverForm = await recognizeCurrentForm(dover);
       const labels = doverForm.fields.map((field) => field.label);
       const RELOCATION = "Are you open to relocation?";
@@ -634,6 +638,30 @@ async function main(): Promise<void> {
       const doverConfirmation = await submitAndConfirm(dover, { timeoutMs: 5_000, pollMs: 100 }).catch((error: unknown) => `ERROR ${String(error)}`);
       check(doverConfirmation.includes("Thanks for applying"), `Dover confirmation: ${doverConfirmation.slice(0, 200)}`);
       await doverTab.close();
+    }
+
+    // Dover's Turnstile (2026-11-24 real runs): its frame sits in a closed shadow root the page's own DOM read never
+    // reaches. Shown it is a challenge, hidden (invisible mode) it is not; drawn by the Apply click it holds the
+    // submit as challenged with evidence, and the fixture records no submission.
+    {
+      for (const [variant, expected] of [["shown", "turnstile"], ["hidden", null]] as const) {
+        const turnstileTab = await open(`${DOVER}?turnstile=${variant}`);
+        const challenge = await createPlaywrightPage(turnstileTab).visibleChallenge!();
+        check((challenge?.kind ?? null) === expected, `Dover ?turnstile=${variant}: ${JSON.stringify(challenge)}`);
+        await turnstileTab.close();
+      }
+      const afterTab = await open(`${DOVER}?turnstile=after-submit`);
+      const afterPage = createPlaywrightPage(afterTab);
+      check(await afterPage.visibleChallenge!() === null, "Dover ?turnstile=after-submit: a challenge before the click");
+      const outcome = await submitAndConfirm(afterPage, { timeoutMs: 1_500, pollMs: 100, atsKind: "dover" }).then(() => null, (error: unknown) => error);
+      check(outcome instanceof SubmissionChallenged && String((outcome as Error).message).includes("never solves CAPTCHAs"),
+        `Dover ?turnstile=after-submit: ${outcome instanceof Error ? `${outcome.constructor.name}: ${outcome.message}` : "submitted"}`);
+      const evidence = postSubmitEvidenceOf(outcome);
+      check(evidence?.outcome === "challenged" && evidence.challenge === "a Cloudflare Turnstile challenge" && evidence.url === DOVER,
+        `Dover ?turnstile=after-submit evidence: ${JSON.stringify(evidence && { outcome: evidence.outcome, challenge: evidence.challenge, url: evidence.url })}`);
+      const sent = await afterTab.evaluate(() => (window as unknown as { fixture: { submitted: boolean } }).fixture.submitted);
+      check(sent === false, "Dover ?turnstile=after-submit: the fixture recorded a submission");
+      await afterTab.close();
     }
 
     // Lever's /thanks page confirms by its URL, whatever message the company set.

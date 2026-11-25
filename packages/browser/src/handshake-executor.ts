@@ -6,7 +6,7 @@ import { chooseApplyEntry, dismissCookieBanner, type ApplyEntryCandidate } from 
 import { isDoverOrAshby } from "./ats/adapters";
 import { classifyFieldRole, isSensitiveRole } from "./ats/field-roles";
 import { matchSuggestion } from "./autofill-planner";
-import { findVisibleChallengeIn, SubmissionChallenged, SubmissionRefused, type VisibleChallenge } from "./challenge";
+import { findVisibleChallengeIn, isTurnstileFrameSource, SubmissionChallenged, SubmissionRefused, type VisibleChallenge } from "./challenge";
 import { isSubmitControl, readNewConfirmation, recognizeForm, waitForStableControls, type RawControl } from "./form-recognition";
 import {
   capturePostSubmitEvidence,
@@ -595,10 +595,13 @@ export function createPlaywrightPage(page: Page): BrowserPage {
       // The top document, not the dialog scope: challenge frames sit outside forms.
       try {
         await ensureNameShim(page);
-        return await page.evaluate(findVisibleChallengeIn);
+        const found = await page.evaluate(findVisibleChallengeIn);
+        if (found) return found;
       } catch {
-        return null;
+        // A read during a navigation; the frame tree below may still show the widget.
       }
+      // Turnstile's frame in a closed shadow root is invisible to the read above.
+      return findShadowTurnstileFrame(page).catch(() => null);
     },
     alertText: async () => {
       try {
@@ -691,6 +694,33 @@ export function createPlaywrightPage(page: Page): BrowserPage {
       }
     }
   };
+}
+
+/**
+ * A shown Cloudflare Turnstile frame the in-page read cannot reach (Turnstile
+ * draws it inside a closed shadow root; Dover's application pages, 2026-11-24).
+ * The browser's frame tree lists it anyway. Reads only each frame's address,
+ * its element's src, visibility, and box; never evaluates in, clicks, or types
+ * into a frame. A hidden or zero-size (invisible-mode) frame is no challenge.
+ */
+async function findShadowTurnstileFrame(page: Page): Promise<VisibleChallenge | null> {
+  const main = page.mainFrame();
+  for (const frame of page.frames()) {
+    if (frame === main) continue;
+    const element = await frame.frameElement().catch(() => null);
+    if (!element) continue;
+    try {
+      const source = (await element.getAttribute("src").catch(() => null)) ?? "";
+      if (!isTurnstileFrameSource(source) && !isTurnstileFrameSource(frame.url())) continue;
+      if (!(await element.isVisible().catch(() => false))) continue;
+      const box = await element.boundingBox().catch(() => null);
+      if (!box || box.width < 20 || box.height < 20) continue;
+      return { kind: "turnstile", detail: "a Cloudflare Turnstile challenge" };
+    } finally {
+      await element.dispose().catch(() => undefined);
+    }
+  }
+  return null;
 }
 
 function hostOf(url: string): string | null {
