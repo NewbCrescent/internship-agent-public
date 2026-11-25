@@ -55,11 +55,18 @@ import { redactNoticeText } from "./pass-notice";
  * read-only diagnostics of the click (`ashbyDiagnostics`, Track 27): each click's
  * target and hit test, request methods, hosts and paths after the first click,
  * console and page errors, and visible errors, every text redacted again.
+ *
+ * A modal dialog over the form while the agent fills it (Track 39) is saved
+ * as `covering-dialog`, once per run (saveCoveringDialogEvidenceQuietly):
+ * the screenshot, the redacted visible text, and each covering dialog's
+ * redacted text, role, aria attributes, and button labels.
  */
 
 export const SUBMIT_EVIDENCE_EVENT = "Post-submit evidence saved";
 export const WORKDAY_EVIDENCE_EVENT = "Workday evidence saved";
 export const ICIMS_EVIDENCE_EVENT = "iCIMS evidence saved";
+export const COVERING_DIALOG_EVIDENCE_EVENT = "Covering dialog evidence saved";
+const COVERING_DIALOG_NOT_SAVED_EVENT = "Covering dialog evidence not saved.";
 const ICIMS_NOT_SAVED_EVENT = "iCIMS evidence not saved.";
 const NOT_SAVED_EVENT = "Post-submit evidence not saved.";
 const WORKDAY_NOT_SAVED_EVENT = "Workday evidence not saved.";
@@ -135,13 +142,24 @@ export const ashbyDiagnosticsFileSchema = z.object({
   visibleErrors: z.array(z.string().max(200)).max(10)
 });
 
+/** A modal dialog that covered the form (Track 39), as stored: every text redacted, every list cut to its bound. */
+export const coveringDialogFileSchema = z.object({
+  tag: z.string().max(20),
+  role: z.string().max(40).nullable(),
+  label: z.string().max(300),
+  description: z.string().max(300),
+  ariaAttributes: z.array(z.object({ name: z.string().regex(/^aria-[a-z-]{1,40}$/), value: z.string().max(300) })).max(20),
+  text: z.string().max(2_000),
+  buttons: z.array(z.object({ text: z.string().max(120), ariaLabel: z.string().max(120), title: z.string().max(120), disabled: z.boolean() })).max(20)
+});
+
 export const submitEvidenceFileSchema = z.object({
   version: z.literal(1),
   /** Null for a Workday account-step stop: no run was saved yet. */
   runId: z.string().min(1).nullable(),
   jobId: z.string().min(1),
   capturedAt: z.iso.datetime(),
-  outcome: z.enum(["field-errors", "refused", "challenged", "verification-code", "unknown", "workday-account", "workday-errors", "workday-entry", "icims-account", "icims-application"]),
+  outcome: z.enum(["field-errors", "refused", "challenged", "verification-code", "unknown", "workday-account", "workday-errors", "workday-entry", "icims-account", "icims-application", "covering-dialog"]),
   url: z.string().max(2_000),
   invalidFields: z.array(z.object({
     ref: z.string().max(200).nullable(),
@@ -157,7 +175,9 @@ export const submitEvidenceFileSchema = z.object({
   /** Ashby only: what the submit sent and got back (Track 22); null on other sites and older files. */
   ashbyNetwork: ashbyNetworkFileSchema.nullable().default(null),
   /** Ashby only: read-only diagnostics of the submit click (Track 27); null on other sites and older files. */
-  ashbyDiagnostics: ashbyDiagnosticsFileSchema.nullable().default(null)
+  ashbyDiagnostics: ashbyDiagnosticsFileSchema.nullable().default(null),
+  /** `covering-dialog` only: the dialogs over the form (Track 39); null on other outcomes and older files. */
+  coveringDialogs: z.array(coveringDialogFileSchema).max(5).nullable().default(null)
 });
 
 export type StoredSubmitEvidence = z.infer<typeof submitEvidenceFileSchema>;
@@ -242,6 +262,50 @@ function storedAshbyDiagnostics(diagnostics: AshbySubmitDiagnostics, scrub: (tex
     consoleDropped: count(diagnostics.consoleDropped, 0, Number.MAX_SAFE_INTEGER),
     visibleErrors: diagnostics.visibleErrors.slice(0, 10).map((value) => text(value, 200))
   };
+}
+
+type StoredCoveringDialog = z.infer<typeof coveringDialogFileSchema>;
+
+/** The dialogs as stored: every text redacted like the pipeline's notices and clipped, attribute names kept only in their aria-* shape. */
+function storedCoveringDialogs(dialogs: NonNullable<PostSubmitEvidence["coveringDialogs"]>, scrub: (text: string) => string): StoredCoveringDialog[] {
+  const text = (value: string, max: number) => clip(redactNoticeText(scrub(value)), max);
+  return dialogs.slice(0, 5).map((dialog) => ({
+    tag: /^[a-z][a-z0-9-]{0,19}$/.test(dialog.tag) ? dialog.tag : "element",
+    role: dialog.role === null ? null : text(dialog.role, 40),
+    label: text(dialog.label, 300),
+    description: text(dialog.description, 300),
+    ariaAttributes: dialog.ariaAttributes
+      .filter((attribute) => /^aria-[a-z-]{1,40}$/.test(attribute.name))
+      .slice(0, 20)
+      .map((attribute) => ({ name: attribute.name, value: text(attribute.value, 300) })),
+    text: text(dialog.text, 2_000),
+    buttons: dialog.buttons.slice(0, 20).map((button) => ({
+      text: text(button.text, 120), ariaLabel: text(button.ariaLabel, 120), title: text(button.title, 120), disabled: button.disabled === true
+    }))
+  }));
+}
+
+/** The lines `pnpm run:evidence` prints for the dialogs over the form; [] when the capture has none stored. */
+export function describeCoveringDialogs(dialogs: StoredSubmitEvidence["coveringDialogs"]): string[] {
+  if (dialogs === null) return [];
+  if (dialogs.length === 0) return ["Covering dialogs: none was still shown when the capture was read"];
+  const lines = [`Covering dialogs: ${dialogs.length}`];
+  dialogs.forEach((dialog, index) => {
+    const attributes = dialog.ariaAttributes.map((attribute) => `${attribute.name}="${attribute.value}"`).join(", ");
+    lines.push(`  - dialog ${index + 1}: <${dialog.tag}> role ${dialog.role === null ? "none" : `"${dialog.role}"`}; ${attributes || "no aria attributes"}`);
+    if (dialog.label) lines.push(`    label: ${dialog.label}`);
+    if (dialog.description) lines.push(`    description: ${dialog.description}`);
+    lines.push(`    text: ${dialog.text || "(none)"}`);
+    if (dialog.buttons.length === 0) lines.push("    buttons: none");
+    else {
+      lines.push("    buttons:");
+      for (const button of dialog.buttons) {
+        const extra = [button.ariaLabel && `aria-label "${button.ariaLabel}"`, button.title && `title "${button.title}"`, button.disabled && "disabled"].filter(Boolean).join(", ");
+        lines.push(`      - "${button.text}"${extra ? ` (${extra})` : ""}`);
+      }
+    }
+  });
+  return lines;
 }
 
 /** The lines `pnpm run:evidence` prints for Ashby's submit diagnostics; [] when there are none. */
@@ -333,6 +397,7 @@ const isWorkdayOutcome = (outcome: PostSubmitEvidence["outcome"]) => outcome ===
 const isIcimsOutcome = (outcome: PostSubmitEvidence["outcome"]) => outcome === "icims-account" || outcome === "icims-application";
 
 function evidenceEvent(outcome: PostSubmitEvidence["outcome"]): string {
+  if (outcome === "covering-dialog") return COVERING_DIALOG_EVIDENCE_EVENT;
   if (isWorkdayOutcome(outcome)) return WORKDAY_EVIDENCE_EVENT;
   if (isIcimsOutcome(outcome)) return ICIMS_EVIDENCE_EVENT;
   return SUBMIT_EVIDENCE_EVENT;
@@ -388,7 +453,8 @@ export async function savePostSubmitEvidence(input: SaveSubmitEvidenceInput): Pr
     screenshot: screenshotSaved ? "screenshot.png" : null,
     detail: typeof evidence.detail === "string" ? clip(redactNoticeText(scrub(evidence.detail)), 500) : null,
     ashbyNetwork: evidence.ashbyNetwork ? storedAshbyNetwork(evidence.ashbyNetwork, scrub) : null,
-    ashbyDiagnostics: evidence.ashbyDiagnostics ? storedAshbyDiagnostics(evidence.ashbyDiagnostics, scrub) : null
+    ashbyDiagnostics: evidence.ashbyDiagnostics ? storedAshbyDiagnostics(evidence.ashbyDiagnostics, scrub) : null,
+    coveringDialogs: evidence.coveringDialogs ? storedCoveringDialogs(evidence.coveringDialogs, scrub) : null
   } satisfies StoredSubmitEvidence);
   writePrivateAtomic(join(dir, "evidence.json"), JSON.stringify(stored, null, 2) + "\n");
 
@@ -484,6 +550,40 @@ export async function saveIcimsEvidenceQuietly(input: SaveIcimsEvidenceInput): P
   }
 }
 
+export type SaveCoveringDialogEvidenceInput = {
+  database: DatabaseSync;
+  dataDir: string;
+  /** The run the fill belongs to; at start its id is chosen before the run is saved. */
+  run: { id: string; jobId: string };
+  page: BrowserPage;
+  /** captureCoveringDialogEvidence's result, read while the dialog was up. */
+  evidence: PostSubmitEvidence;
+  now?: Date;
+};
+
+/**
+ * Saves the evidence of a modal dialog over the form (Track 39) the first
+ * time one leaves a field unfilled in the run: nothing when the run already
+ * keeps a `covering-dialog` capture. Clicks nothing. Never throws and never
+ * changes the run's outcome; a failure logs a plain event.
+ */
+export async function saveCoveringDialogEvidenceQuietly(input: SaveCoveringDialogEvidenceInput): Promise<void> {
+  try {
+    if (readSubmitEvidence(input.dataDir, input.run).some((entry) => entry.outcome === "covering-dialog")) return;
+    await savePostSubmitEvidence({
+      database: input.database, dataDir: input.dataDir, run: input.run, page: input.page,
+      evidence: { ...input.evidence, outcome: "covering-dialog" }, now: input.now
+    });
+  } catch {
+    try {
+      const status = getJobPosting(input.database, input.run.jobId)?.status ?? "APPLYING";
+      logApplicationEvent(input.database, { jobId: input.run.jobId, fromStatus: status, toStatus: status, detail: COVERING_DIALOG_NOT_SAVED_EVENT });
+    } catch {
+      // The run's own outcome stands.
+    }
+  }
+}
+
 /** Every valid evidence entry under the job's folder, newest first. */
 function readEvidenceEntries(dataDir: string, jobId: string): Array<StoredSubmitEvidence & { dir: string }> {
   const root = submitEvidenceRoot(dataDir, jobId);
@@ -537,7 +637,8 @@ const OUTCOME_TEXT: Record<StoredSubmitEvidence["outcome"], string> = {
   "workday-errors": "Workday would not save a step",
   "workday-entry": "the Workday application did not open",
   "icims-account": "the iCIMS account step stopped",
-  "icims-application": "the agent reached iCIMS's application and stopped"
+  "icims-application": "the agent reached iCIMS's application and stopped",
+  "covering-dialog": "a dialog covered the form while the agent filled it"
 };
 
 type EvidenceFlags = { target: { kind: "run" | "job"; ref: string }; profile: WorkspaceProfile; all: boolean };
@@ -675,6 +776,7 @@ export async function runEvidenceCommand(argv: string[], deps: Partial<RunEviden
       if (entry.challenge !== null) io.log(`Challenge: ${entry.challenge}`);
       if (entry.ashbyNetwork !== null) for (const line of describeAshbyNetwork(entry.ashbyNetwork)) io.log(line);
       if (entry.ashbyDiagnostics !== null) for (const line of describeAshbyDiagnostics(entry.ashbyDiagnostics)) io.log(line);
+      if (entry.coveringDialogs !== null) for (const line of describeCoveringDialogs(entry.coveringDialogs)) io.log(line);
       io.log(entry.screenshot ? `Screenshot: ${join(entry.dir, entry.screenshot)}` : "Screenshot: not saved");
       io.log("Visible text (redacted):");
       io.log(entry.text);

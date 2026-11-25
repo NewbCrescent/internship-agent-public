@@ -2,7 +2,7 @@ import type { Locator, Page } from "playwright-core";
 
 import { promptSearchTerms, type AtsKind, type BrowserField, type FillDecision, type PauseRecord, type RecognizedForm } from "@internship-agent/domain";
 
-import { dismissAnnouncementDialog, visibleModalDialogIn } from "./announcement-dialog";
+import { dismissAnnouncementDialog, readCoveringDialogsIn, visibleModalDialogIn, type CoveringDialog } from "./announcement-dialog";
 import { chooseApplyEntry, clickApplyEntry, dismissCookieBanner, embedSourcesOf, greenhouseEmbedTarget, type ApplyEntryCandidate } from "./apply-entry";
 import { isDoverOrAshby } from "./ats/adapters";
 import {
@@ -108,6 +108,12 @@ export type BrowserPage = {
   waitForFormReady?(): Promise<void>;
   /** A CAPTCHA challenge the candidate would see, read from the DOM only (challenge.ts); null otherwise. */
   visibleChallenge?(): Promise<VisibleChallenge | null>;
+  /**
+   * The visible modal dialogs over the page (announcement-dialog.ts
+   * readCoveringDialogsIn), read from the DOM without clicking anything; []
+   * when none (Track 39).
+   */
+  coveringDialogs?(): Promise<CoveringDialog[]>;
   /** Visible error or alert text, read after a submit that showed no confirmation. */
   alertText?(): Promise<string>;
   /**
@@ -182,6 +188,9 @@ export async function recognizeCurrentForm(page: BrowserPage): Promise<Recognize
  */
 export class FieldUnfillable extends Error {}
 
+/** The reason a bare list is left unfilled when a modal dialog still covers the form (clickBareList). */
+export const COVERING_DIALOG_REASON = "a dialog covers the form";
+
 /** A field applyDecisions could not fill, with a plain reason (never a raw Playwright message). */
 export type UnfilledField = { fieldId: string; reason: string };
 
@@ -192,8 +201,11 @@ function unfilledReason(error: unknown): string {
 }
 
 /** The pause that replaces a decision applyDecisions could not apply. */
-export function unfilledPause(field: BrowserField, reason: string): { decision: FillDecision; pause: PauseRecord } {
-  const question = `The agent could not fill "${field.label}": ${reason}. Answer it here, or fill it in the browser.`.slice(0, 500);
+export function unfilledPause(field: BrowserField, reason: string, runId?: string): { decision: FillDecision; pause: PauseRecord } {
+  // A covering dialog is never clicked through (Track 39): the candidate is told to look at it first, and where the capture is.
+  const question = (reason === COVERING_DIALOG_REASON
+    ? `The agent could not fill "${field.label}": ${reason}, and the agent does not click through or close such a dialog. Open the application in your browser to see what the dialog asks${runId ? ` (pnpm run:evidence --run ${runId.slice(0, 8)} shows what the agent saw)` : ""}, then answer it here, or fill it in the browser.`
+    : `The agent could not fill "${field.label}": ${reason}. Answer it here, or fill it in the browser.`).slice(0, 500);
   return {
     decision: {
       fieldId: field.id,
@@ -292,28 +304,72 @@ export async function choicesNotTaken(page: BrowserPage, form: RecognizedForm, d
 }
 
 /**
+ * The evidence of a modal dialog over the form (Track 39): the page's visible
+ * text, query-stripped URL, and alert text (capturePostSubmitEvidence) plus
+ * each covering dialog's text, role, aria attributes, and button labels, read
+ * without clicking anything. Never throws; a piece the page cannot give is
+ * left empty.
+ */
+export async function captureCoveringDialogEvidence(page: BrowserPage, fieldLabel: string): Promise<PostSubmitEvidence> {
+  let coveringDialogs: CoveringDialog[] = [];
+  try {
+    coveringDialogs = page.coveringDialogs ? await page.coveringDialogs() : [];
+  } catch {
+    coveringDialogs = [];
+  }
+  const evidence = await capturePostSubmitEvidence(page, "covering-dialog", {
+    invalidFields: [],
+    ashbyNetwork: null,
+    ashbyDiagnostics: null,
+    detail: `A dialog covered the form when the agent filled "${fieldLabel}"; the agent left it open and clicked nothing in it.`.slice(0, 500)
+  });
+  return { ...evidence, coveringDialogs };
+}
+
+export type ApplyDecisionsOptions = {
+  /**
+   * Called once per call, the first time a field is left unfilled with
+   * COVERING_DIALOG_REASON, with the page's evidence while the dialog is
+   * still up (Track 39). Awaited; an error it throws is ignored.
+   */
+  onCoveringDialog?: (evidence: PostSubmitEvidence) => Promise<void>;
+};
+
+/**
  * Applies the planned decisions. A page action that fails (a timeout, a
  * type-ahead with no matching suggestion, a choice that is not a text box)
  * is reported in `unfilled` instead of stopping the run; callers turn each
  * into a pause. An upload with no resolved file is a broken invariant and
- * still throws.
+ * still throws. The first field a covering dialog leaves unfilled hands its
+ * evidence to `options.onCoveringDialog`.
  */
 export async function applyDecisions(
   page: BrowserPage,
   form: RecognizedForm,
   decisions: FillDecision[],
-  uploadPathFor?: (decision: FillDecision) => string | null
+  uploadPathFor?: (decision: FillDecision) => string | null,
+  options: ApplyDecisionsOptions = {}
 ): Promise<{ applied: number; skipped: number; unfilled: UnfilledField[] }> {
   const fields = new Map(form.fields.map((field) => [field.id, field]));
   let applied = 0;
   let skipped = 0;
   const unfilled: UnfilledField[] = [];
+  let dialogReported = false;
   const attempt = async (field: BrowserField, action: () => Promise<void>): Promise<void> => {
     try {
       await action();
       applied += 1;
     } catch (error) {
-      unfilled.push({ fieldId: field.id, reason: unfilledReason(error) });
+      const reason = unfilledReason(error);
+      unfilled.push({ fieldId: field.id, reason });
+      if (reason === COVERING_DIALOG_REASON && !dialogReported && options.onCoveringDialog) {
+        dialogReported = true;
+        try {
+          await options.onCoveringDialog(await captureCoveringDialogEvidence(page, field.label));
+        } catch {
+          // The capture never changes the fill's outcome.
+        }
+      }
     }
   };
   for (const decision of decisions) {
@@ -908,6 +964,15 @@ export function createPlaywrightPage(page: Page): BrowserPage {
       // Turnstile's frame in a closed shadow root is invisible to the read above.
       return findShadowTurnstileFrame(page).catch(() => null);
     },
+    coveringDialogs: async () => {
+      // The top document, like the challenge read: clickBareList's modal check reads it there too.
+      try {
+        await ensureNameShim(page);
+        return await page.evaluate(readCoveringDialogsIn);
+      } catch {
+        return [];
+      }
+    },
     alertText: async () => {
       try {
         await ensureNameShim(page);
@@ -1347,7 +1412,7 @@ async function clickBareList(page: Page, target: Locator, timeoutMs: number): Pr
   }
   await ensureNameShim(page);
   if (await page.evaluate(findVisibleChallengeIn)) throw new FieldUnfillable("a site check covers the form");
-  if (await page.evaluate(visibleModalDialogIn)) throw new FieldUnfillable("a dialog covers the form");
+  if (await page.evaluate(visibleModalDialogIn)) throw new FieldUnfillable(COVERING_DIALOG_REASON);
   await target.dispatchEvent("click");
 }
 

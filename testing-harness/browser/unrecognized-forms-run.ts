@@ -27,7 +27,10 @@
  * (e) the same form with a layer that takes every trusted click once a resume
  *     is chosen (`?blocked=1`): the lists are still chosen and shown; with a
  *     modal "session expired" dialog instead (`?blocked=dialog`), nothing is
- *     clicked through and the list is left unfilled;
+ *     clicked through and the lists are left unfilled; the first one hands
+ *     over one evidence capture (Track 39) holding the page text, the
+ *     query-stripped URL, and the dialog's text, role, aria attributes, and
+ *     button labels, read without clicking either of its buttons;
  * (f) a picker that shows another country (`?country=ca`) is chosen to the
  *     profile's;
  * (g) a Phenom-style "Country Phone Code" select (fixtures/phenom-application.html)
@@ -46,6 +49,7 @@ import { chromium, type Page } from "playwright-core";
 
 import {
   applyDecisions,
+  COVERING_DIALOG_REASON,
   classifyUploadRole,
   createApplicationPage,
   createPlaywrightPage,
@@ -54,7 +58,8 @@ import {
   planAutofill,
   UNLABELED_CONTROL_LABEL,
   recognizeCurrentForm,
-  type FieldResolution
+  type FieldResolution,
+  type PostSubmitEvidence
 } from "@internship-agent/browser";
 
 const PREFIX = "internship-agent-unrecognized-forms-";
@@ -87,7 +92,7 @@ const EXPECTED: Record<string, string> = {
   "input-27": "Job Board"
 };
 
-type FixtureState = { chosen: Record<string, string>; opened: number };
+type FixtureState = { chosen: Record<string, string>; opened: number; dialogClicks?: number };
 
 async function main(): Promise<void> {
   const temp = mkdtempSync(join(tmpdir(), PREFIX));
@@ -294,12 +299,35 @@ async function main(): Promise<void> {
       const tab = await open(`${EIGHTFOLD_URL}&blocked=dialog&welcome=0`);
       const page = createPlaywrightPage(tab);
       const form = await recognizeCurrentForm(page);
+      check((await page.coveringDialogs!()).length === 0, "(e) a covering dialog was read before the resume was chosen");
       await tab.locator("#Resume_CV_resume").setInputFiles(resumePath);
-      const applied = await applyDecisions(page, form, [{ fieldId: "input-19", action: "choose", value: "Yes", basis: null, reason: "fixture", pause: null }]);
-      check(applied.unfilled.length === 1 && applied.unfilled[0]!.fieldId === "input-19" && applied.unfilled[0]!.reason === "a dialog covers the form",
+      // Track 39: the first field the dialog leaves unfilled hands over one capture of it, read while it is up; nothing in it is clicked.
+      const captures: PostSubmitEvidence[] = [];
+      const applied = await applyDecisions(page, form, [
+        { fieldId: "input-19", action: "choose", value: "Yes", basis: null, reason: "fixture", pause: null },
+        { fieldId: "input-22", action: "choose", value: "No", basis: null, reason: "fixture", pause: null }
+      ], undefined, { onCoveringDialog: async (evidence) => { captures.push(evidence); } });
+      check(applied.unfilled.length === 2 && applied.unfilled.every((entry) => entry.reason === COVERING_DIALOG_REASON) && applied.unfilled[0]!.fieldId === "input-19",
         `(e) under the session dialog: ${JSON.stringify(applied.unfilled)}`);
       const state = await fixtureState(tab);
-      check(state.chosen["input-19"] === undefined, `(e) a list was chosen through the session dialog: ${JSON.stringify(state.chosen)}`);
+      check(state.chosen["input-19"] === undefined && state.chosen["input-22"] === undefined, `(e) a list was chosen through the session dialog: ${JSON.stringify(state.chosen)}`);
+      check(state.dialogClicks === 0, `(e) the session dialog's buttons were clicked ${state.dialogClicks} time(s)`);
+      check(await tab.locator(".expired").isVisible(), "(e) the session dialog was closed");
+      check(captures.length === 1, `(e) covering-dialog captures: ${captures.length}, expected 1`);
+      const capture = captures[0];
+      const label19 = form.fields.find((field) => field.id === "input-19")?.label ?? "";
+      check(capture?.outcome === "covering-dialog" && Boolean(label19) && (capture.detail ?? "").includes(label19),
+        `(e) capture outcome and detail: ${JSON.stringify({ outcome: capture?.outcome, detail: capture?.detail })}`);
+      check((capture?.bodyText ?? "").includes("Your session has expired"), "(e) the capture's visible text misses the dialog");
+      check(capture?.url === EIGHTFOLD_URL.split("?")[0], `(e) the capture's URL keeps its query: ${capture?.url}`);
+      const dialog = capture?.coveringDialogs?.length === 1 ? capture.coveringDialogs[0]! : null;
+      const aria = Object.fromEntries((dialog?.ariaAttributes ?? []).map((attribute) => [attribute.name, attribute.value]));
+      check(dialog !== null && dialog.tag === "div" && dialog.role === "dialog" && dialog.label === "Your session has expired"
+        && dialog.description === "Reload the page to continue." && dialog.text.includes("Your session has expired")
+        && aria["aria-modal"] === "true" && aria["aria-labelledby"] === "expiredTitle" && aria["aria-describedby"] === "expiredText",
+        `(e) the covering dialog as read: ${JSON.stringify(capture?.coveringDialogs)}`);
+      const buttons = (dialog?.buttons ?? []).map((button) => `${button.text}|${button.ariaLabel}|${button.title}|${button.disabled}`);
+      check(JSON.stringify(buttons) === JSON.stringify(["Sign in again|||false", "×|Close|Close|false"]), `(e) the dialog's buttons as read: ${JSON.stringify(buttons)}`);
       await tab.close();
     }
 

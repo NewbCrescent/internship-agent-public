@@ -1,5 +1,6 @@
 import type { BrowserField, FillDecision, PauseRecord, RecognizedForm } from "@internship-agent/domain";
 
+import type { CoveringDialog } from "./announcement-dialog";
 import type { AshbySubmitDiagnostics } from "./ats/ashby-diagnostics";
 import type { AshbySubmitNetwork } from "./ats/ashby-network";
 import { classifyFieldRole, isSensitiveRole } from "./ats/field-roles";
@@ -29,10 +30,13 @@ import type { BrowserPage } from "./handshake-executor";
  * Two are iCIMS stops, not submit clicks either:
  * - `icims-account`: the iCIMS account step held the host.
  * - `icims-application`: the agent reached iCIMS's application after the account step and stopped there.
+ *
+ * One is a fill stop, not a submit click either (Track 39):
+ * - `covering-dialog`: a modal dialog covered the form while the agent filled it ("a dialog covers the form").
  */
 export type PostSubmitOutcome =
   | "field-errors" | "refused" | "challenged" | "verification-code" | "unknown" | "workday-account" | "workday-errors" | "workday-entry"
-  | "icims-account" | "icims-application";
+  | "icims-account" | "icims-application" | "covering-dialog";
 
 /** A field the page marks invalid: the control's id (else name, else data-ia-control tag), its label, and the site's error text. */
 export type InvalidField = { ref: string | null; label: string; error: string };
@@ -68,6 +72,12 @@ export type PostSubmitEvidence = {
    * values; kept in the run's local evidence only, never sent anywhere.
    */
   ashbyDiagnostics?: AshbySubmitDiagnostics | null;
+  /**
+   * `covering-dialog` only (Track 39): the visible modal dialogs over the
+   * form (announcement-dialog.ts readCoveringDialogsIn), raw; the writer
+   * redacts every text.
+   */
+  coveringDialogs?: CoveringDialog[] | null;
 };
 
 const MAX_BODY_TEXT = 20_000;

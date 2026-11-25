@@ -82,6 +82,80 @@ export function visibleModalDialogIn(): boolean {
   });
 }
 
+/**
+ * A visible modal dialog as the evidence capture reads it (Track 39): what a
+ * candidate needs to tell what it is, read without clicking, focusing, or
+ * tagging anything. Raw page text; the evidence writer redacts it.
+ */
+export type CoveringDialog = {
+  /** The element's tag name, lower case ("div", "dialog"). */
+  tag: string;
+  /** Its `role` attribute, or null for a `dialog` element without one. */
+  role: string | null;
+  /** Its aria-label, else the text of the elements its aria-labelledby names; at most 300 characters. */
+  label: string;
+  /** The text of the elements its aria-describedby names; at most 300 characters. */
+  description: string;
+  /** Every `aria-*` attribute on it, values at most 300 characters; at most 20. */
+  ariaAttributes: Array<{ name: string; value: string }>;
+  /** Its innerText, spaces collapsed, at most 2,000 characters. */
+  text: string;
+  /** Its visible buttons (`button`, `[role="button"]`, button-type inputs), at most 20. */
+  buttons: Array<{ text: string; ariaLabel: string; title: string; disabled: boolean }>;
+};
+
+/**
+ * Visible modal dialogs outside the cookie-consent containers (the same
+ * selector, visibility, and exclusion as visibleModalDialogIn), in page order,
+ * at most 5. Read only: unlike collectAnnouncementDialogsIn it tags nothing.
+ * Runs in the page, so every helper is declared here.
+ */
+export function readCoveringDialogsIn(): CoveringDialog[] {
+  const COOKIE_ROOTS = '#onetrust-consent-sdk, #onetrust-banner-sdk, #onetrust-pc-sdk, #ot-sdk-cookie-policy, .ot-sdk-container, #CybotCookiebotDialog, #truste-consent-track, #truste-consent-content, #consent_blackbar, #usercentrics-root, #didomi-host, .cc-window, #cookiescript_injected, #cmplz-cookiebanner-container, #cookie-law-info-bar, #cookie-banner, #cookie-consent, #cookieConsent, [role="dialog"][aria-label*="cookie" i], [role="alertdialog"][aria-label*="cookie" i], [role="region"][aria-label*="cookie" i]';
+  const DIALOGS = '[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"], dialog[open]';
+  const BUTTONS = 'button, [role="button"], input[type="button"], input[type="submit"], input[type="reset"]';
+  const shown = (element: Element): boolean => {
+    if (element.getClientRects().length === 0) return false;
+    const style = getComputedStyle(element);
+    return style.visibility !== "hidden" && style.display !== "none";
+  };
+  const collapse = (text: string | null | undefined, max: number): string => (text ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+  const named = (ids: string | null): string => (ids ?? "").split(/\s+/).filter(Boolean)
+    .map((id) => (document.getElementById(id) as HTMLElement | null)?.innerText ?? "")
+    .join(" ");
+  const found: CoveringDialog[] = [];
+  for (const dialog of Array.from(document.querySelectorAll(DIALOGS))) {
+    if (found.length >= 5) break;
+    if (!shown(dialog) || dialog.closest(COOKIE_ROOTS)) continue;
+    const ariaAttributes = Array.from(dialog.attributes)
+      .filter((attribute) => attribute.name.startsWith("aria-"))
+      .slice(0, 20)
+      .map((attribute) => ({ name: attribute.name, value: collapse(attribute.value, 300) }));
+    const buttons: CoveringDialog["buttons"] = [];
+    for (const control of Array.from(dialog.querySelectorAll(BUTTONS))) {
+      if (buttons.length >= 20) break;
+      if (!shown(control)) continue;
+      const input = control instanceof HTMLInputElement ? control : null;
+      buttons.push({
+        text: collapse(input ? input.value : (control as HTMLElement).innerText, 120),
+        ariaLabel: collapse(control.getAttribute("aria-label"), 120),
+        title: collapse(control.getAttribute("title"), 120),
+        disabled: (control as HTMLButtonElement).disabled === true || control.getAttribute("aria-disabled") === "true"
+      });
+    }
+    found.push({
+      tag: dialog.tagName.toLowerCase().slice(0, 20),
+      role: dialog.getAttribute("role") === null ? null : collapse(dialog.getAttribute("role"), 40),
+      label: collapse(dialog.getAttribute("aria-label") || named(dialog.getAttribute("aria-labelledby")), 300),
+      description: collapse(named(dialog.getAttribute("aria-describedby")), 300),
+      ariaAttributes,
+      text: collapse((dialog as HTMLElement).innerText, 2_000),
+      buttons
+    });
+  }
+  return found;
+}
+
 /** Wording that makes a dialog more than an announcement: it is never closed by the agent. */
 const SAFEGUARD_WORDING = /\b(?:sign\s?in|log\s?in|password|captcha|robot|human|verif\w*|security check|cookies?|consent|session|expired?|error|terms|privacy|submit\w*|application)\b/i;
 const CLOSE_WORDING = /^(?:close|dismiss)\b/;

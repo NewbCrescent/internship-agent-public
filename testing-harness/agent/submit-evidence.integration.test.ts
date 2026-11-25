@@ -22,10 +22,12 @@ import {
 import {
   describeAshbyDiagnostics,
   describeAshbyNetwork,
+  describeCoveringDialogs,
   readJobEvidence,
   readSubmitEvidence,
   redactEvidenceText,
   runEvidenceCommand,
+  saveCoveringDialogEvidenceQuietly,
   savePostSubmitEvidence,
   savePostSubmitEvidenceQuietly,
   submitEvidenceFileSchema
@@ -920,6 +922,87 @@ describe("Ashby's submit diagnostics in the evidence (Track 27)", () => {
       "  - [warning, click 0] (not kept)",
       "Visible errors: none"
     ]);
+    database.close();
+  });
+});
+
+describe("a dialog that covers the form (Track 39)", () => {
+  const DIALOG = {
+    tag: "div", role: "dialog", label: "Session for jordan@example.test", description: "Reference 12345678",
+    ariaAttributes: [{ name: "aria-modal", value: "true" }, { name: "aria-describedby", value: "note" }, { name: "onclick", value: "steal()" }],
+    text: "Your session has expired. Signed in as jordan@example.test. Reload https://careers.example.test/apply?token=abc",
+    buttons: [{ text: "Sign in again", ariaLabel: "", title: "", disabled: false }, { text: "×", ariaLabel: "Close jordan@example.test", title: "Close", disabled: true }]
+  };
+  const covering = (overrides: Partial<PostSubmitEvidence> = {}) => evidence({
+    outcome: "covering-dialog", invalidFields: [], alertText: "", detail: `A dialog covered the form when the agent filled "Pronouns"; the agent left it open and clicked nothing in it.`,
+    coveringDialogs: [DIALOG], ...overrides
+  });
+
+  it("stores the dialog redacted, once per run, and reads older files as null", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    const page = stubPage();
+    await saveCoveringDialogEvidenceQuietly({ database, dataDir, run, page, evidence: covering(), now: new Date("2026-11-25T18:00:00.000Z") });
+    await saveCoveringDialogEvidenceQuietly({ database, dataDir, run, page, evidence: covering(), now: new Date("2026-11-25T18:05:00.000Z") });
+    const stored = readSubmitEvidence(dataDir, run);
+    expect(stored).toHaveLength(1);
+    expect(page.shots).toHaveLength(1);
+    expect(stored[0]!.coveringDialogs).toEqual([{
+      tag: "div", role: "dialog", label: "Session for [email]", description: "Reference [number]",
+      ariaAttributes: [{ name: "aria-modal", value: "true" }, { name: "aria-describedby", value: "note" }],
+      text: "Your session has expired. Signed in as [email] Reload https://careers.example.test/apply",
+      buttons: [{ text: "Sign in again", ariaLabel: "", title: "", disabled: false }, { text: "×", ariaLabel: "Close [email]", title: "Close", disabled: true }]
+    }]);
+    const raw = readFileSync(join(stored[0]!.dir, "evidence.json"), "utf8");
+    for (const secret of ["jordan@example.test", "12345678", "token=abc", "steal()"]) expect(raw).not.toContain(secret);
+    expect(listApplicationEvents(database, run.jobId).map((event) => event.detail)).toEqual([
+      `Covering dialog evidence saved (covering-dialog): applications/${run.jobId}/submit-evidence/2026-11-25T18-00-00-000Z-${run.id}; view it with pnpm run:evidence --run ${run.id.slice(0, 8)}.`
+    ]);
+    // Other outcomes and older files carry no dialogs.
+    const plain = await savePostSubmitEvidence({ database, dataDir, run, page: stubPage(), evidence: evidence(), now: new Date("2026-11-25T18:10:00.000Z") });
+    expect(JSON.parse(readFileSync(join(dataDir, plain.relativeDir, "evidence.json"), "utf8")).coveringDialogs).toBeNull();
+    const old = submitEvidenceFileSchema.parse({
+      version: 1, runId: run.id, jobId: run.jobId, capturedAt: "2026-11-19T10:00:00.000Z", outcome: "unknown", url: "", invalidFields: [],
+      alertText: "", challenge: null, text: "", screenshot: null
+    });
+    expect(old.coveringDialogs).toBeNull();
+    database.close();
+  });
+
+  it("fails quietly with a plain event when the folder cannot be written", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    writeFileSync(join(dataDir, "applications"), "not a folder");
+    await expect(saveCoveringDialogEvidenceQuietly({ database, dataDir, run, page: stubPage(), evidence: covering() })).resolves.toBeUndefined();
+    expect(listApplicationEvents(database, run.jobId).map((event) => event.detail)).toEqual(["Covering dialog evidence not saved."]);
+    database.close();
+  });
+
+  it("prints the dialog with pnpm run:evidence, nothing personal", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-evidence-data-");
+    const run = syntheticRun(database);
+    await saveCoveringDialogEvidenceQuietly({ database, dataDir, run, page: stubPage(), evidence: covering() });
+    const lines: string[] = [];
+    const io = { open: () => database, close: () => undefined, dataDir: () => dataDir, log: (line: string) => { lines.push(line); } };
+    expect(await runEvidenceCommand(["--run", run.id.slice(0, 8)], io)).toBe(0);
+    expect(lines).toEqual(expect.arrayContaining([
+      `Detail: A dialog covered the form when the agent filled "Pronouns"; the agent left it open and clicked nothing in it.`,
+      "Covering dialogs: 1",
+      `  - dialog 1: <div> role "dialog"; aria-modal="true", aria-describedby="note"`,
+      "    label: Session for [email]",
+      "    description: Reference [number]",
+      "    text: Your session has expired. Signed in as [email] Reload https://careers.example.test/apply",
+      "    buttons:",
+      `      - "Sign in again"`,
+      `      - "×" (aria-label "Close [email]", title "Close", disabled)`
+    ]));
+    expect(lines.some((line) => line.endsWith(": covering-dialog (a dialog covered the form while the agent filled it)"))).toBe(true);
+    expect(lines.join("\n")).not.toContain("jordan@example.test");
+    expect(describeCoveringDialogs(null)).toEqual([]);
+    expect(describeCoveringDialogs([])).toEqual(["Covering dialogs: none was still shown when the capture was read"]);
     database.close();
   });
 });

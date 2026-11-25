@@ -71,6 +71,7 @@ import {
   SubmissionHeld,
   SubmissionNeedsInput,
   unfilledPause,
+  type ApplyDecisionsOptions,
   type BrowserPage,
   type EducationInputs,
   type FieldResolution,
@@ -128,7 +129,7 @@ import { assertHandshakeSignedIn } from "./handshake-session-service";
 import { applyVoiceDrafts, createDefaultVoiceDrafter, draftSourcesFor, type VoiceDrafter } from "./voice-drafting";
 import { AutomaticRunStopped, IcimsAccountHeld, PostingClosed, WorkdayAccountHeld, WorkdayEntryStopped } from "./run-errors";
 import { postingLocationNames, postingQuestionContext, savedSelfIdentification } from "./saved-answers";
-import { saveIcimsEvidenceQuietly, savePostSubmitEvidenceQuietly, saveWorkdayEvidenceQuietly } from "./submit-evidence";
+import { saveCoveringDialogEvidenceQuietly, saveIcimsEvidenceQuietly, savePostSubmitEvidenceQuietly, saveWorkdayEvidenceQuietly } from "./submit-evidence";
 import { ensureIcimsAccount, type IcimsAccountRuntime } from "./icims-account-service";
 import { getIcimsAccount } from "./icims-account-store";
 import { acceptJobviteConsentStep, logStandingAcceptances, standingPlannerInputs } from "./standing-consent";
@@ -277,13 +278,15 @@ function withUploadedResume(decisions: FillDecision[], resume: BaseResume | null
 /**
  * Each field the page would not take (applyDecisions' `unfilled`) becomes a
  * pause in place of its decision: the run waits for the candidate instead of
- * stopping on a timeout.
+ * stopping on a timeout. The run's id lets a covering-dialog pause name its
+ * evidence.
  */
 function pauseUnfilled(
   form: RecognizedForm,
   decisions: FillDecision[],
   pauses: PauseRecord[],
-  unfilled: UnfilledField[]
+  unfilled: UnfilledField[],
+  runId: string
 ): { decisions: FillDecision[]; pauses: PauseRecord[] } {
   const fields = new Map(form.fields.map((field) => [field.id, field]));
   let nextDecisions = decisions;
@@ -291,11 +294,20 @@ function pauseUnfilled(
   for (const entry of unfilled) {
     const field = fields.get(entry.fieldId);
     if (!field) continue;
-    const held = unfilledPause(field, entry.reason);
+    const held = unfilledPause(field, entry.reason, runId);
     nextDecisions = nextDecisions.map((decision) => (decision.fieldId === entry.fieldId ? held.decision : decision));
     nextPauses = [...nextPauses.filter((pause) => pause.fieldId !== entry.fieldId), held.pause];
   }
   return { decisions: nextDecisions, pauses: nextPauses };
+}
+
+/**
+ * applyDecisions' options for a run: the first field a modal dialog over the
+ * form leaves unfilled saves one capture of it for the run (Track 39), while
+ * the dialog is still up; nothing in it is clicked.
+ */
+function coveringDialogCapture(database: DatabaseSync, dataDir: string, run: { id: string; jobId: string }, page: BrowserPage): ApplyDecisionsOptions {
+  return { onCoveringDialog: (evidence) => saveCoveringDialogEvidenceQuietly({ database, dataDir, run, page, evidence }) };
 }
 
 /** The uploaded resume a run's decisions send, if any. */
@@ -923,13 +935,15 @@ export async function startBrowserRun(
       : automatic
         ? "Browser run started automatically from the verified package; your approval is required before submission."
         : "Browser run started from the approved package.");
-    const { applied, unfilled } = await applyDecisions(page, form, decisions, uploadPathFor);
-    const filled = pauseUnfilled(form, decisions, plan.pauses, unfilled);
+    // The run's id is chosen first, so a covering dialog's capture is saved for it while the dialog is still up.
+    const runId = randomUUID();
+    const { applied, unfilled } = await applyDecisions(page, form, decisions, uploadPathFor, coveringDialogCapture(database, dataDir, { id: runId, jobId }, page));
+    const filled = pauseUnfilled(form, decisions, plan.pauses, unfilled, runId);
     // Each statement accepted or signed under the standing settings, with its exact text (unfilled ones are pauses now).
     logStandingAcceptances(database, jobId, filled.decisions);
     const now = new Date().toISOString();
     const run = saveBrowserRun(database, {
-      id: randomUUID(),
+      id: runId,
       jobId,
       applicationUrl: formUrl,
       status: "started",
@@ -1333,8 +1347,8 @@ export async function continueBrowserRun(
       decisions,
       options.renderPdf ?? renderHtmlToPdf
     );
-    const { applied, unfilled } = await applyDecisions(page, form, decisions, uploadPathFor);
-    const filled = pauseUnfilled(form, decisions, pauses, unfilled);
+    const { applied, unfilled } = await applyDecisions(page, form, decisions, uploadPathFor, coveringDialogCapture(database, dataDir, { id: runId, jobId: run.jobId }, page));
+    const filled = pauseUnfilled(form, decisions, pauses, unfilled, runId);
     const stillOpen = filled.pauses.filter((entry) => entry.status === "open").length;
     // Nothing filled and nothing left to ask: the reopened page is not the run's form, so the run stays paused.
     if (stillOpen === 0 && applied === 0 && !filled.decisions.some((decision) => decision.action === "keep")) {
@@ -1560,10 +1574,10 @@ export async function submitBrowserRun(
       run.decisions,
       options.renderPdf ?? renderHtmlToPdf
     );
-    const { unfilled } = await applyDecisions(page, form, run.decisions, uploadPathFor);
+    const { unfilled } = await applyDecisions(page, form, run.decisions, uploadPathFor, coveringDialogCapture(database, dataDir, { id: runId, jobId: run.jobId }, page));
     if (unfilled.length > 0) {
       // Nothing is clicked: the approval covered a form that is no longer filled as shown.
-      const filled = pauseUnfilled(form, run.decisions, run.pauses, unfilled);
+      const filled = pauseUnfilled(form, run.decisions, run.pauses, unfilled, runId);
       updateBrowserRun(database, runId, {
         status: "paused-needs-input", submissionApprovedAt: null, decisions: filled.decisions, pauses: filled.pauses
       });
@@ -1575,7 +1589,7 @@ export async function submitBrowserRun(
     // Read back before the click: every choice on a radio question must show as made (Track 25).
     const notTaken = await choicesNotTaken(page, form, run.decisions);
     if (notTaken.length > 0) {
-      const filled = pauseUnfilled(form, run.decisions, run.pauses, notTaken);
+      const filled = pauseUnfilled(form, run.decisions, run.pauses, notTaken, runId);
       updateBrowserRun(database, runId, {
         status: "paused-needs-input", submissionApprovedAt: null, decisions: filled.decisions, pauses: filled.pauses
       });

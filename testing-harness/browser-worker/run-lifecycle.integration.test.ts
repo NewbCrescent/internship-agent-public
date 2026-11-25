@@ -27,6 +27,8 @@ import {
 } from "@internship-agent/db";
 import { AUTO_SUBMIT_EVENT, type BrowserField } from "@internship-agent/domain";
 import {
+  COVERING_DIALOG_REASON,
+  FieldUnfillable,
   FORM_CHANGED_FIELD,
   recognizeFields,
   SubmissionChallenged,
@@ -37,6 +39,7 @@ import {
   SubmissionUnconfirmed,
   submitEvidenceRoot,
   type BrowserPage,
+  type CoveringDialog,
   type InvalidField,
   type WorkdayAccountOutcome,
   type WorkdayCredentials,
@@ -411,6 +414,97 @@ describe("browser run lifecycle", () => {
     expect(started.run.pauses[0]!.question).toBe(`The agent could not fill "What is your available start date?": the field did not respond in time. Answer it here, or fill it in the browser.`);
     expect(started.run.decisions.find((decision) => decision.fieldId === "q1")).toMatchObject({ action: "pause" });
     expect(JSON.stringify(started.run)).not.toContain("Timeout 30000ms");
+    database.close();
+  });
+
+  it("saves one capture of a dialog that covers the form for the run, redacted, and the pause says where to look (Track 39)", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = approvedJobId(database);
+    // Fictional: a modal "session expired" dialog over the form; the page's own email stands in for a value redaction removes.
+    const dialog: CoveringDialog = {
+      tag: "div", role: "dialog", label: "Your session has expired", description: "Signed in as jordan@example.test",
+      ariaAttributes: [{ name: "aria-modal", value: "true" }, { name: "aria-labelledby", value: "expiredTitle" }],
+      text: "Your session has expired Signed in as jordan@example.test Sign in again ×",
+      buttons: [{ text: "Sign in again", ariaLabel: "", title: "", disabled: false }, { text: "×", ariaLabel: "Close", title: "Close", disabled: false }]
+    };
+    const controls: RawControl[] = [
+      { tag: "input", type: "text", id: "q1", label: "What is your available start date?", required: true },
+      { tag: "input", type: "email", id: "email", label: "Email", required: true },
+      { tag: "button", label: "Submit application" }
+    ];
+    let shots = 0;
+    const covered = (): BrowserPage => ({
+      ...fakePage({ controls, body: "Application form\nYour session has expired\nSigned in as jordan@example.test" }),
+      fillField: async () => { throw new FieldUnfillable(COVERING_DIALOG_REASON); },
+      coveringDialogs: async () => [dialog],
+      screenshot: async (path: string) => { shots += 1; writeFileSync(path, "fictional png"); }
+    });
+    const started = await startBrowserRun(jobId, "https://app.joinhandshake.com/apply/900001", { database, dataDir, openPage: async () => covered() });
+    const ref = started.run.id.slice(0, 8);
+    expect(started.run.status).toBe("paused-needs-input");
+    expect(started.run.pauses.map((pause) => pause.fieldId).sort()).toEqual(["email", "q1"]);
+    expect(started.run.pauses.find((pause) => pause.fieldId === "q1")!.question).toBe(
+      `The agent could not fill "What is your available start date?": a dialog covers the form, and the agent does not click through or close such a dialog. `
+      + `Open the application in your browser to see what the dialog asks (pnpm run:evidence --run ${ref} shows what the agent saw), then answer it here, or fill it in the browser.`
+    );
+
+    // Two fields were covered; one capture, saved for the run while the page was open.
+    const root = submitEvidenceRoot(dataDir, jobId);
+    const folders = () => readdirSync(root);
+    expect(folders()).toHaveLength(1);
+    expect(shots).toBe(1);
+    const dir = join(root, folders()[0]!);
+    const stored = JSON.parse(readFileSync(join(dir, "evidence.json"), "utf8"));
+    expect(stored).toMatchObject({
+      runId: started.run.id, jobId, outcome: "covering-dialog", screenshot: "screenshot.png", invalidFields: [],
+      detail: `A dialog covered the form when the agent filled "What is your available start date?"; the agent left it open and clicked nothing in it.`,
+      coveringDialogs: [{
+        tag: "div", role: "dialog", label: "Your session has expired",
+        ariaAttributes: [{ name: "aria-modal", value: "true" }, { name: "aria-labelledby", value: "expiredTitle" }],
+        buttons: [{ text: "Sign in again", ariaLabel: "", title: "", disabled: false }, { text: "×", ariaLabel: "Close", title: "Close", disabled: false }]
+      }]
+    });
+    expect(stored.text).toContain("Your session has expired");
+    expect(JSON.stringify(stored)).not.toContain("jordan@example.test");
+    expect(statSync(join(dir, "evidence.json")).mode & 0o777).toBe(0o600);
+    expect(statSync(join(dir, "screenshot.png")).mode & 0o777).toBe(0o600);
+    const savedEvents = () => (database.prepare("SELECT detail FROM application_events WHERE job_id = ? AND detail LIKE 'Covering dialog evidence%'").all(jobId) as Array<{ detail: string }>);
+    expect(savedEvents()).toEqual([{ detail: `Covering dialog evidence saved (covering-dialog): applications/${jobId}/submit-evidence/${folders()[0]}; view it with pnpm run:evidence --run ${ref}.` }]);
+
+    const lines: string[] = [];
+    const io = { open: () => database, close: () => undefined, dataDir: () => dataDir, log: (line: string) => { lines.push(line); } };
+    expect(await runEvidenceCommand(["--run", ref], io)).toBe(0);
+    expect(lines.some((line) => line.endsWith(": covering-dialog (a dialog covered the form while the agent filled it)"))).toBe(true);
+    expect(lines).toEqual(expect.arrayContaining([
+      "Covering dialogs: 1",
+      `  - dialog 1: <div> role "dialog"; aria-modal="true", aria-labelledby="expiredTitle"`,
+      "    label: Your session has expired",
+      "    buttons:",
+      `      - "Sign in again"`,
+      `      - "×" (aria-label "Close", title "Close")`
+    ]));
+    expect(lines.join("\n")).not.toContain("jordan@example.test");
+
+    // Covered again on continue: still the run's one capture.
+    const continued = await continueBrowserRun(started.run.id, { database, dataDir, openPage: async () => covered() });
+    expect(continued.run.status).toBe("paused-needs-input");
+    expect(folders()).toHaveLength(1);
+    expect(shots).toBe(1);
+    expect(savedEvents()).toHaveLength(1);
+    database.close();
+  });
+
+  it("saves no dialog capture when a fill fails for another reason", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = approvedJobId(database);
+    let reads = 0;
+    const page = { ...fakePage(), fillField: async () => { throw new FieldUnfillable("the site did not keep the suggestion"); }, coveringDialogs: async () => { reads += 1; return []; } };
+    const started = await startBrowserRun(jobId, "https://app.joinhandshake.com/apply/900001", { database, dataDir, openPage: async () => page });
+    expect(started.run.pauses[0]!.question).toBe(`The agent could not fill "What is your available start date?": the site did not keep the suggestion. Answer it here, or fill it in the browser.`);
+    expect(reads).toBe(0);
+    expect(existsSync(submitEvidenceRoot(dataDir, jobId))).toBe(false);
     database.close();
   });
 
