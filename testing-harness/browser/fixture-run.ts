@@ -257,7 +257,7 @@ async function main(): Promise<void> {
   const secondWalk = await walkWorkdayApplication(workday, planWorkday, { mode: "fill", history: historyOptions });
   if (secondWalk.outcome !== "review") failures.push(`workday: expected to stop at Review, got ${secondWalk.outcome} (${secondWalk.errors.join(" ")} ${secondWalk.pauses.map((pause) => pause.question).join(" ")})`);
   type FixtureState = {
-    resumes: string[]; transcript: string | null; submitted: boolean;
+    step: number; resumes: string[]; transcript: string | null; submitted: boolean;
     work: Array<Record<string, string | boolean>>; education: Array<Record<string, string>>;
   };
   const fixtureState = (tab: typeof workdayTab) => tab.evaluate(() => (window as unknown as { fixture: FixtureState }).fixture);
@@ -299,6 +299,38 @@ async function main(): Promise<void> {
   if (gapsState.values["formField-phoneType"] !== "Home Mobile") failures.push(`workday gaps: phone type should be Home Mobile, got ${gapsState.values["formField-phoneType"]}`);
   if (gapsState.resumes.join() !== "resume.pdf") failures.push(`workday gaps: expected the resume on My Experience's "Upload a file" input, got ${gapsState.resumes.join()}`);
   if (gapsState.values["formField-earliestStart"] !== "06/01/2027") failures.push(`workday gaps: the start date should read 06/01/2027 (month, day, year), got ${gapsState.values["formField-earliestStart"]}`);
+
+  // Synthetic, modeled on the 2026-11-25 evidence of neogen.wd5, itw.wd5, littelfuse.wd1, Activision and zoll.wd5:
+  // the resume shows "<file> loading" for 2.5 s, then "<file> successfully uploaded", and Save and Continue moves
+  // after 1 s with that status still on screen. The walk waits for the upload and never reads its status as an error.
+  const uploadTab = await launched.newPage();
+  await uploadTab.goto(`${workdayUrl}?gaps=1&upload=slow`);
+  const uploadWorkday = createWorkdayPage(uploadTab);
+  await uploadWorkday.enterApplication();
+  const uploadWalk = await walkWorkdayApplication(uploadWorkday, planWorkday, { mode: "fill", history: historyOptions });
+  if (uploadWalk.outcome !== "review") {
+    failures.push(`workday slow upload: expected to stop at Review, got ${uploadWalk.outcome} (${uploadWalk.errors.join(" ")} ${uploadWalk.pauses
+      .filter((pause) => pause.status === "open").map((pause) => `${pause.fieldId}: ${pause.question}`).join(" | ")})`);
+  }
+  const uploadState = await fixtureState(uploadTab);
+  if (uploadState.resumes.join() !== "resume.pdf") failures.push(`workday slow upload: expected the resume attached once, got ${JSON.stringify(uploadState.resumes)}`);
+  const statusPauses = uploadWalk.pauses.filter((pause) => /loading|successfully uploaded/i.test(`${pause.label} ${pause.question}`));
+  if (statusPauses.length) failures.push(`workday slow upload: the upload status became a question: ${statusPauses.map((pause) => pause.label).join(" | ")}`);
+
+  // The same widget refusing the file ("Your document can't be uploaded."): the run pauses on the upload with
+  // Workday's words and never saves My Experience.
+  const refusedTab = await launched.newPage();
+  await refusedTab.goto(`${workdayUrl}?gaps=1&upload=fail`);
+  const refusedWorkday = createWorkdayPage(refusedTab);
+  await refusedWorkday.enterApplication();
+  const refusedWalk = await walkWorkdayApplication(refusedWorkday, planWorkday, { mode: "fill", history: historyOptions });
+  const refusedPause = refusedWalk.pauses.find((pause) => pause.status === "open" && pause.fieldId === "My Experience::formField-");
+  if (refusedWalk.outcome !== "paused" || refusedWalk.steps.at(-1)?.name !== "My Experience" || !refusedPause?.question.includes("can't be uploaded")) {
+    failures.push(`workday refused upload: expected a pause on My Experience's upload with Workday's words, got ${refusedWalk.outcome} (${refusedWalk.errors.join(" ")} ${refusedWalk.pauses
+      .map((pause) => `${pause.fieldId}: ${pause.question}`).join(" | ")})`);
+  }
+  if (refusedWalk.pauses.some((pause) => pause.label.includes("loading"))) failures.push("workday refused upload: the loading status became a question");
+  if ((await fixtureState(refusedTab)).step !== 1) failures.push("workday refused upload: My Experience was saved past a refused upload");
 
   // A resume-parsed row that is not the candidate's is deleted; a transcript
   // on a later step sends the run back to backfill Berkeley's end year and the
@@ -364,6 +396,82 @@ async function main(): Promise<void> {
     failures.push(`workday real widgets: work dates were not typed behind their displays: ${JSON.stringify(realState.work)}`);
   }
   if (realState.education[0]?.toY !== "2028") failures.push(`workday real widgets: Berkeley's end year is ${JSON.stringify(realState.education[0]?.toY)}, not 2028`);
+  // The Field of Study list left open after its pick must not cover Add Another, and a GED listed first is never a diploma.
+  if (realState.education.length !== 2 || realState.education[0]?.field !== "Computer Science" || realState.education[1]?.degree !== "High School Diploma") {
+    failures.push(`workday real widgets: education rows not entered as recorded: ${JSON.stringify(realState.education)}`);
+  }
+
+  // Synthetic, modeled on the Activision / xboxgaming.wd1 evidence (2026-11-25): every row's Field of Study is
+  // required, and nothing saved states the high school's. The walk asks that row's question before saving the
+  // step, and the answer is used on the next continue.
+  const highSchoolName = history(2028).education[1]!.school;
+  const fosFieldId = `My Experience::history:education:${highSchoolName}:field`;
+  const fosHistory = { standard: history(2028), transcript: history(2029), answers: new Map<string, string>() };
+  const fosTab = await launched.newPage();
+  await fosTab.goto(`${workdayUrl}?fos=required`);
+  const fosWorkday = createWorkdayPage(fosTab);
+  await fosWorkday.enterApplication();
+  const fosWalk = await walkWorkdayApplication(fosWorkday, planWorkday, { mode: "fill", history: fosHistory });
+  if (fosWalk.outcome !== "paused" || !fosWalk.pauses.some((pause) => pause.status === "open" && pause.fieldId === fosFieldId)) {
+    failures.push(`workday required field of study: expected the high-school row's question, got ${fosWalk.outcome} (${fosWalk.errors.join(" ")} ${fosWalk.pauses
+      .map((pause) => `${pause.fieldId}: ${pause.question}`).join(" | ")})`);
+  }
+  if (fosWalk.pauses.some((pause) => pause.fieldId.includes("workday-error"))) failures.push("workday required field of study: the step was saved and Workday's error came back");
+  if ((await fixtureState(fosTab)).step !== 1) failures.push("workday required field of study: My Experience was saved with the field open");
+  fosHistory.answers.set(fosFieldId, "Economics");
+  const fosAnswered = await walkWorkdayApplication(fosWorkday, planWorkday, { mode: "fill", history: fosHistory });
+  const fosState = await fixtureState(fosTab);
+  if (fosAnswered.outcome !== "review" || fosState.education[1]?.field !== "Economics" || fosState.education[0]?.field !== "Computer Science") {
+    failures.push(`workday required field of study: the answer was not used on continue: ${fosAnswered.outcome} ${JSON.stringify(fosState.education)} (${fosAnswered.pauses
+      .filter((pause) => pause.status === "open").map((pause) => `${pause.fieldId}: ${pause.question}`).join(" | ")})`);
+  }
+
+  // Synthetic (rockwellautomation.wd1's run <run id> found neither education date by label; its markup was not
+  // captured): dates labelled "Attended From" / "Attended Until" are found by Workday's container ids.
+  const idsTab = await launched.newPage();
+  await idsTab.goto(`${workdayUrl}?edudates=ids`);
+  const idsWorkday = createWorkdayPage(idsTab);
+  await idsWorkday.enterApplication();
+  const idsWalk = await walkWorkdayApplication(idsWorkday, planWorkday, { mode: "fill", history: historyOptions });
+  const idsState = await fixtureState(idsTab);
+  if (idsWalk.outcome !== "review" || idsState.education[0]?.fromY !== "2025" || idsState.education[0]?.toY !== "2028" ||
+    idsState.education[1]?.fromY !== "2021" || idsState.education[1]?.toY !== "2025") {
+    failures.push(`workday education date ids: dates not found by container id: ${idsWalk.outcome} ${JSON.stringify(idsState.education)} (${idsWalk.pauses
+      .filter((pause) => pause.status === "open").map((pause) => `${pause.fieldId}: ${pause.question}`).join(" | ")})`);
+  }
+
+  // An education row with no date fields at all asks nothing about them.
+  const noDatesTab = await launched.newPage();
+  await noDatesTab.goto(`${workdayUrl}?edudates=none`);
+  const noDatesWorkday = createWorkdayPage(noDatesTab);
+  await noDatesWorkday.enterApplication();
+  const noDatesWalk = await walkWorkdayApplication(noDatesWorkday, planWorkday, { mode: "fill", history: historyOptions });
+  const datePauses = noDatesWalk.pauses.filter((pause) => /:(?:to|from)$/.test(pause.fieldId));
+  if (noDatesWalk.outcome !== "review" || datePauses.length) {
+    failures.push(`workday no education dates: expected Review with no date question, got ${noDatesWalk.outcome} (${datePauses.map((pause) => `${pause.fieldId}: ${pause.question}`).join(" | ")})`);
+  }
+
+  // Synthetic, modeled on rockwellautomation.wd1 (schools typed as plain text) and the Rockwell/enGen Degree
+  // timeouts: the typed school's suggestion layer covers Degree until the box loses focus. The covered Degree
+  // is focused and opened with Enter after 5 s, never force-clicked.
+  const coveredTab = await launched.newPage();
+  coveredTab.setDefaultTimeout(10_000);
+  await coveredTab.goto(`${workdayUrl}?widgets=real&school=text`);
+  const coveredWorkday = createWorkdayPage(coveredTab);
+  await coveredWorkday.enterApplication();
+  const coveredWalk = await walkWorkdayApplication(coveredWorkday, planWorkday, { mode: "fill", history: historyOptions })
+    .catch((error: unknown) => {
+      failures.push(`workday covered degree: the walk threw: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
+      return null;
+    });
+  if (coveredWalk && coveredWalk.outcome !== "review") {
+    failures.push(`workday covered degree: expected to stop at Review, got ${coveredWalk.outcome} (${coveredWalk.errors.join(" ")} ${coveredWalk.pauses
+      .filter((pause) => pause.status === "open").map((pause) => `${pause.fieldId}: ${pause.question}`).join(" | ")})`);
+  }
+  const coveredState = await fixtureState(coveredTab);
+  if (coveredState.education.length !== 2 || coveredState.education[0]?.degree !== "Bachelor of Arts (BA)" || coveredState.education[1]?.degree !== "High School Diploma") {
+    failures.push(`workday covered degree: degrees not chosen: ${JSON.stringify(coveredState.education)}`);
+  }
 
   const blockedTab = await launched.newPage();
   await blockedTab.goto(workdayUrl);

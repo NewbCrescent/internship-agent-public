@@ -93,6 +93,18 @@ describe("application history", () => {
     expect(chooseDegreeOption(highSchool, ["Associate's Degree"])).toBeNull();
   });
 
+  it("picks a high-school diploma over a GED or equivalency option (rockwellautomation.wd1, neogen.wd5, zoll.wd5, 2026-11-25)", () => {
+    const college: EducationRow = { key: "college", school: "UC Berkeley", level: "bachelor", degree: "B.A. Computer Science", fieldOfStudy: null, gpa: null, startYear: null, endYear: null };
+    const highSchool: EducationRow = { ...college, key: "high_school", level: "high_school", degree: null };
+    expect(chooseDegreeOption(highSchool, ["GED (High School Equivalent)", "High School Diploma", "Bachelor's Degree"])).toBe("High School Diploma");
+    expect(chooseDegreeOption(highSchool, ["GED", "High School/Secondary Diploma – Incomplete", "High School/Secondary Diploma – Complete"])).toBe("High School/Secondary Diploma – Complete");
+    expect(chooseDegreeOption(highSchool, ["Some High School", "High School Diploma/GED"])).toBe("High School Diploma/GED");
+    expect(chooseDegreeOption(highSchool, ["GED", "Bachelor's Degree"])).toBeNull();
+    expect(chooseDegreeOption(highSchool, ["GED (High School Equivalent)"])).toBeNull();
+    expect(chooseDegreeOption(highSchool, ["High School Equivalency", "Associate's Degree"])).toBeNull();
+    expect(chooseDegreeOption(highSchool, ["Some College", "High School or Equivalent", "Bachelor's Degree"])).toBe("High School or Equivalent");
+  });
+
   it("reads curly apostrophes as plain ones and returns the option as offered", () => {
     const college: EducationRow = { key: "college", school: "UC Berkeley", level: "bachelor", degree: "B.A. Computer Science", fieldOfStudy: null, gpa: null, startYear: null, endYear: null };
     expect(chooseDegreeOption(college, ["Associate’s Degree", "Bachelor’s Degree", "Master’s Degree"])).toBe("Bachelor’s Degree");

@@ -13,6 +13,7 @@ import { ensureNameShim } from "../handshake-executor";
 const LIST_WAIT_MS = 5_000;
 const CLOSE_WAIT_MS = 2_000;
 const POLL_MS = 150;
+const CLICK_WAIT_MS = 5_000;
 
 /** In the page: an open list (a portal, a listbox, a prompt's options) is on screen outside every field's picked items. */
 function openListShown(body: Element): boolean {
@@ -107,10 +108,25 @@ export async function closeWorkdayLists(page: Page, always = false): Promise<voi
   while (Date.now() < deadline && (await shown())) await page.waitForTimeout(POLL_MS);
 }
 
+/**
+ * Clicks a Workday control. When the click is not taken within 5 s (a list left open or a display
+ * layer over it: the Add Another and Degree timeouts on Sierra Space, Micron, Rockwell and enGen,
+ * 2026-11-25), it focuses the control and presses Enter, the keyboard's own activation. Never forces a click.
+ */
+export async function clickWorkdayControl(page: Page, control: Locator): Promise<void> {
+  try {
+    await control.click({ timeout: CLICK_WAIT_MS });
+  } catch (error) {
+    if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+    await control.focus();
+    await page.keyboard.press("Enter");
+  }
+}
+
 /** Opens a dropdown and returns its options once they stop changing; the list stays open. */
 export async function openWorkdayListbox(page: Page, button: Locator): Promise<string[]> {
   await closeWorkdayLists(page);
-  await button.click();
+  await clickWorkdayControl(page, button);
   return settleWorkdayOptions(page, () => button.evaluate(listboxOptionsOf, null).catch(() => [] as string[]));
 }
 

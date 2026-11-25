@@ -490,6 +490,92 @@ test:browser:fixture`). Not verified live: the tenants' markup (no
 form-step DOM was captured; the fixture's upload is modeled on the pause
 record).
 
+### Workday's resume upload status was read as an error, and Save ran before the upload finished
+
+Found 2026-11-25 on the real workspace, in manual pass 8. My Experience
+on itw.wd5 (<run id>, <run id>), littelfuse.wd1 (<run id>), neogen.wd5
+(<run id>) and Activision (<run id>) paused on "Resume/CV: <file>
+loading", and on zoll.wd5 (<run id>) on "Resume/CV: <file> successfully
+uploaded"; the evidence showed the file tile still loading and Save and
+Continue greyed, and Activision also had Workday's "Upload a file (5MB
+max) is required" error. Cause: the adapter returned right after
+choosing the file and the walk clicked Save and Continue at once, while
+Workday was still reading it; and the upload widget's status line, which
+sits in the upload's `formField-` container as an alert, was read as a
+field error, so the step counted as not saved (on ZOLL the upload had
+finished, so this alone stopped it). The adapter now waits up to 60 s
+for Workday's own upload widget (`file-upload-input-ref`) until the file
+is listed and no longer loading ("<file> successfully uploaded", or the
+file listed with no status on two reads 500 ms apart); a failure Workday
+reports, or no finish in time, pauses the upload with Workday's words;
+and the status line ("<file> loading", "<file> successfully uploaded")
+is never read as an error (`isWorkdayUploadStatus`, `workdayUploadState`
+in `packages/browser/src/ats/workday.ts`). Regression: the
+`?upload=slow` and `?upload=fail` scenarios of
+`testing-harness/browser/fixture-run.ts` (`xvfb-run -a pnpm
+test:browser:fixture`) and the upload-status cases in
+`testing-harness/browser-worker/workday.test.ts` (`pnpm
+test:browser-worker:fast`). Not verified live: Workday's upload markup
+beyond the recorded text.
+
+### Workday's education Add Another and Degree clicks were covered
+
+Found 2026-11-25 on the real workspace, in manual pass 8. Sierra Space
+and Micron stopped on Education's Add Another, and Rockwell and enGen on
+the second row's Degree, with a 30 s click timeout: the element was
+found, visible, enabled and stable, and another element took the click
+point. The recorded detail is cut before Playwright names that element,
+so the cover is inferred: a list the filler left open (Workday's
+multi-select Field of Study list stays open after a pick) or the typed
+school's suggestion layer. Before each Add, Delete, or dropdown click in
+a history row the adapter now closes any list still open, and a click
+not taken within 5 s falls back to focusing the control and pressing
+Enter (`clickWorkdayControl` in
+`packages/browser/src/ats/workday-lists.ts`, also used for every Workday
+dropdown); nothing is force-clicked. Regression: the `?widgets=real`
+scenario of `testing-harness/browser/fixture-run.ts` (an open Field of
+Study list over Add Another) and `?widgets=real&school=text` (a
+suggestion layer over Degree). Not verified live.
+
+### Workday education rows left a required Field of Study and unread end dates open
+
+Found 2026-11-25 on the real workspace, in manual pass 8. On Activision
+(<run id>) Workday answered Save and Continue with "Field of Study ...
+is required" on the high-school row, for which nothing is saved; on
+Rockwell (<run id>) neither education date was found by its label on the
+college row or the high-school row, so both paused with "no to date
+field this run recognizes", although the end years are saved and were
+filled on other tenants (Rockwell's markup was not captured). Education
+dates are now found by their labels (more wordings: "Year graduated",
+"Date completed", "Degree received" and the like) or by Workday's
+`formField-firstYearAttended` / `formField-lastYearAttended` containers;
+a row with no end-date field asks nothing (Workday's own check decides),
+and a date field neither read pauses naming its label. A required Field
+of Study on a row with nothing saved for it pauses as that row's
+question before the step is saved, and the answer is used on the next
+continue (`packages/browser/src/ats/workday-history.ts`). Regression:
+the `?fos=required`, `?edudates=ids` and `?edudates=none` scenarios of
+`testing-harness/browser/fixture-run.ts`. Open: the high-school row's
+field of study is a candidate question; Rockwell's real date labels are
+unknown.
+
+### A high-school row chose a GED option for a high-school diploma
+
+Found 2026-11-25 on the real workspace, in manual pass 8. On Rockwell
+(<run id>) the high-school row chose "GED (High School Equivalent)" for
+"High School Diploma", and neogen.wd5 and zoll.wd5 showed "GED" on that
+row. Cause: `chooseDegreeOption` took the first option naming high
+school, secondary, or GED. A high-school row now picks a high-school
+diploma option, then a plain high-school option, then a combined
+diploma-or-equivalent option ("High School Diploma/GED", "High School or
+Equivalent"); a GED or equivalency option alone is never picked, and the
+row then asks with the offered options
+(`packages/domain/src/application-history.ts`). Regression: the new
+`chooseDegreeOption` case in
+`testing-harness/domain/application-history.test.ts` (`pnpm
+test:domain`) and the GED-first degree list in the `?widgets=real`
+scenario of `testing-harness/browser/fixture-run.ts`.
+
 ### Start-date questions in other words were not answered, and Workday date fields were not typed
 
 Found 2026-11-25 on the real workspace, in manual pass 5. Neogen's

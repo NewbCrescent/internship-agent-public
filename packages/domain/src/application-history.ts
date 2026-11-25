@@ -117,11 +117,20 @@ export function bachelorKind(value: string): "arts" | "science" | "other" | null
  * A B.S. is never chosen for a B.A. or the reverse: the kind must match, or
  * the option must be a general "Bachelor's" that names no kind. Curly
  * apostrophes count as plain ones ("Bachelor’s Degree"); the option is
- * returned as offered.
+ * returned as offered. A high-school row picks a high-school diploma option,
+ * then a plain high-school option, then a combined "Diploma or GED" / "or
+ * Equivalent" option; a GED or equivalency option alone ("GED", "GED (High
+ * School Equivalent)", "High School Equivalency") is never picked for it.
  */
 export function chooseDegreeOption(row: EducationRow, options: string[]): string | null {
   if (row.level === "high_school") {
-    return options.find((option) => /high school|secondary|\bGED\b/i.test(option) && !/college|university|bachelor|associate|some/i.test(option)) ?? null;
+    const named = options.filter((option) => /high school|secondary/i.test(option) &&
+      !/college|university|bachelor|associate|\bsome\b|incomplete|in progress|not (?:yet )?complete|no diploma/i.test(option));
+    const equivalency = (option: string) => /\bGED\b|HiSET|\bTASC\b|equivalen/i.test(option);
+    return named.find((option) => !equivalency(option) && /diploma|graduate|complete/i.test(option)) ??
+      named.find((option) => !equivalency(option)) ??
+      named.find((option) => equivalency(option) && !/^\s*(?:GED|HiSET|TASC|(?:high|secondary) school equivalen)/i.test(option) && /diploma|graduate|\bor\b|\//i.test(option)) ??
+      null;
   }
   if (row.level !== "bachelor" || !row.degree) return null;
   const held = bachelorKind(row.degree);

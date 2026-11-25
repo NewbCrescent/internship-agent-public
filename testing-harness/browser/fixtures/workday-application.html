@@ -51,6 +51,10 @@
     // aria-controls, 400 ms after the click; a list closed with Escape stays on screen 300 ms; a prompt's
     // list shows 600 ms after its input is clicked and a category's sub-list 900 ms after the category is
     // clicked; each date section draws its dateSection…-display over the spinbutton input, which takes no click.
+    // A history search list (school, field of study) is drawn over the controls below its input, and the
+    // multi-select Field of Study list stays open after a pick until Escape (the Sierra Space / Micron Add
+    // Another timeouts, 2026-11-25); the degree list offers "GED (High School Equivalent)" before "High School
+    // Diploma" (rockwellautomation.wd1 run <run id>).
     const realWidgets = params.get("widgets") === "real";
     // ?gaps=1: Synthetic, modeled on the 2026-11-25 real pauses (no form-step DOM was captured). Phone Device Type
     // offers Workday's "Home Mobile" style options (xboxgaming.wd1); My Experience's resume input sits in a
@@ -58,6 +62,24 @@
     // Application Questions adds a required start date drawn as Month, Day and Year sections (neogen.wd5),
     // recorded as state.values["formField-earliestStart"] = "MM/DD/YYYY".
     const gaps = params.get("gaps") === "1";
+    // ?upload=slow|fail (synthetic, modeled on the 2026-11-25 evidence of neogen.wd5, itw.wd5, littelfuse.wd1,
+    // Activision and zoll.wd5): a chosen resume shows "<file> loading" in an alert for 2.5 s with the file listed,
+    // then "<file> successfully uploaded" and "Successfully Uploaded!" (slow) or Workday's "Your document can't be
+    // uploaded." error (fail, wording from a public university notice about a Workday upload error, 2023); the file
+    // counts as attached only once loaded; with upload set, Save and Continue on My Experience moves after 1 s, the
+    // status alert still on screen.
+    const uploadMode = params.get("upload");
+    // ?fos=required (modeled on the Activision / xboxgaming.wd1 evidence, 2026-11-25): every education row's
+    // "Field of Study*" is required.
+    const fosRequired = params.get("fos") === "required";
+    // ?edudates=ids|none (synthetic; rockwellautomation.wd1's run <run id> found neither education date by label
+    // and its markup was not captured): ids labels the education dates "Attended From" / "Attended Until*" in
+    // Workday's formField-firstYearAttended / formField-lastYearAttended containers; none draws no education dates.
+    const eduDates = params.get("edudates");
+    // ?school=text (synthetic, modeled on rockwellautomation.wd1, where both schools were typed as plain text, and
+    // the Rockwell/enGen Degree click timeouts): the school is a plain text box whose suggestion layer, drawn inside
+    // the field over the controls below it, closes only when the box loses focus.
+    const schoolText = params.get("school") === "text";
     const ACCOUNTS_KEY = "fixture-workday-accounts";
     const SESSION_KEY = "fixture-workday-session";
     const readAccounts = () => JSON.parse(localStorage.getItem(ACCOUNTS_KEY) || "{}");
@@ -86,12 +108,13 @@
       document.querySelector('[data-automation-id="utilityButtonSignIn"]').outerHTML = `<div data-automation-id="utilityMenu"><div style="position:relative;display:inline-block"><div aria-label="Sign In" role="button" tabindex="0" data-automation-id="click_filter" style="position:absolute;inset:0;z-index:1"></div><button data-automation-id="utilityButtonSignIn" tabindex="-2" aria-hidden="true">Sign In</button></div></div>`;
     }
     const steps = ["My Information", "My Experience", "Application Questions", "Voluntary Disclosures", "Review"];
-    const state = { step: 0, values: {}, submitted: false, resumes: [], transcript: null, work: [], education: [] };
+    // upload: { name, phase: "loading" | "done" | "failed" } | null (?upload only).
+    const state = { step: 0, values: {}, submitted: false, resumes: [], transcript: null, work: [], education: [], upload: null };
     // ?parsed=1: Workday already shows a row parsed from a resume that is not the candidate's.
     if (params.get("parsed") === "1") state.work.push({ title: "Analyst", company: "Resume Parse Corp", location: "", current: false, fromM: "01", fromY: "2020", toM: "02", toY: "2020", description: "" });
     const schools = ["University of California, Berkeley", "University of California, Los Angeles", "Berkeley City College", "Northwind High School"];
     const fields = ["Computer Science", "Computer Engineering", "Economics"];
-    const degrees = ["High School Diploma", "Associate's Degree", "Bachelor of Science (BS)", "Bachelor of Arts (BA)", "Bachelor's Degree", "Master's Degree"];
+    const degrees = [...(realWidgets ? ["GED (High School Equivalent)"] : []), "High School Diploma", "Associate's Degree", "Bachelor of Science (BS)", "Bachelor of Arts (BA)", "Bachelor's Degree", "Master's Degree"];
     window.fixture = state;
 
     /** Closes every open list: the popup and, with ?widgets=real, the list portals. */
@@ -194,20 +217,31 @@
       <div role="group" aria-label="Education ${index + 1}">
         <h4>Education ${index + 1}</h4>
         <button type="button" data-delete="education" data-index="${index}">Delete</button>
-        <div data-automation-id="formField-school"><label for="e${index}s">School or University*</label>
+        ${schoolText
+          ? `<div data-automation-id="formField-school" style="position:relative"><label for="e${index}s">School or University*</label><input id="e${index}s" ${historyInput("education", index, "school")} data-suggest="1" value="${row.school || ""}"></div>`
+          : `<div data-automation-id="formField-school"><label for="e${index}s">School or University*</label>
           <div data-automation-id="multiselectInputContainer"><input id="e${index}s" data-prompt="history:education:${index}:school"></div>
-          <ul data-automation-id="selectedItemList">${row.school ? `<li data-automation-id="selectedItem">${row.school}</li>` : ""}</ul></div>
+          <ul data-automation-id="selectedItemList">${row.school ? `<li data-automation-id="selectedItem">${row.school}</li>` : ""}</ul></div>`}
         <div data-automation-id="formField-degree"><label for="e${index}g">Degree*</label>
           <button type="button" id="e${index}g" aria-haspopup="listbox" data-listbox="history:education:${index}:degree" data-options="${degrees.join("|")}">${row.degree || "Select One"}</button></div>
-        <div data-automation-id="formField-fieldOfStudy"><label for="e${index}f">Field of Study</label>
+        <div data-automation-id="formField-fieldOfStudy"><label for="e${index}f">Field of Study${fosRequired ? "*" : ""}</label>
           <div data-automation-id="multiselectInputContainer"><input id="e${index}f" data-prompt="history:education:${index}:field"></div>
           <ul data-automation-id="selectedItemList">${row.field ? `<li data-automation-id="selectedItem">${row.field}</li>` : ""}</ul></div>
         <div data-automation-id="formField-gradeAverage"><label for="e${index}a">Overall Result (GPA)</label><input id="e${index}a" ${historyInput("education", index, "gpa")} value="${row.gpa || ""}"></div>
-        <div data-automation-id="formField-firstYearAttended"><label>From</label>${dateInput("Year", historyInput("education", index, "fromY"), row.fromY || "")}</div>
-        <div data-automation-id="formField-lastYearAttended"><label>To (Actual or Expected)*</label>${dateInput("Year", historyInput("education", index, "toY"), row.toY || "")}</div>
+        ${eduDates === "none" ? "" : `<div data-automation-id="formField-firstYearAttended"><label>${eduDates === "ids" ? "Attended From" : "From"}</label>${dateInput("Year", historyInput("education", index, "fromY"), row.fromY || "")}</div>
+        <div data-automation-id="formField-lastYearAttended"><label>${eduDates === "ids" ? "Attended Until*" : "To (Actual or Expected)*"}</label>${dateInput("Year", historyInput("education", index, "toY"), row.toY || "")}</div>`}
       </div>`;
-    const resumeStatus = () => `<div id="resume-status">${state.resumes.map((name, index) =>
-      `<div data-automation-id="file-upload-item">${name} <button type="button" data-automation-id="delete-file" data-file="${index}">Delete</button></div>`).join("") || "No file"}</div>`;
+    const resumeItems = () => state.resumes.map((name, index) =>
+      `<div data-automation-id="file-upload-item">${name} <button type="button" data-automation-id="delete-file" data-file="${index}">Delete</button></div>`).join("");
+    const resumeStatus = () => {
+      if (!uploadMode) return `<div id="resume-status">${resumeItems() || "No file"}</div>`;
+      const upload = state.upload;
+      const status = !upload ? resumeItems()
+        : upload.phase === "loading" ? `<div role="alert" aria-live="polite">${upload.name} loading</div><div data-automation-id="file-upload-item">${upload.name}</div>`
+        : upload.phase === "done" ? `<div role="alert" aria-live="polite">${upload.name} successfully uploaded</div>${resumeItems()}<p>Successfully Uploaded!</p>`
+        : `<div data-automation-id="errorMessage" role="alert">Your document can't be uploaded.</div>`;
+      return `<div id="resume-status">${status || "No file"}</div>`;
+    };
 
     /** Saves typed history values before any re-render, as Workday keeps them. */
     function syncHistory() {
@@ -224,8 +258,9 @@
         for (const key of ["title", "company", "fromM", "fromY"]) if (!row[key]) missing.push(`Work Experience ${index + 1} ${key}`);
         if (!row.current && (!row.toM || !row.toY)) missing.push(`Work Experience ${index + 1} To`);
       });
+      const educationKeys = ["school", "degree", ...(eduDates === "none" ? [] : ["toY"]), ...(fosRequired ? ["field"] : [])];
       state.education.forEach((row, index) => {
-        for (const key of ["school", "degree", "toY"]) if (!row[key]) missing.push(`Education ${index + 1} ${key}`);
+        for (const key of educationKeys) if (!row[key]) missing.push(`Education ${index + 1} ${key}`);
       });
       return missing;
     }
@@ -455,9 +490,22 @@
 
     document.addEventListener("change", (event) => {
       if (event.target.matches('input[data-automation-id="file-upload-input-ref"]') && event.target.files[0]) {
+        const name = event.target.files[0].name;
+        const redraw = () => { const status = document.getElementById("resume-status"); if (status) status.outerHTML = resumeStatus(); };
+        if (uploadMode) {
+          // ?upload: the file loads for 2.5 s, then is attached (slow) or refused (fail).
+          state.upload = { name, phase: "loading" };
+          redraw();
+          setTimeout(() => {
+            if (uploadMode === "fail") state.upload = { name, phase: "failed" };
+            else { state.upload = { name, phase: "done" }; state.resumes.push(name); }
+            redraw();
+          }, 2500);
+          return;
+        }
         // Workday lists every attached file; a second upload sits beside the first.
-        state.resumes.push(event.target.files[0].name);
-        document.getElementById("resume-status").outerHTML = resumeStatus();
+        state.resumes.push(name);
+        redraw();
       } else if (event.target.matches("#transcript")) {
         state.transcript = event.target.files[0]?.name ?? null;
       }
@@ -469,6 +517,12 @@
       const source = id.endsWith(":school") ? schools : fields;
       const found = source.filter((option) => words.every((word) => option.toLowerCase().includes(word)));
       document.getElementById("popup").innerHTML = `<div data-prompt-popup="${id}">${found.map((option) => `<div data-automation-id="promptOption">${option}</div>`).join("")}</div>`;
+      if (realWidgets) {
+        // Drawn over the controls below the input, as Workday's search lists are.
+        const rect = event.target.getBoundingClientRect();
+        document.querySelector("[data-prompt-popup]").setAttribute("style",
+          `position:absolute;left:${rect.left + scrollX}px;top:${rect.bottom + scrollY}px;width:480px;height:1600px;background:#fff;z-index:20;overflow:auto`);
+      }
     });
     document.addEventListener("click", (event) => {
       const target = event.target;
@@ -518,6 +572,7 @@
         state[target.dataset.delete].splice(Number(target.dataset.index), 1);
         render();
       } else if (target.matches('[data-automation-id="delete-file"]')) {
+        if (state.upload && state.upload.name === state.resumes[Number(target.dataset.file)]) state.upload = null;
         state.resumes.splice(Number(target.dataset.file), 1);
         target.closest('[data-automation-id="file-upload-item"]').remove();
       } else if (target.matches('[data-automation-id="pageFooterBackButton"]')) {
@@ -543,7 +598,8 @@
           const [, kind, index, key] = id.split(":");
           syncHistory();
           state[kind][Number(index)][key] = target.textContent;
-          document.getElementById("popup").innerHTML = "";
+          // ?widgets=real: the multi-select Field of Study list stays open after a pick, until Escape.
+          if (!(realWidgets && key === "field")) document.getElementById("popup").innerHTML = "";
           render();
           return;
         }
@@ -616,9 +672,31 @@
             .map((entry) => `<p data-automation-id="errorMessage">Error: ${entry.label} is required</p>`).join("");
           return;
         }
+        // ?upload: Workday takes a moment to move on, the upload's status alert still on screen.
+        if (uploadMode && state.step === 1) { setTimeout(() => { state.step += 1; render(); }, 1000); return; }
         state.step += 1;
         render();
       }
+    });
+    // ?school=text: the typed school's suggestion layer, drawn inside the field over the controls below it; only leaving the box closes it.
+    document.addEventListener("input", (event) => {
+      if (!event.target.matches("input[data-suggest]")) return;
+      const field = event.target.closest('[data-automation-id^="formField-"]');
+      for (const layer of field.querySelectorAll("[data-fixture-suggest]")) layer.remove();
+      if (!event.target.value) return;
+      const layer = document.createElement("ul");
+      layer.setAttribute("role", "listbox");
+      layer.setAttribute("data-fixture-suggest", "1");
+      layer.setAttribute("style", "position:absolute;left:0;top:100%;width:480px;height:320px;margin:0;padding:0;list-style:none;background:#fff;z-index:20");
+      const option = document.createElement("li");
+      option.setAttribute("role", "option");
+      option.textContent = event.target.value;
+      layer.appendChild(option);
+      field.appendChild(layer);
+    });
+    document.addEventListener("focusout", (event) => {
+      if (!event.target.matches || !event.target.matches("input[data-suggest]")) return;
+      for (const layer of event.target.closest('[data-automation-id^="formField-"]').querySelectorAll("[data-fixture-suggest]")) layer.remove();
     });
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;

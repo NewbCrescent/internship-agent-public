@@ -15,6 +15,7 @@ import {
 
 import { ensureNameShim } from "../handshake-executor";
 import {
+  clickWorkdayControl,
   closeWorkdayLists,
   openWorkdayListbox,
   pickWorkdayListboxOption,
@@ -30,7 +31,10 @@ import {
  * found by their labels, which stay stable across Workday versions. A row the
  * candidate did not choose is deleted and recorded; anything the filler cannot
  * match (a degree, a school in a search list) becomes a question for the
- * candidate instead of a guess.
+ * candidate instead of a guess. Any list still open is closed before an Add,
+ * Delete, or dropdown click (a multi-select Field of Study list stays open
+ * after a pick and covers the controls below it), and a covered control is
+ * focused and activated with Enter instead of force-clicked.
  */
 export type HistoryFillResult = { decisions: FillDecision[]; pauses: PauseRecord[] };
 
@@ -55,8 +59,8 @@ const LABELS = {
     degree: /^\s*degree/i,
     field: /^\s*(?:field of study|major|area of study)/i,
     gpa: /^\s*(?:overall result|gpa|grade average|cumulative gpa)/i,
-    from: /^\s*(?:from|first year attended|start)/i,
-    to: /^\s*(?:to\b|last year attended|end|graduation|expected)/i
+    from: /^\s*(?:from|first year attended|start|year (?:started|began|entered)|date (?:started|began|entered)|began|enrolled)/i,
+    to: /^\s*(?:to\b|last year attended|end|graduat|expected|year (?:graduated|of graduation|completed|ended)|date (?:graduated|completed|received|earned|ended)|completion|degree (?:date|received|completed|earned|conferred))/i
   }
 } as const;
 
@@ -94,13 +98,18 @@ async function tagSections(page: Page): Promise<Record<Kind, number | null>> {
 
 const panel = (page: Page, kind: Kind, index: number) => page.locator(`[${SECTION_ATTRIBUTE}="${kind}"] [${PANEL_ATTRIBUTE}="${index}"]`).first();
 
-function fieldIn(page: Page, scope: Locator, label: RegExp): Locator {
-  return scope.locator(FIELD).filter({ has: page.locator("label, legend").filter({ hasText: label }) }).first();
+/** A field found by its label, or (for some education fields) also by Workday's own container id. */
+type FieldMatch = RegExp | { label: RegExp; automationId: string };
+
+function fieldIn(page: Page, scope: Locator, match: FieldMatch): Locator {
+  const label = match instanceof RegExp ? match : match.label;
+  const byLabel = scope.locator(FIELD).filter({ has: page.locator("label, legend").filter({ hasText: label }) });
+  return (match instanceof RegExp ? byLabel : byLabel.or(scope.locator(`[data-automation-id="${match.automationId}"]`))).first();
 }
 
 /** The value a row's identifying field shows: a typed company or school, or a picked school chip. */
-async function keyOf(page: Page, scope: Locator, label: RegExp): Promise<string> {
-  const container = fieldIn(page, scope, label);
+async function keyOf(page: Page, scope: Locator, match: FieldMatch): Promise<string> {
+  const container = fieldIn(page, scope, match);
   if (!(await container.count())) return "";
   const chip = container.locator('[data-automation-id="selectedItem"]').first();
   if (await chip.count()) return (await chip.innerText()).trim();
@@ -116,7 +125,8 @@ async function deletePanel(page: Page, kind: Kind, index: number): Promise<boole
   const scope = panel(page, kind, index);
   const button = scope.locator('[data-automation-id="panel-set-delete-button"], button').filter({ hasText: /^\s*delete\s*$/i }).first();
   if (!(await button.count())) return false;
-  await button.click();
+  await closeWorkdayLists(page);
+  await clickWorkdayControl(page, button);
   await page.waitForTimeout(400);
   return true;
 }
@@ -126,7 +136,8 @@ async function addPanel(page: Page, kind: Kind): Promise<number | null> {
   const section = page.locator(`[${SECTION_ATTRIBUTE}="${kind}"]`).first();
   const add = section.locator("button").filter({ hasText: /^\s*add(?: another)?\s*$/i }).last();
   if (!(await add.count())) return null;
-  await add.click();
+  await closeWorkdayLists(page);
+  await clickWorkdayControl(page, add);
   for (let attempt = 0; attempt < 20; attempt += 1) {
     await page.waitForTimeout(200);
     const now = (await tagSections(page))[kind] ?? 0;
@@ -162,9 +173,9 @@ type Recorder = {
   ask(id: string, label: string, question: string): void;
 };
 
-async function setText(page: Page, scope: Locator, label: RegExp, value: string | null, id: string, basis: DecisionBasis, record: Recorder, required = false): Promise<void> {
+async function setText(page: Page, scope: Locator, match: FieldMatch, value: string | null, id: string, basis: DecisionBasis, record: Recorder, required = false): Promise<void> {
   if (value === null || value === "") return;
-  const container = fieldIn(page, scope, label);
+  const container = fieldIn(page, scope, match);
   if (!(await container.count())) {
     if (required) record.ask(id, id, `Workday's history row has no field for ${id.split(":").at(-1)}; enter "${value}" yourself.`);
     return;
@@ -174,12 +185,37 @@ async function setText(page: Page, scope: Locator, label: RegExp, value: string 
   record.fill(id, value, basis, "Entered from the candidate's own history.");
 }
 
-async function setDate(page: Page, scope: Locator, label: RegExp, value: MonthYear | number | null, id: string, basis: DecisionBasis, record: Recorder, required = false): Promise<void> {
+/** Labels of the row's date fields (date sections or a date input) that neither the From nor the To label reads. */
+async function unrecognizedDateLabels(scope: Locator, kind: Kind): Promise<string[]> {
+  const labels = await scope.evaluate((row) => Array.from(row.querySelectorAll('[data-automation-id^="formField-"]'))
+    .filter((field) => field.querySelector('[data-automation-id^="dateSection"], input[type="date"]'))
+    .map((field) => (field.querySelector("label, legend")?.textContent || field.querySelector("[aria-label]")?.getAttribute("aria-label") || "")
+      .replace(/\s+/g, " ").replace(/\*+$/, "").trim())
+    .filter(Boolean)).catch(() => [] as string[]);
+  return labels.filter((text) => !LABELS[kind].from.test(text) && !LABELS[kind].to.test(text)).slice(0, 5).map((text) => text.slice(0, 60));
+}
+
+async function setDate(
+  page: Page,
+  scope: Locator,
+  match: FieldMatch,
+  value: MonthYear | number | null,
+  id: string,
+  basis: DecisionBasis,
+  record: Recorder,
+  required = false,
+  kind: Kind = "work"
+): Promise<void> {
   if (value === null) return;
-  const container = fieldIn(page, scope, label);
+  const container = fieldIn(page, scope, match);
   if (!(await container.count())) {
     // Optional dates (an education start year) may simply not be on the form.
-    if (required) record.ask(id, id, `Workday's history row has no ${id.split(":").at(-1)} date field this run recognizes; enter it yourself.`);
+    if (!required) return;
+    const unread = await unrecognizedDateLabels(scope, kind);
+    // An education row with no end-date field at all has nothing to fill; Workday's own check decides.
+    if (kind === "education" && unread.length === 0) return;
+    const field = id.split(":").at(-1);
+    record.ask(id, id, `Workday's history row has no ${field} date field this run recognizes${unread.length ? ` (its date fields: ${unread.join("; ")})` : ""}; enter it yourself.`);
     return;
   }
   const month = container.locator('[data-automation-id="dateSectionMonth-input"]').first();
@@ -206,7 +242,7 @@ async function setDate(page: Page, scope: Locator, label: RegExp, value: MonthYe
 async function setChoice(
   page: Page,
   scope: Locator,
-  label: RegExp,
+  match: FieldMatch,
   wanted: string | null,
   choose: (options: string[]) => string | null,
   id: string,
@@ -215,7 +251,7 @@ async function setChoice(
   answer: string | undefined
 ): Promise<void> {
   if (wanted === null) return;
-  const container = fieldIn(page, scope, label);
+  const container = fieldIn(page, scope, match);
   if (!(await container.count())) return;
   const pick = (options: string[]) => (answer ? options.find((option) => option.trim().toLocaleLowerCase("en-US") === answer.trim().toLocaleLowerCase("en-US")) ?? null : choose(options));
   const listbox = container.locator('button[aria-haspopup="listbox"]').first();
@@ -267,6 +303,8 @@ async function setChoice(
     const option = pick(texts);
     if (option && await pickWorkdayPromptOption(page, option)) {
       await page.waitForTimeout(300);
+      // A multi-select list (Field of Study) stays open after a pick and covers the controls below it.
+      await closeWorkdayLists(page);
       await tagSections(page);
       record.fill(id, option, basis, `Picked "${option}" for "${wanted}".`);
       return;
@@ -297,22 +335,45 @@ async function fillWorkRow(page: Page, scope: Locator, row: WorkHistoryRow, reco
   await setText(page, scope, labels.description, row.description || null, id("description"), basis, record);
 }
 
+/** The field is required (a trailing * or aria-required) and shows no value: no picked item, "Select One", or empty inputs. */
+async function requiredAndEmpty(page: Page, scope: Locator, match: FieldMatch): Promise<boolean> {
+  const container = fieldIn(page, scope, match);
+  if (!(await container.count())) return false;
+  return container.evaluate((field) => {
+    const label = (field.querySelector("label, legend")?.textContent ?? "").replace(/\s+/g, " ").trim();
+    if (!/\*$/.test(label) && !field.querySelector('[aria-required="true"]')) return false;
+    if (field.querySelector('[data-automation-id="selectedItem"]')) return false;
+    const button = field.querySelector('button[aria-haspopup="listbox"]');
+    if (button) return /^(?:select one)?$/i.test((button.textContent ?? "").trim());
+    return Array.from(field.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]), textarea'))
+      .every((input) => (input as HTMLInputElement).value.trim() === "");
+  }).catch(() => false);
+}
+
 async function fillEducationRow(page: Page, scope: Locator, row: EducationRow, record: Recorder, answers: Map<string, string>): Promise<void> {
   const id = (field: string) => `history:education:${row.school}:${field}`;
   const basis = (field: string): DecisionBasis => ({ kind: "profile", field: row.key === "college" ? field : `highSchool.${field}` });
   const labels = LABELS.education;
+  const fromMatch: FieldMatch = { label: labels.from, automationId: "formField-firstYearAttended" };
+  const toMatch: FieldMatch = { label: labels.to, automationId: "formField-lastYearAttended" };
+  const fieldMatch: FieldMatch = { label: labels.field, automationId: "formField-fieldOfStudy" };
   if (!(await fieldIn(page, scope, labels.school).count())) {
     record.ask(id("school"), id("school"), `Workday's education row has no school field; enter "${row.school}" yourself.`);
   }
   await setChoice(page, scope, labels.school, row.school, (options) => matchPromptOption(row.school, options), id("school"), basis("school"), record, answers.get(id("school")));
   await setChoice(page, scope, labels.degree, row.degree ?? (row.level === "high_school" ? "High School Diploma" : null),
     (options) => chooseDegreeOption(row, options), id("degree"), basis("degree"), record, answers.get(id("degree")));
-  if (row.fieldOfStudy) {
-    await setChoice(page, scope, labels.field, row.fieldOfStudy, (options) => matchPromptOption(row.fieldOfStudy!, options), id("field"), basis("fieldOfStudy"), record, answers.get(id("field")));
+  const fieldAnswer = answers.get(id("field"));
+  const fieldWanted = row.fieldOfStudy ?? fieldAnswer ?? null;
+  if (fieldWanted) {
+    await setChoice(page, scope, fieldMatch, fieldWanted, (options) => matchPromptOption(fieldWanted, options), id("field"), basis("fieldOfStudy"), record, fieldAnswer);
+  } else if (await requiredAndEmpty(page, scope, fieldMatch)) {
+    // Nothing saved states this row's field of study (a high school): ask before the step is saved.
+    record.ask(id("field"), id("field"), `Workday requires a field of study for ${row.school}, and none is saved for it. Answer with the field of study to enter.`);
   }
   await setText(page, scope, labels.gpa, row.gpa, id("gpa"), basis("gpa"), record);
-  await setDate(page, scope, labels.from, row.startYear, id("from"), basis("educationStartMonth"), record);
-  await setDate(page, scope, labels.to, row.endYear, id("to"), basis("graduationDate"), record, true);
+  await setDate(page, scope, fromMatch, row.startYear, id("from"), basis("educationStartMonth"), record, false, "education");
+  await setDate(page, scope, toMatch, row.endYear, id("to"), basis("graduationDate"), record, true, "education");
 }
 
 /**

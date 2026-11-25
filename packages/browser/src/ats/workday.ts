@@ -1,3 +1,5 @@
+import { basename } from "node:path";
+
 import type { Locator, Page } from "playwright-core";
 
 import type { ApplicationHistory, BrowserField, FillDecision, PauseRecord, RecognizedForm } from "@internship-agent/domain";
@@ -207,7 +209,8 @@ function collectWorkdayErrorsIn(root: ParentNode): WorkdayPageError[] {
 export async function readWorkdayErrors(page: Page): Promise<WorkdayPageError[]> {
   try {
     await ensureNameShim(page);
-    return await page.locator("html").first().evaluate(collectWorkdayErrorsIn);
+    // Workday's upload status line ("<file> loading") sits in an alert; it is never an error.
+    return (await page.locator("html").first().evaluate(collectWorkdayErrorsIn)).filter((error) => !isWorkdayUploadStatus(error.text));
   } catch {
     return [];
   }
@@ -218,6 +221,62 @@ function clip(value: string, max: number): string {
 }
 
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Workday's upload widget announces "<file> loading" and "<file> successfully uploaded" in an alert; it is never an error (neogen.wd5, itw.wd5, littelfuse.wd1, Activision, zoll.wd5, 2026-11-25). */
+const UPLOAD_STATUS = /^(?:\S.*?\.[a-z0-9]{2,5}\s+)?(?:loading|uploading|successfully uploaded|uploaded successfully|uploaded|upload complete)[.!]?$/i;
+export function isWorkdayUploadStatus(text: string): boolean {
+  return UPLOAD_STATUS.test(text.replace(/\s+/g, " ").trim());
+}
+const UPLOAD_FAILURE = /can['’]?t be uploaded|cannot be uploaded|could(?:n['’]?t| not) be uploaded|upload(?:ing)? (?:has )?failed|failed to upload|unable to upload|too large|exceeds the maximum|file type is not (?:supported|allowed)|not a supported file|invalid file/i;
+export type WorkdayUploadReading = { text: string; alerts: string[]; progress: boolean };
+export type WorkdayUploadState = { state: "pending" | "loading" | "shown" | "uploaded" | "failed"; detail: string | null };
+
+/** Where Workday's upload of `fileName` stands, from what its area shows. */
+export function workdayUploadState(reading: WorkdayUploadReading, fileName: string): WorkdayUploadState {
+  const failure = reading.alerts.map((text) => text.replace(/\s+/g, " ").trim())
+    .find((text) => text !== "" && !isWorkdayUploadStatus(text) && UPLOAD_FAILURE.test(text));
+  if (failure) return { state: "failed", detail: failure };
+  const text = reading.text.replace(/\s+/g, " ").toLocaleLowerCase("en-US");
+  const name = fileName.trim().toLocaleLowerCase("en-US");
+  if (!name || !text.includes(name)) return { state: "pending", detail: null };
+  const escaped = escapeRegExp(name);
+  if (reading.progress || new RegExp(`${escaped}\\s+(?:loading|uploading)`).test(text)) return { state: "loading", detail: null };
+  if (new RegExp(`${escaped}\\s+(?:successfully uploaded|uploaded)`).test(text) || /successfully uploaded/.test(text)) return { state: "uploaded", detail: null };
+  return { state: "shown", detail: null };
+}
+
+/** In the page: the upload area's visible text, its alerts, and whether a progress bar shows. */
+function readWorkdayUploadArea(area: Element): WorkdayUploadReading {
+  const visible = (element: Element) => element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden";
+  const alerts = Array.from(area.querySelectorAll('[data-automation-id="errorMessage"], [data-automation-id="inputAlert"], [role="alert"]'))
+    .filter(visible).map((element) => ((element as HTMLElement).innerText ?? element.textContent ?? "").trim());
+  const progress = Array.from(area.querySelectorAll('[role="progressbar"]')).some(visible);
+  // innerText, not textContent: textContent glues "<file> loading" to the next element's text.
+  return { text: (area as HTMLElement).innerText ?? area.textContent ?? "", alerts, progress };
+}
+
+const UPLOAD_WAIT_MS = 60_000;
+const UPLOAD_POLL_MS = 500;
+
+/**
+ * Waits until Workday lists the uploaded file and no longer shows it loading: "successfully uploaded", or the file
+ * listed with no status on two reads 500 ms apart. A failure Workday reports, or no finish within 60 s, is a
+ * FieldUnfillable, so the run pauses on the upload with the site's own words.
+ */
+async function waitForWorkdayUpload(page: Page, area: Locator, fileName: string): Promise<void> {
+  await ensureNameShim(page);
+  const deadline = Date.now() + UPLOAD_WAIT_MS;
+  let shownBefore = false;
+  for (;;) {
+    const reading = await area.evaluate(readWorkdayUploadArea).catch((): WorkdayUploadReading => ({ text: "", alerts: [], progress: false }));
+    const { state, detail } = workdayUploadState(reading, fileName);
+    if (state === "failed") throw new FieldUnfillable(`Workday did not take "${fileName}": ${clip((detail ?? "").replace(/[.!\s]+$/, ""), 200)}`);
+    if (state === "uploaded" || (state === "shown" && shownBefore)) return;
+    shownBefore = state === "shown";
+    if (Date.now() >= deadline) throw new FieldUnfillable(`Workday did not finish uploading "${fileName}" within 60 seconds`);
+    await page.waitForTimeout(UPLOAD_POLL_MS);
+  }
+}
 
 /** The one form field whose label appears in the text as a whole phrase; null for none or several. */
 function fieldNamedIn(form: RecognizedForm, text: string): BrowserField | null {
@@ -431,7 +490,10 @@ export function createWorkdayPage(page: Page): WorkdayPage {
           await page.waitForTimeout(300);
         }
       }
-      await container(field).locator('input[type="file"]').first().setInputFiles(path);
+      const input = container(field).locator('input[type="file"]').first();
+      await input.setInputFiles(path);
+      // Workday reads the file in the background; Save and Continue before it finishes leaves the upload empty.
+      if ((await input.getAttribute("data-automation-id")) === "file-upload-input-ref") await waitForWorkdayUpload(page, container(field), basename(path));
     },
     clickSubmit: async () => {
       // Only the Review step's footer button submits; it must say so.

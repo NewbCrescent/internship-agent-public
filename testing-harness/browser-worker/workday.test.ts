@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { classifyWorkdayAccountMessage, markWorkdayResumeUpload, newWorkdayVerifyNotice, planAutofill, workdayErrorPauses, type WorkdayPageError } from "@internship-agent/browser";
+import {
+  classifyWorkdayAccountMessage,
+  isWorkdayUploadStatus,
+  markWorkdayResumeUpload,
+  newWorkdayVerifyNotice,
+  planAutofill,
+  workdayErrorPauses,
+  workdayUploadState,
+  type WorkdayPageError
+} from "@internship-agent/browser";
 import { browserSessionSchema, parseWorkdayUrl, workdaySiteKey, type RecognizedForm } from "@internship-agent/domain";
 
 const FORM: RecognizedForm = {
@@ -167,5 +176,26 @@ describe("Workday's My Experience resume upload with a generic label (littelfuse
     }
     const withResume = form(upload("file-upload-input-ref", "Resume/CV", false), generic);
     expect(markWorkdayResumeUpload("My Experience", withResume)).toBe(withResume);
+  });
+});
+
+describe("Workday's resume upload status (neogen.wd5, itw.wd5, littelfuse.wd1, Activision, zoll.wd5, 2026-11-25)", () => {
+  it("reads the upload widget's status line as status, never as an error", () => {
+    for (const text of ["resume.pdf loading", "resume.pdf successfully uploaded", "Successfully Uploaded!"]) expect(isWorkdayUploadStatus(text), text).toBe(true);
+    for (const text of ["Your document can't be uploaded.", "The field Upload a file (5MB max) is required and must have a value."]) {
+      expect(isWorkdayUploadStatus(text), text).toBe(false);
+    }
+  });
+
+  it("tells a pending, loading, listed, uploaded, and refused upload apart", () => {
+    const read = (text: string, alerts: string[] = [], progress = false) => workdayUploadState({ text, alerts, progress }, "resume.pdf");
+    expect(read("Drop files here or Select files")).toEqual({ state: "pending", detail: null });
+    expect(read("resume.pdf loading\nresume.pdf\n86.02 KB").state).toBe("loading");
+    expect(read("resume.pdf\n86.02 KB", [], true).state).toBe("loading");
+    expect(read("resume.pdf successfully uploaded\nresume.pdf\n86.02 KB\nSuccessfully Uploaded!").state).toBe("uploaded");
+    expect(read("resume.pdf\n86.02 KB").state).toBe("shown");
+    expect(read("Drop files here or Select files", ["Your document can't be uploaded."])).toEqual({ state: "failed", detail: "Your document can't be uploaded." });
+    // A required-field error is not an upload failure.
+    expect(read("resume.pdf\n86.02 KB", ["The field Upload a file (5MB max) is required and must have a value."]).state).toBe("shown");
   });
 });
