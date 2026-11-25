@@ -98,6 +98,18 @@ export const suiteManifest = [
     description: "Retrying held automatic runs after a fix (pnpm pipeline:retry) against a disposable workspace: an eligible pipeline-started run (paused or awaiting approval) is cancelled, its job goes back to READY_FOR_REVIEW, and \"Automatic run retried after a fix: <reason>\" is logged; candidate-started runs, runs with an answered pause or a submit approval, failed runs, and submitted applications are refused; --held selects every eligible held run and reports the rest as skipped; --dry-run writes nothing and takes no lock; the command takes the pipeline lock and --start runs the pass while still holding it; the next pass starts a fresh automatic run, even after an earlier automatic stop; a run the site refused with field errors after the submit click (paused, approval withdrawn) is retryable while a failed unconfirmed submit stays refused. Fake pages; no browser, no network, no model. --reopen-unsubmitted --reason reopens a failed submit only with positive Greenhouse noncompletion evidence and a fresh complete no-match receipt check for that attempt (cancelled, job READY_FOR_REVIEW, the next pass starts a fresh run); refused without evidence, with a confirmation, for an email before the click, for another company or sender, and for paused, submitted, or candidate-started runs; usage without --run or an explicit reason; a run held for a missing security code is retryable. Verified pre-submit retry checks the precise revision, rejects every post-submit outcome, and writes only the target run, job and trace. Fake-page rejections keep matched questions or unmatched manual field corrections actionable, and a missing security code stays manager-owned. Workday: an automatic run paused by Workday's page errors (one pause per error) is retried with --held; with account automation on, --held also releases Workday account holds of kind \"unexpected\" (no run was saved for them) and keeps the password and account state, --dry-run only lists them, CAPTCHA and interrupted holds stay, the account gate opens for the released host, --start runs a pass when only holds were released, and without the account settings the output is unchanged."
   },
   {
+    id: "continued-auto-submit",
+    features: ["browser", "database"],
+    tier: "local",
+    script: "test:agent:continued",
+    requires: ["node", "pnpm", "node-sqlite"],
+    network: "none",
+    mutation: "local-temporary",
+    timeoutMs: 60_000,
+    reportPrefixes: [],
+    description: "Answered automatic runs under the auto-submit policy (candidate decision 2026-11-21) against a disposable workspace: a pipeline-started run whose last question was answered with pnpm run:answer is submitted on the next pass through the same policy check (target and AI fit, company cap, graduation profile, daily cap) with the policy's approval, exactly once, and run:answer says what happens next; runs the candidate started, open pauses, approval-only sites, runs with a submit approval, an earlier automatic approval, post-submit evidence, or a possible-submission hold, and manual checklist mode are never submitted. Fake pages; no browser, no network, no model."
+  },
+  {
     id: "submit-evidence",
     features: ["browser", "database"],
     tier: "local",

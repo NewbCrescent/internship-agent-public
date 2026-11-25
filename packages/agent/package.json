@@ -17,6 +17,7 @@
     "test:company": "vitest --root ../.. run testing-harness/agent/company-policy.integration.test.ts",
     "test:pursuit": "vitest --root ../.. run testing-harness/agent/needs-review-pursuit.integration.test.ts",
     "test:retry": "vitest --root ../.. run testing-harness/agent/automatic-retry.integration.test.ts",
+    "test:continued": "vitest --root ../.. run testing-harness/agent/continued-auto-submit.integration.test.ts",
     "test:evidence": "vitest --root ../.. run testing-harness/agent/submit-evidence.integration.test.ts",
     "test:security-code": "vitest --root ../.. run testing-harness/agent/greenhouse-security-code.test.ts",
     "test:notify": "vitest --root ../.. run testing-harness/agent/discord-notify.test.ts",

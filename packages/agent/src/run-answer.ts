@@ -13,6 +13,7 @@ import {
   revokeQuestionAnswer
 } from "@internship-agent/db";
 import {
+  autoSubmitSettings,
   factDefinitions,
   manualOnly,
   notSavedReasonText,
@@ -24,7 +25,9 @@ import {
 import { ZodError } from "zod";
 
 import { classifyOpenPauses } from "./application-holds";
+import { targetTerm } from "./application-target";
 import { ATTACHED_RESUME_FIELD, answerRunPause, continueBrowserRun, pauseContext, type RunReport } from "./browser-orchestrator";
+import { continuedRunNote } from "./continued-auto-submit";
 import { readDigestState } from "./daily-digest";
 import { redactNoticeText } from "./pass-notice";
 import { acquirePipelineLock } from "./pipeline-lock";
@@ -322,7 +325,7 @@ export async function runAnswerCommand(argv: string[], deps: Partial<RunCommandD
       }
       io.log(`Run ${ref(run.id)} continued: ${report.run.status}.`);
       if (report.run.status === "awaiting-approval") {
-        io.log("It waits for your submit approval; a run that paused is never submitted automatically.");
+        io.log(continuedRunNote(database, dataDir, report.run, autoSubmitSettings(process.env) !== null && targetTerm() !== null));
       } else if (report.run.status === "paused-needs-input") {
         io.log(stillOpenLine(report.run));
       }

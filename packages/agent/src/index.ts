@@ -19,6 +19,7 @@ export * from "./handshake-session-service";
 export * from "./resume-entry-service";
 export * from "./pipeline-orchestrator";
 export * from "./automatic-retry";
+export * from "./continued-auto-submit";
 export * from "./application-target";
 export * from "./voice-drafting";
 export * from "./concurrency";

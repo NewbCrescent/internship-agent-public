@@ -32,12 +32,13 @@ import { resolveWorkdayAccounts, workdayAccountSettings, workdayAccountWait, typ
 import { icimsAccountSettings, icimsAccountWait, resolveIcimsAccounts, type IcimsAccountSettings } from "./icims-account-service";
 import { fitTargetDecision, postingTargetDecision, targetTerm } from "./application-target";
 import { companyStanding } from "./company-policy";
+import { continuedAutoSubmitRuns, profileMismatchReason } from "./continued-auto-submit";
 import type { VoiceDrafter } from "./voice-drafting";
 import type { VerificationMailboxFactory } from "./workday-verification-mail";
 import { AUTO_SUBMIT_EVENT, autoSubmitBlockers, autoSubmitSettings, combineTargetDecisions, manualOnly, parseWorkdayUrl,
   workdaySiteKey, type AutoSubmitSettings, type BrowserRun, type TargetDecision, type TargetTerm } from "@internship-agent/domain";
 import { COMPANY_CAP_PREFIX, companyCapReason, companyCapSetting, DEFAULT_COMPANY_CAP, standingConsentSettings } from "@internship-agent/domain";
-import { icimsHostOf, SubmissionHeld } from "@internship-agent/browser";
+import { icimsHostOf, resolveDataDir, SubmissionHeld } from "@internship-agent/browser";
 import { reviewPursuit } from "@internship-agent/matching";
 
 export type PipelineSettings = {
@@ -163,7 +164,7 @@ export type PipelineReport = {
  * postings whose current AI fit meets the auto-submit bar and whose target
  * decision is apply), then (with auto-apply on) fill
  * verified applications in a browser and stop at the submit approval.
- * Submission itself is never reached from here.
+ * With the auto-submit policy, clean runs are submitted through submitAutomatically: right after the fill, and on later passes for runs the pipeline started that became clean since (answered, or held earlier only by the target, the AI fit, or a cap).
  * Per company: at most the company cap of applications per target term, and one graduation profile.
  */
 export async function advancePipeline(options: {
@@ -288,6 +289,17 @@ export async function advancePipeline(options: {
   const icimsAccounts = settings.icimsAccounts ? resolveIcimsAccounts(settings.icimsAccounts, options.dataDir) : null;
   const icimsRuntime = icimsAccounts && "runtime" in icimsAccounts ? icimsAccounts.runtime : null;
   const acceptDataConsent = standingConsentSettings().acceptDataConsent;
+  // Runs the pipeline started that reached the submit step clean since their start pass (answered, or held only by the
+  // target, the AI fit, or a cap) go through the same policy check (candidate decision, 2026-11-21).
+  if (autoSubmit) {
+    for (const run of continuedAutoSubmitRuns(database, resolveDataDir(options.dataDir))) {
+      try {
+        await submitAutomatically(run, combineTargetDecisions(pursued(run.jobId)!, fitTargetDecision(database, run.jobId, fitFloor)), autoSubmit);
+      } catch (error) {
+        report.errors.push(`Automatic submission failed for ${run.jobId}: ${messageOf(error)}`);
+      }
+    }
+  }
   // Postings at one company compete for its cap: the higher current AI fit runs first (a stable sort keeps import order on ties).
   const fitScore = new Map<string, number>();
   const ready = listJobSummaries(database).filter((job) => job.status === "READY_FOR_REVIEW");
@@ -379,6 +391,8 @@ export async function advancePipeline(options: {
     const reasons = [...(decision.outcome === "apply" ? [] : decision.reasons), ...autoSubmitBlockers(run)];
     const standing = companyStanding(database, run.jobId, { term: target });
     if (standing && standing.applications >= cap) reasons.push(companyCapReason(standing.company, standing.applications));
+    const mismatch = profileMismatchReason(database, candidateId, run, standing);
+    if (mismatch) reasons.push(mismatch);
     if (reasons.length === 0 && policy.dailyCap !== null) {
       const midnight = new Date();
       midnight.setHours(0, 0, 0, 0);
@@ -398,7 +412,9 @@ export async function advancePipeline(options: {
       `${target!.season} ${target!.year} term, software or adjacent role, US location${ai};`,
       ...standingClause,
       ...(unverified.length ? [`pursued on the AI fit with requirements your evidence and resume do not verify (your approval of 2026-11-24): ${unverified.join("; ").slice(0, 300)};`] : []),
-      "every answer came from your saved facts and materials."
+      run.pauses.some((pause) => pause.status === "answered")
+        ? "every answer came from your saved facts and materials or from your own answers to this run's questions."
+        : "every answer came from your saved facts and materials."
     ], { database });
     try {
       const submitted = await submitBrowserRun(run.id, {

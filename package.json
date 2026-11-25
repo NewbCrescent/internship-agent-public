@@ -56,6 +56,7 @@
     "test:agent:company": "pnpm --filter @internship-agent/agent test:company",
     "test:agent:pursuit": "pnpm --filter @internship-agent/agent test:pursuit",
     "test:agent:retry": "pnpm --filter @internship-agent/agent test:retry",
+    "test:agent:continued": "pnpm --filter @internship-agent/agent test:continued",
     "test:agent:evidence": "pnpm --filter @internship-agent/agent test:evidence",
     "test:agent:security-code": "pnpm --filter @internship-agent/agent test:security-code",
     "test:agent:workday-account": "pnpm --filter @internship-agent/agent test:workday-account",
