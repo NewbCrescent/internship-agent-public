@@ -23,7 +23,12 @@
  * create goes to the verification email too (quiet). A sign-in form whose
  * click filter is labelled "Submit" (submit-label, as rockwellautomation.wd1
  * draws it) is clicked through the filter over the form's own submit button
- * and signs in. Never reads process.env for accounts or Gmail.
+ * and signs in. Every account submit is clicked no sooner than one second
+ * after its form appears (the candidate's choice, 2026-11-24): under the
+ * fixture's dwell mode, which drops a submit clicked under 500 ms after its
+ * button mounts as Workday's sign-in widget does, the account is created and
+ * the sign-in drawn right after it signs in (dwell). Never reads process.env
+ * for accounts or Gmail.
  *
  * Usage: pnpm test:browser:workday-account
  */
@@ -51,7 +56,7 @@ const EMAIL = "jordan@example.test";
 const COMPANY = "Fixture Aerospace";
 const PASSWORD_RULE = /^(?=.*[A-HJ-NP-Z])(?=.*[a-km-z])(?=.*[2-9])(?=.*[!@#$%^&*])[A-HJ-NP-Za-km-z2-9!@#$%^&*]{16}$/;
 
-type FixtureAccount = { honeypotTyped: boolean; termsChecked: boolean; creates: number; signIns: number; emailMethodClicks: number; headerClicks: number };
+type FixtureAccount = { honeypotTyped: boolean; termsChecked: boolean; creates: number; signIns: number; emailMethodClicks: number; headerClicks: number; ignoredSubmits: number; submitDelays: number[] };
 
 /**
  * A virtual clock for the account step's waits: each sleep advances virtual
@@ -420,6 +425,22 @@ async function main(): Promise<void> {
     if (submitLabelState.honeypotTyped) failures.push("submit-label: the robot honeypot was typed in");
     await opensFlow("submit-label", submitLabel.page);
 
+    // Workday's sign-in widget drops an account submit clicked under 500 ms after its button mounts (dwell=1).
+    // The create, and the sign-in form Workday draws right after it, are each clicked no sooner than one second
+    // after their form appears (the candidate's choice, 2026-11-24), so the account is created and signs in.
+    const dwellHost = "fixture-dwell.wd1.myworkdayjobs.com";
+    const dwell = await scenario("dwell", dwellHost, "signin-after&dwell=1", { clock: virtualClock().clock });
+    if (dwell.result !== "signed-in") failures.push(`dwell: expected "signed-in", got ${dwell.result ?? dwell.error?.message}`);
+    const dwellState = await fixtureState(dwell.tab);
+    if (dwellState.ignoredSubmits !== 0) failures.push(`dwell: ${dwellState.ignoredSubmits} submits dropped as too early (delays ${dwellState.submitDelays.join(", ")} ms)`);
+    if (dwellState.creates !== 1 || dwellState.signIns !== 1) failures.push(`dwell: ${dwellState.creates} creates and ${dwellState.signIns} sign-ins`);
+    if (dwellState.submitDelays.length !== 2 || dwellState.submitDelays.some((delay) => delay < 950)) {
+      failures.push(`dwell: submit delays ${dwellState.submitDelays.join(", ")} ms, expected two of at least 950`);
+    }
+    if (dwellState.honeypotTyped) failures.push("dwell: the robot honeypot was typed in");
+    if (!events().includes(`Workday ${dwellHost}: account created with your email; the password is saved locally.`)) failures.push("dwell: no account-created event");
+    await opensFlow("dwell", dwell.page);
+
     // The verification link for a host's unverified fixture account, from the (fake) mailbox.
     const linkFor = (host: string, tab: () => Page | null) => async (): Promise<MailMessage[]> => {
       const current = tab();
@@ -562,7 +583,7 @@ async function main(): Promise<void> {
     console.error(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"failed","failures":${JSON.stringify(failures)}}`);
     process.exit(1);
   }
-  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":29}`);
+  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":30}`);
 }
 
 main().catch((error) => {

@@ -35,6 +35,7 @@
     // its button reads Sign In, as a read-only capture of rockwellautomation.wd1's sign-in step showed
     // on 2026-11-24 (Workday labels the filter by its internal auth view; the create filter there
     // reads "Create Account").
+    // ?dwell=1 (like Workday's sign-in widget, candidate-experience-apply-flow 2026.47.19, read 2026-11-24): an account submit clicked under 500 ms after its submit button mounted is dropped with no message; window.fixtureAccount counts the drops (ignoredSubmits) and records each submit's delay from its button's mount (submitDelays, ms).
     // Save and Continue validation draws Workday-style errors: an errorMessage alert inside each
     // missing field's formField-* container, an errorBanner listing them, and a plain
     // errorMessage for missing items that have no container (history rows, Resume/CV).
@@ -53,7 +54,16 @@
       document.getElementById("app").innerHTML = "<h2>Your account has been verified.</h2>";
     }
     const accountMode = params.get("account");
-    window.fixtureAccount = { honeypotTyped: false, termsChecked: false, creates: 0, signIns: 0, emailMethodClicks: 0, headerClicks: 0 };
+    window.fixtureAccount = { honeypotTyped: false, termsChecked: false, creates: 0, signIns: 0, emailMethodClicks: 0, headerClicks: 0, ignoredSubmits: 0, submitDelays: [] };
+    const dwellMode = params.get("dwell") === "1";
+    const submitMounts = new WeakMap();
+    if (dwellMode) {
+      new MutationObserver(() => {
+        for (const button of document.querySelectorAll('[data-automation-id="createAccountSubmitButton"], [data-automation-id="signInSubmitButton"]')) {
+          if (!submitMounts.has(button)) submitMounts.set(button, performance.now());
+        }
+      }).observe(document.documentElement, { childList: true, subtree: true });
+    }
     if (params.get("header") === "filter") {
       document.querySelector('[data-automation-id="utilityButtonSignIn"]').outerHTML = `<div data-automation-id="utilityMenu"><div style="position:relative;display:inline-block"><div aria-label="Sign In" role="button" tabindex="0" data-automation-id="click_filter" style="position:absolute;inset:0;z-index:1"></div><button data-automation-id="utilityButtonSignIn" tabindex="-2" aria-hidden="true">Sign In</button></div></div>`;
     }
@@ -453,6 +463,12 @@
         // label ("Submit" on ?filter=submit). The test may watch the moment of submit.
         const covered = target.parentElement?.querySelector('[data-automation-id="createAccountSubmitButton"], [data-automation-id="signInSubmitButton"]');
         const action = covered?.getAttribute("data-automation-id") === "createAccountSubmitButton" ? "Create Account" : "Sign In";
+        if (dwellMode) {
+          const mountedAt = covered ? submitMounts.get(covered) : undefined;
+          const elapsed = mountedAt === undefined ? 0 : performance.now() - mountedAt;
+          window.fixtureAccount.submitDelays.push(Math.round(elapsed));
+          if (elapsed < 500) { window.fixtureAccount.ignoredSubmits += 1; return; }
+        }
         Promise.resolve(window.onFixtureAccountSubmit?.(action)).then(() => (action === "Create Account" ? createAccount() : signIn()));
       } else if (target.matches("[data-add]")) {
         syncHistory();

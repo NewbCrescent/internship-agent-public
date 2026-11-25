@@ -10,6 +10,9 @@ import { ensureNameShim } from "../handshake-executor";
  * `data-automation-id` attributes. Only the named controls are ever typed in
  * or checked: Workday's robot honeypot (`beecatcher`) is never touched. This
  * module stores nothing and logs nothing; credentials pass through only.
+ * Account submits are clicked no sooner than one second after the form
+ * appears (the candidate's choice, 2026-11-24), so Workday's minimum-time
+ * check passes.
  */
 export type WorkdayCredentials = { email: string; password: string };
 
@@ -120,6 +123,12 @@ const CREATE_SUBMIT = '[data-automation-id="createAccountSubmitButton"], [data-a
 const OWN_SUBMIT = { "Sign In": '[data-automation-id="signInSubmitButton"]', "Create Account": '[data-automation-id="createAccountSubmitButton"]' } as const;
 /** The click filters inside the nearest noCaptchaWrapper around a button: Workday's cover for that button. */
 const WRAPPER_FILTER = 'xpath=ancestor::*[@data-automation-id="noCaptchaWrapper"][1]//*[@data-automation-id="click_filter"]';
+/**
+ * Workday's sign-in widget (candidate-experience-apply-flow 2026.47.19) silently drops an account
+ * submit made under 500 ms after the form's submit button mounts. The candidate chose on 2026-11-24
+ * ("yes a second") to let the agent click no sooner than this long after the form appears.
+ */
+const SUBMIT_DWELL_MS = 1_000;
 const METHOD_EMAIL = '[data-automation-id="SignInWithEmailButton"]';
 const OTHER_PROVIDERS = '[data-automation-id="GoogleSignInButton"], [data-automation-id="AppleSignInButton"], [data-automation-id="LinkedInSignInButton"]';
 const SIGN_IN_LINK = '[data-automation-id="signInLink"]';
@@ -214,6 +223,16 @@ async function typeInto(field: Locator, value: string, failure: string): Promise
   } catch {
     throw new WorkdayAccountStepError(failure);
   }
+}
+
+/**
+ * Waits until SUBMIT_DWELL_MS have passed since `shownAt`, the moment the agent first saw the form
+ * (its own submit button, or the click filter over it, visible), so time spent typing counts and a
+ * slow page does not wait twice. Real time, even when tests inject a virtual clock for the answer wait.
+ */
+async function waitAfterFormShown(page: Page, shownAt: number): Promise<void> {
+  const remaining = shownAt + SUBMIT_DWELL_MS - Date.now();
+  if (remaining > 0) await page.waitForTimeout(remaining);
 }
 
 /**
@@ -408,11 +427,14 @@ export async function signInToWorkday(
     }
   }
   if (screen !== "sign-in") return screenOutcome(screen);
+  // The screen reader has just seen the form's submit control: Workday's minimum-time check counts from about here.
+  const shownAt = Date.now();
   const email = visible(page, EMAIL).filter({ hasNot: page.locator(HONEYPOT) });
   const password = visible(page, PASSWORD);
   if ((await email.count()) !== 1 || (await password.count()) !== 1) return { result: "other", detail: "the sign-in form has unexpected fields" };
   await typeInto(email.first(), credentials.email, "the email field could not be filled");
   await typeInto(password.first(), credentials.password, "the password field could not be filled");
+  await waitAfterFormShown(page, shownAt);
   const before = await scopeText(page);
   return submitAccount(page, "sign-in", host, options, before);
 }
@@ -436,6 +458,8 @@ export async function createWorkdayAccount(
     screen = await waitForScreen(page, ["create-account"]);
   }
   if (screen !== "create-account") return { outcome: screenOutcome(screen), termsLabel: null };
+  // The screen reader has just seen the form's submit control: Workday's minimum-time check counts from about here.
+  const shownAt = Date.now();
   const email = visible(page, EMAIL).filter({ hasNot: page.locator(HONEYPOT) });
   const password = visible(page, PASSWORD_FIELD);
   const verify = visible(page, VERIFY_PASSWORD);
@@ -465,6 +489,7 @@ export async function createWorkdayAccount(
     }
     termsLabel = collapse(label).slice(0, 200) || "the terms checkbox";
   }
+  await waitAfterFormShown(page, shownAt);
   const before = await scopeText(page);
   return { outcome: await submitAccount(page, "create", host, options, before), termsLabel };
 }
