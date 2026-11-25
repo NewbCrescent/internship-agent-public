@@ -188,8 +188,10 @@ function collectWorkdayControlsIn(root: Element): RawControl[] {
       if (input) controls.push({ tag: "input", type: input.type || "text", id, label, required, value: input.value || undefined });
     }
   }
-  // My Experience's resume upload sits outside a formField container.
-  const upload = root.querySelector('input[type="file"][data-automation-id="file-upload-input-ref"]');
+  // My Experience's resume upload sits outside a formField container; a hidden one (a step still being replaced) is not a field.
+  // Workday's input itself is display:none, so its wrapper (the drop zone) is what shows.
+  const upload = Array.from(root.querySelectorAll('input[type="file"][data-automation-id="file-upload-input-ref"]'))
+    .find((input) => input.getClientRects().length > 0 || (input.parentElement !== null && input.parentElement.getClientRects().length > 0));
   if (upload && !controls.some((control) => control.type === "file")) {
     controls.push({ tag: "input", type: "file", id: "file-upload-input-ref", label: "Resume/CV", required: false });
   }
@@ -470,9 +472,13 @@ export function createWorkdayPage(page: Page): WorkdayPage {
       return controls;
     },
     waitForFormReady: async () => {
-      // Only visible field containers count: Workday can draw a step's fields hidden while it loads.
+      // Only visible field containers count: Workday can draw a step's fields hidden while it loads. A resume
+      // input counts only while its wrapper shows (the previous step's hidden upload can linger, littelfuse.wd1).
+      await ensureNameShim(page);
       await waitForStableControls(async () =>
-        (await page.locator(FIELD).filter({ visible: true }).count()) + (await page.locator(RESUME_UPLOAD).count()));
+        (await page.locator(FIELD).filter({ visible: true }).count()) +
+        (await page.locator(RESUME_UPLOAD).evaluateAll((inputs) => inputs.filter((input) =>
+          input.getClientRects().length > 0 || (input.parentElement?.getClientRects().length ?? 0) > 0).length)));
     },
     fillField: async (field, value) => {
       // Workday's split date boxes (Month, Day, Year sections) are typed part by part.

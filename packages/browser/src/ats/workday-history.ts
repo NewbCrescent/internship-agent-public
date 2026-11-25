@@ -28,7 +28,7 @@ import {
 /**
  * Fills Workday's repeating My Experience sections (Work Experience and
  * Education) from the candidate's history. Sections and rows are found by
- * Workday's markers when present and by their headings otherwise; fields are
+ * Workday's labelled groups or markers when present and by their headings otherwise; fields are
  * found by their labels, which stay stable across Workday versions. A row the
  * candidate did not choose is deleted and recorded; anything the filler cannot
  * match (a degree, a school in a search list) becomes a question for the
@@ -44,6 +44,9 @@ type Kind = "work" | "education";
 const FIELD = '[data-automation-id^="formField-"]';
 const SECTION_ATTRIBUTE = "data-ia-section";
 const PANEL_ATTRIBUTE = "data-ia-panel";
+/** The longest a history-row action waits for its control (a re-drawn row's control stops resolving). */
+const HISTORY_ACTION_MS = 5_000;
+const isTimeout = (error: unknown) => error instanceof Error && error.name === "TimeoutError";
 
 const LABELS = {
   work: {
@@ -65,7 +68,13 @@ const LABELS = {
   }
 } as const;
 
-/** Tags the history sections and their row panels on the current step; returns the row count per section. */
+/**
+ * Tags the history sections and their row panels on the current step; returns the row count per section.
+ * A section is Workday's `role="group"` labelled (`aria-labelledby`) "Work Experience" or "Education", else
+ * its `workExperienceSection` / `educationSection` marker, else the nearest ancestor of its heading holding an
+ * Add (Workday's `add-button`, or a button reading Add or Add Another). One element is never taken for both
+ * sections (employer-e.wd5, 2026-11-25: every row "was not added" while no other field of the step was read).
+ */
 async function tagSections(page: Page): Promise<Record<Kind, number | null>> {
   return page.locator("body").evaluate((body, attributes) => {
     const [sectionAttribute, panelAttribute] = attributes;
@@ -75,9 +84,16 @@ async function tagSections(page: Page): Promise<Record<Kind, number | null>> {
       ["education", "educationSection", /^education$/i]
     ];
     const text = (element: Element) => (element.textContent ?? "").replace(/\s+/g, " ").trim();
-    const isAdd = (button: Element) => /^add(?: another)?$/i.test(text(button));
+    const isAdd = (button: Element) => button.getAttribute("data-automation-id") === "add-button" || /^add(?: another)?$/i.test(text(button));
+    const labelOf = (element: Element) => (element.getAttribute("aria-labelledby") ?? "").split(/\s+/).filter(Boolean)
+      .map((id) => body.ownerDocument.getElementById(id)).filter((label): label is HTMLElement => label !== null)
+      .map(text).join(" ").replace(/\s+/g, " ").trim();
+    const groups = Array.from(body.querySelectorAll('[role="group"][aria-labelledby]'));
+    const chosen: Element[] = [];
     for (const [kind, marker, heading] of specs) {
-      let section = body.querySelector(`[data-automation-id="${marker}"]`);
+      const matched = groups.filter((group) => heading.test(labelOf(group)));
+      let section: Element | null = matched.find((group) => !matched.some((other) => other !== group && other.contains(group))) ?? null;
+      section ??= body.querySelector(`[data-automation-id="${marker}"]`);
       if (!section) {
         const title = Array.from(body.querySelectorAll("h2, h3, h4, legend")).find((element) => heading.test(text(element)));
         let node = title?.parentElement ?? null;
@@ -85,6 +101,10 @@ async function tagSections(page: Page): Promise<Record<Kind, number | null>> {
         section = node && node !== body ? node : null;
       }
       if (!section) continue;
+      // The same element (or one holding the other) found for both sections is no section of either kind's own.
+      const shared = section;
+      if (chosen.some((other) => other === shared || other.contains(shared) || shared.contains(other))) continue;
+      chosen.push(section);
       section.setAttribute(sectionAttribute, kind);
       const candidates = Array.from(section.querySelectorAll(`[role="group"], [data-automation-id^="workExperience-"], [data-automation-id^="education-"]`))
         .filter((element) => element.querySelector('[data-automation-id^="formField-"]'));
@@ -113,9 +133,9 @@ async function keyOf(page: Page, scope: Locator, match: FieldMatch): Promise<str
   const container = fieldIn(page, scope, match);
   if (!(await container.count())) return "";
   const chip = container.locator('[data-automation-id="selectedItem"]').first();
-  if (await chip.count()) return (await chip.innerText()).trim();
+  if (await chip.count()) return (await chip.innerText({ timeout: HISTORY_ACTION_MS })).trim();
   const input = container.locator('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])').first();
-  return (await input.count()) ? (await input.inputValue()).trim() : "";
+  return (await input.count()) ? (await input.inputValue({ timeout: HISTORY_ACTION_MS })).trim() : "";
 }
 
 function sameName(a: string, b: string): boolean {
@@ -132,24 +152,46 @@ async function deletePanel(page: Page, kind: Kind, index: number): Promise<boole
   return true;
 }
 
+/** The section's Add: Workday's `add-button`, else a button reading Add or Add Another. */
+async function addButtonOf(page: Page, kind: Kind): Promise<Locator> {
+  const section = page.locator(`[${SECTION_ATTRIBUTE}="${kind}"]`).first();
+  const marked = section.locator('[data-automation-id="add-button"]');
+  return (await marked.count()) ? marked.last() : section.locator("button").filter({ hasText: /^\s*add(?: another)?\s*$/i }).last();
+}
+
+/**
+ * Adds a row and returns its index. An Add that shows no new row within 8 s is clicked once more after
+ * closing lists and re-tagging; a second miss returns null (the row's "did not add" question). A row the
+ * first click added but that is counted only later is left blank and deleted at the end.
+ */
 async function addPanel(page: Page, kind: Kind): Promise<number | null> {
   const before = (await tagSections(page))[kind] ?? 0;
-  const section = page.locator(`[${SECTION_ATTRIBUTE}="${kind}"]`).first();
-  const add = section.locator("button").filter({ hasText: /^\s*add(?: another)?\s*$/i }).last();
-  if (!(await add.count())) return null;
-  await closeWorkdayLists(page);
-  await clickWorkdayControl(page, add);
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    await page.waitForTimeout(200);
-    const now = (await tagSections(page))[kind] ?? 0;
-    if (now > before) return now - 1;
+  for (let click = 0; click < 2; click += 1) {
+    if (click > 0) {
+      await closeWorkdayLists(page, true);
+      await tagSections(page);
+    }
+    const add = await addButtonOf(page, kind);
+    if (!(await add.count())) return null;
+    await closeWorkdayLists(page);
+    try {
+      await clickWorkdayControl(page, add);
+    } catch (error) {
+      // An Add that never took the click is a missed Add, never a crash.
+      if (!isTimeout(error)) throw error;
+    }
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await page.waitForTimeout(200);
+      const now = (await tagSections(page))[kind] ?? 0;
+      if (now > before) return now - 1;
+    }
   }
   return null;
 }
 
 async function typeInto(page: Page, input: Locator, value: string): Promise<void> {
   // A covered input is focused instead.
-  await input.click({ timeout: 5_000 }).catch(() => input.focus());
+  await input.click({ timeout: 5_000 }).catch(() => input.focus({ timeout: HISTORY_ACTION_MS }));
   await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Backspace");
   await page.keyboard.type(value);
@@ -161,8 +203,8 @@ async function typeInto(page: Page, input: Locator, value: string): Promise<void
  * 2026-11-24/25): focus it and type.
  */
 export async function typeIntoDateSection(page: Page, input: Locator, value: string): Promise<void> {
-  await input.focus();
-  if ((await input.inputValue()) !== "") {
+  await input.focus({ timeout: HISTORY_ACTION_MS });
+  if ((await input.inputValue({ timeout: HISTORY_ACTION_MS })) !== "") {
     await page.keyboard.press("ControlOrMeta+A");
     await page.keyboard.press("Backspace");
   }
@@ -182,7 +224,7 @@ async function setText(page: Page, scope: Locator, match: FieldMatch, value: str
     return;
   }
   const input = container.locator('textarea, input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"])').first();
-  if ((await input.inputValue()) !== value) await input.fill(value);
+  if ((await input.inputValue({ timeout: HISTORY_ACTION_MS })) !== value) await input.fill(value, { timeout: HISTORY_ACTION_MS });
   record.fill(id, value, basis, "Entered from the candidate's own history.");
 }
 
@@ -192,7 +234,7 @@ async function unrecognizedDateLabels(scope: Locator, kind: Kind): Promise<strin
     .filter((field) => field.querySelector('[data-automation-id^="dateSection"], input[type="date"]'))
     .map((field) => (field.querySelector("label, legend")?.textContent || field.querySelector("[aria-label]")?.getAttribute("aria-label") || "")
       .replace(/\s+/g, " ").replace(/\*+$/, "").trim())
-    .filter(Boolean)).catch(() => [] as string[]);
+    .filter(Boolean), undefined, { timeout: HISTORY_ACTION_MS }).catch(() => [] as string[]);
   return labels.filter((text) => !LABELS[kind].from.test(text) && !LABELS[kind].to.test(text)).slice(0, 5).map((text) => text.slice(0, 60));
 }
 
@@ -257,7 +299,7 @@ async function setChoice(
   const pick = (options: string[]) => (answer ? options.find((option) => option.trim().toLocaleLowerCase("en-US") === answer.trim().toLocaleLowerCase("en-US")) ?? null : choose(options));
   const listbox = container.locator('button[aria-haspopup="listbox"]').first();
   if (await listbox.count()) {
-    const shown = (await listbox.innerText()).trim();
+    const shown = (await listbox.innerText({ timeout: HISTORY_ACTION_MS })).trim();
     // Read only the list this button opened, once it stops changing (workday-lists.ts).
     const texts = await openWorkdayListbox(page, listbox);
     const option = pick(texts);
@@ -283,15 +325,17 @@ async function setChoice(
     // A plain text box takes the candidate's own wording.
     const text = container.locator('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"])').first();
     if (!(await text.count())) return;
-    if ((await text.inputValue()) !== wanted) await text.fill(wanted);
+    if ((await text.inputValue({ timeout: HISTORY_ACTION_MS })) !== wanted) await text.fill(wanted, { timeout: HISTORY_ACTION_MS });
+    // A text entry can re-draw the row (a suggestion list opens); tag it again, as after a pick.
+    await tagSections(page);
     record.fill(id, wanted, basis, "Entered from the candidate's own history.");
     return;
   }
   const input = container.locator('[data-automation-id="multiselectInputContainer"] input').first();
   if (!(await input.count())) return;
   const chip = container.locator('[data-automation-id="selectedItem"]').first();
-  if ((await chip.count()) && pick([(await chip.innerText()).trim()])) {
-    record.fill(id, (await chip.innerText()).trim(), basis, "Workday already shows the matching option.");
+  if ((await chip.count()) && pick([(await chip.innerText({ timeout: HISTORY_ACTION_MS })).trim()])) {
+    record.fill(id, (await chip.innerText({ timeout: HISTORY_ACTION_MS })).trim(), basis, "Workday already shows the matching option.");
     return;
   }
   const seen: string[] = [];
@@ -315,25 +359,49 @@ async function setChoice(
   record.ask(id, id, `Workday's list has no match for "${wanted}"${seen.length ? ` (it offered: ${[...new Set(seen)].slice(0, 10).join("; ")})` : ""}. Answer with the option to pick.`);
 }
 
+/**
+ * Runs one history-row field: closes a list left open and re-tags the sections first (Workday can re-draw a
+ * row, dropping the tags, after a text entry, an Escape, or a pick: ZOLL 2026-11-25 lost education row 1's
+ * Degree for 30 s). A control that still does not respond is retried once after re-tagging, then becomes the
+ * row's question; it never stops the run.
+ */
+async function rowField(page: Page, record: Recorder, id: string, label: string, action: () => Promise<void>): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await closeWorkdayLists(page);
+    await tagSections(page);
+    try {
+      await action();
+      return;
+    } catch (error) {
+      if (!isTimeout(error)) throw error;
+      await closeWorkdayLists(page, true);
+    }
+  }
+  record.ask(id, id, `Workday's ${label} control on this row did not respond; enter it yourself.`);
+}
+
 async function fillWorkRow(page: Page, scope: Locator, row: WorkHistoryRow, record: Recorder): Promise<void> {
   const id = (field: string) => `history:work:${row.company}:${field}`;
   const basis: DecisionBasis = { kind: "resume_entry", entryId: row.entryId };
   const labels = LABELS.work;
-  await setText(page, scope, labels.title, row.title, id("title"), basis, record, true);
-  await setText(page, scope, labels.company, row.company, id("company"), basis, record, true);
-  await setText(page, scope, labels.location, row.location, id("location"), basis, record);
-  const current = fieldIn(page, scope, labels.current).locator('input[type="checkbox"]').first();
-  if (await current.count()) {
-    await current.setChecked(row.current);
-    if (row.current) record.fill(id("current"), "true", basis, "The entry is marked current.");
-  }
+  const field = (fieldId: string, label: string, action: () => Promise<void>) => rowField(page, record, fieldId, label, action);
+  await field(id("title"), "Job Title", () => setText(page, scope, labels.title, row.title, id("title"), basis, record, true));
+  await field(id("company"), "Company", () => setText(page, scope, labels.company, row.company, id("company"), basis, record, true));
+  await field(id("location"), "Location", () => setText(page, scope, labels.location, row.location, id("location"), basis, record));
+  await field(id("current"), "I currently work here", async () => {
+    const current = fieldIn(page, scope, labels.current).locator('input[type="checkbox"]').first();
+    if (await current.count()) {
+      await current.setChecked(row.current, { timeout: HISTORY_ACTION_MS });
+      if (row.current) record.fill(id("current"), "true", basis, "The entry is marked current.");
+    }
+  });
   if (!row.start) record.ask(id("from"), id("from"), `${row.company} has no start month on the Resume page; add it there or enter it here.`);
-  await setDate(page, scope, labels.from, row.start, id("from"), basis, record, true);
+  await field(id("from"), "From", () => setDate(page, scope, labels.from, row.start, id("from"), basis, record, true));
   if (!row.current) {
     if (!row.end) record.ask(id("to"), id("to"), `${row.company} has no end month on the Resume page; add it there or enter it here.`);
-    await setDate(page, scope, labels.to, row.end, id("to"), basis, record, true);
+    await field(id("to"), "To", () => setDate(page, scope, labels.to, row.end, id("to"), basis, record, true));
   }
-  await setText(page, scope, labels.description, row.description || null, id("description"), basis, record);
+  await field(id("description"), "Role Description", () => setText(page, scope, labels.description, row.description || null, id("description"), basis, record));
 }
 
 /** The field is required (a trailing * or aria-required) and shows no value: no picked item, "Select One", or empty inputs. */
@@ -348,7 +416,7 @@ async function requiredAndEmpty(page: Page, scope: Locator, match: FieldMatch): 
     if (button) return /^(?:select one)?$/i.test((button.textContent ?? "").trim());
     return Array.from(field.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]), textarea'))
       .every((input) => (input as HTMLInputElement).value.trim() === "");
-  }).catch(() => false);
+  }, undefined, { timeout: HISTORY_ACTION_MS }).catch(() => false);
 }
 
 async function fillEducationRow(page: Page, scope: Locator, row: EducationRow, record: Recorder, answers: Map<string, string>): Promise<void> {
@@ -358,23 +426,28 @@ async function fillEducationRow(page: Page, scope: Locator, row: EducationRow, r
   const fromMatch: FieldMatch = { label: labels.from, automationId: "formField-firstYearAttended" };
   const toMatch: FieldMatch = { label: labels.to, automationId: "formField-lastYearAttended" };
   const fieldMatch: FieldMatch = { label: labels.field, automationId: "formField-fieldOfStudy" };
-  if (!(await fieldIn(page, scope, labels.school).count())) {
-    record.ask(id("school"), id("school"), `Workday's education row has no school field; enter "${row.school}" yourself.`);
-  }
-  await setChoice(page, scope, labels.school, row.school, (options) => matchPromptOption(row.school, options), id("school"), basis("school"), record, answers.get(id("school")));
-  await setChoice(page, scope, labels.degree, row.degree ?? (row.level === "high_school" ? "High School Diploma" : null),
-    (options) => chooseDegreeOption(row, options), id("degree"), basis("degree"), record, answers.get(id("degree")));
+  const field = (fieldId: string, label: string, action: () => Promise<void>) => rowField(page, record, fieldId, label, action);
+  await field(id("school"), "School", async () => {
+    if (!(await fieldIn(page, scope, labels.school).count())) {
+      record.ask(id("school"), id("school"), `Workday's education row has no school field; enter "${row.school}" yourself.`);
+    }
+  });
+  await field(id("school"), "School", () => setChoice(page, scope, labels.school, row.school, (options) => matchPromptOption(row.school, options), id("school"), basis("school"), record, answers.get(id("school"))));
+  await field(id("degree"), "Degree", () => setChoice(page, scope, labels.degree, row.degree ?? (row.level === "high_school" ? "High School Diploma" : null),
+    (options) => chooseDegreeOption(row, options), id("degree"), basis("degree"), record, answers.get(id("degree"))));
   const fieldAnswer = answers.get(id("field"));
   const fieldWanted = row.fieldOfStudy ?? fieldAnswer ?? null;
-  if (fieldWanted) {
-    await setChoice(page, scope, fieldMatch, fieldWanted, (options) => matchFieldOfStudyOption(fieldWanted, options), id("field"), basis("fieldOfStudy"), record, fieldAnswer);
-  } else if (await requiredAndEmpty(page, scope, fieldMatch)) {
-    // Nothing saved states this row's field of study (a high school): ask before the step is saved.
-    record.ask(id("field"), id("field"), `Workday requires a field of study for ${row.school}, and none is saved for it. Answer with the field of study to enter.`);
-  }
-  await setText(page, scope, labels.gpa, row.gpa, id("gpa"), basis("gpa"), record);
-  await setDate(page, scope, fromMatch, row.startYear, id("from"), basis("educationStartMonth"), record, false, "education");
-  await setDate(page, scope, toMatch, row.endYear, id("to"), basis("graduationDate"), record, true, "education");
+  await field(id("field"), "Field of Study", async () => {
+    if (fieldWanted) {
+      await setChoice(page, scope, fieldMatch, fieldWanted, (options) => matchFieldOfStudyOption(fieldWanted, options), id("field"), basis("fieldOfStudy"), record, fieldAnswer);
+    } else if (await requiredAndEmpty(page, scope, fieldMatch)) {
+      // Nothing saved states this row's field of study (a high school): ask before the step is saved.
+      record.ask(id("field"), id("field"), `Workday requires a field of study for ${row.school}, and none is saved for it. Answer with the field of study to enter.`);
+    }
+  });
+  await field(id("gpa"), "Overall Result (GPA)", () => setText(page, scope, labels.gpa, row.gpa, id("gpa"), basis("gpa"), record));
+  await field(id("from"), "From", () => setDate(page, scope, fromMatch, row.startYear, id("from"), basis("educationStartMonth"), record, false, "education"));
+  await field(id("to"), "To", () => setDate(page, scope, toMatch, row.endYear, id("to"), basis("graduationDate"), record, true, "education"));
 }
 
 /**

@@ -94,6 +94,23 @@
     // ?lists=micron (synthetic copy of the option texts micron.wd1 offered on 2026-11-25, run <run id>): the degree list names
     // "… Level Degree" options and the field-of-study search offers the plural "Computer sciences".
     const micronLists = params.get("lists") === "micron";
+    // ?linger=<ms> (synthetic, modeled on littelfuse.wd1 run <run id>, 2026-11-25: the run read only a hidden
+    // "Resume/CV" upload on the step after My Experience; no DOM was captured): when Save and Continue leaves My
+    // Experience without errors, the progress bar moves to the next step at once while My Experience's fields stay
+    // in the DOM hidden (#fields display:none) for that many milliseconds; then the next step is drawn.
+    const lingerMs = Number(params.get("linger") || 0);
+    // ?remount=1 with ?school=text (synthetic, modeled on the zoll.wd5 failure of 2026-11-25 13:55Z, whose Degree
+    // locator stopped resolving for 30 s; the trigger was not captured): the typed school's suggestion list is drawn
+    // as a portal in <body>, and Escape on My Experience re-draws the whole step (fresh DOM, typed values kept), as if
+    // Workday re-mounted the rows.
+    const remount = params.get("remount") === "1";
+    // ?sections=aria (synthetic, modeled on the public description of Workday's My Experience markup and on
+    // employer-e.wd5 run <run id>, whose every history row "was not added" while no other field of the step was
+    // read; no DOM was captured): each section is a role="group" labelled by its heading (Work-Experience-section,
+    // Education-section) with no workExperienceSection marker, its Add is data-automation-id="add-button" carrying
+    // visually hidden section text, each row is a role="group" labelled "<Name>-<n>-panel", and a Websites section
+    // with a plain "Add" follows the resume; state.websites counts its rows.
+    const ariaSections = params.get("sections") === "aria";
     const ACCOUNTS_KEY = "fixture-workday-accounts";
     const SESSION_KEY = "fixture-workday-session";
     const readAccounts = () => JSON.parse(localStorage.getItem(ACCOUNTS_KEY) || "{}");
@@ -124,7 +141,7 @@
     }
     const steps = ["My Information", "My Experience", "Application Questions", "Voluntary Disclosures", "Review"];
     // upload: { name, phase: "loading" | "done" | "failed" } | null (?upload only).
-    const state = { step: 0, values: {}, submitted: false, resumes: [], transcript: null, work: [], education: [], upload: null };
+    const state = { step: 0, values: {}, submitted: false, resumes: [], transcript: null, work: [], education: [], upload: null, websites: 0 };
     // ?parsed=1: Workday already shows a row parsed from a resume that is not the candidate's.
     if (params.get("parsed") === "1") state.work.push({ title: "Analyst", company: "Resume Parse Corp", location: "", current: false, fromM: "01", fromY: "2020", toM: "02", toY: "2020", description: "" });
     const schools = ["University of California, Berkeley", "University of California, Los Angeles", "Berkeley City College", "Northwind High School"];
@@ -182,7 +199,7 @@
           <input type="radio" id="prev-yes" name="prev" value="true"${gaps ? ' aria-labelledby="prev-question"' : ""}><label for="prev-yes">Yes</label>
           <input type="radio" id="prev-no" name="prev" value="false"${gaps ? ' aria-labelledby="prev-question"' : ""}><label for="prev-no">No</label>
         </div>`,
-      () => `
+      () => ariaSections ? ariaExperience() : `
         <div data-automation-id="workExperienceSection">
           <h3>Work Experience</h3>
           ${state.work.map(workPanel).join("")}
@@ -217,8 +234,10 @@
       ? `<span style="position:relative;display:inline-block"><input data-automation-id="dateSection${part}-input" role="spinbutton" aria-label="${part}" ${attrs} value="${value}"><span data-automation-id="dateSection${part}-display" style="position:absolute;inset:0;background:#fff">${value || (part === "Month" ? "MM" : "YYYY")}</span></span>`
       : `<input data-automation-id="dateSection${part}-input" ${attrs} value="${value}">`;
     const workPanel = (row, index) => `
-      <div role="group" data-automation-id="workExperience-${index + 1}">
-        <h4>Work Experience ${index + 1}</h4>
+      ${ariaSections
+        ? `<div role="group" aria-labelledby="Work-Experience-${index + 1}-panel"><h4 id="Work-Experience-${index + 1}-panel">Work Experience ${index + 1}</h4>`
+        : `<div role="group" data-automation-id="workExperience-${index + 1}">
+        <h4>Work Experience ${index + 1}</h4>`}
         <button type="button" data-automation-id="panel-set-delete-button" data-delete="work" data-index="${index}">Delete</button>
         <div data-automation-id="formField-jobTitle"><label for="w${index}t">Job Title*</label><input id="w${index}t" ${historyInput("work", index, "title")} value="${row.title || ""}"></div>
         <div data-automation-id="formField-companyName"><label for="w${index}c">Company*</label><input id="w${index}c" ${historyInput("work", index, "company")} value="${row.company || ""}"></div>
@@ -233,8 +252,10 @@
         <div data-automation-id="formField-roleDescription"><label for="w${index}d">Role Description</label><textarea id="w${index}d" ${historyInput("work", index, "description")}>${row.description || ""}</textarea></div>
       </div>`;
     const educationPanel = (row, index) => `
-      <div role="group" aria-label="Education ${index + 1}">
-        <h4>Education ${index + 1}</h4>
+      ${ariaSections
+        ? `<div role="group" aria-labelledby="Education-${index + 1}-panel"><h4 id="Education-${index + 1}-panel">Education ${index + 1}</h4>`
+        : `<div role="group" aria-label="Education ${index + 1}">
+        <h4>Education ${index + 1}</h4>`}
         <button type="button" data-delete="education" data-index="${index}">Delete</button>
         ${schoolText
           ? `<div data-automation-id="formField-school" style="position:relative"><label for="e${index}s">School or University*</label><input id="e${index}s" ${historyInput("education", index, "school")} data-suggest="1" value="${row.school || ""}"></div>`
@@ -250,6 +271,27 @@
         ${eduDates === "none" ? "" : `<div data-automation-id="formField-firstYearAttended"><label>${eduDates === "ids" ? "Attended From" : "From"}</label>${dateInput("Year", historyInput("education", index, "fromY"), row.fromY || "")}</div>
         <div data-automation-id="formField-lastYearAttended"><label>${eduDates === "ids" ? "Attended Until*" : "To (Actual or Expected)*"}</label>${dateInput("Year", historyInput("education", index, "toY"), row.toY || "")}</div>`}
       </div>`;
+    // ?sections=aria: an Add carries the section's name as visually hidden text, as accessible Add buttons do.
+    const hiddenText = (text) => `<span style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">${text}</span>`;
+    const ariaExperience = () => `
+        <div role="group" aria-labelledby="Work-Experience-section">
+          <h3 id="Work-Experience-section">Work Experience</h3>
+          ${state.work.map(workPanel).join("")}
+          <button type="button" data-automation-id="add-button" data-add="work">${state.work.length ? "Add Another" : "Add"}${hiddenText("Work Experience")}</button>
+        </div>
+        <div role="group" aria-labelledby="Education-section">
+          <h3 id="Education-section">Education</h3>
+          ${state.education.map(educationPanel).join("")}
+          <button type="button" data-automation-id="add-button" data-add="education">${state.education.length ? "Add Another" : "Add"}${hiddenText("Education")}</button>
+        </div>
+        <h3>Resume/CV</h3>
+        <input type="file" data-automation-id="file-upload-input-ref" style="display:none">
+        ${resumeStatus()}
+        <div role="group" aria-labelledby="Websites-section">
+          <h3 id="Websites-section">Websites</h3>
+          ${Array.from({ length: state.websites }, () => `<div data-fixture-website><div data-automation-id="formField-url"><label>URL</label><input></div></div>`).join("")}
+          <button type="button" data-automation-id="add-button" data-add-website="1">Add</button>
+        </div>`;
     const resumeItems = () => state.resumes.map((name, index) =>
       `<div data-automation-id="file-upload-item">${name} <button type="button" data-automation-id="delete-file" data-file="${index}">Delete</button></div>`).join("");
     const resumeStatus = () => {
@@ -284,6 +326,13 @@
       return missing;
     }
 
+    /** The progress bar's steps, the current one marked active. */
+    function progressItems() {
+      return steps.map((name, index) => index === state.step
+        ? `<li data-automation-id="progressBarActiveStep">current step ${index + 1} of ${steps.length}${name}</li>`
+        : `<li data-automation-id="progressBarInactiveStep">step ${index + 1} of ${steps.length}${name}</li>`).join("");
+    }
+
     const hiddenMs = Number(params.get("hidden") || 0);
     let hiddenDrawn = false;
     function render() {
@@ -291,12 +340,9 @@
         document.getElementById("app").innerHTML = `<h2>Application Submitted</h2><p>Thank you for applying to Fixture Aerospace.</p>`;
         return;
       }
-      const bar = steps.map((name, index) => index === state.step
-        ? `<li data-automation-id="progressBarActiveStep">current step ${index + 1} of ${steps.length}${name}</li>`
-        : `<li data-automation-id="progressBarInactiveStep">step ${index + 1} of ${steps.length}${name}</li>`).join("");
       document.getElementById("app").innerHTML = `
         <div data-automation-id="applyFlowPage">
-          <ol data-automation-id="progressBar">${bar}</ol>
+          <ol data-automation-id="progressBar">${progressItems()}</ol>
           <div id="errors"></div>
           <div id="fields">${pages[state.step]()}</div>
           <div data-automation-id="pageFooter">${state.step > 0 ? `<button type="button" data-automation-id="pageFooterBackButton">Back</button>` : ""}<button type="button" data-automation-id="pageFooterNextButton">${state.step === steps.length - 1 ? "Submit" : "Save and Continue"}</button></div>
@@ -597,9 +643,15 @@
           if (elapsed < 500) { window.fixtureAccount.ignoredSubmits += 1; return; }
         }
         Promise.resolve(window.onFixtureAccountSubmit?.(action)).then(() => (action === "Create Account" ? createAccount() : signIn()));
-      } else if (target.matches("[data-add]")) {
+      } else if (target.closest("[data-add]")) {
+        // A click on the Add's inner (visually hidden) text still adds.
+        const addButton = target.closest("[data-add]");
         syncHistory();
-        state[target.dataset.add].push({});
+        state[addButton.dataset.add].push({});
+        render();
+      } else if (target.closest("[data-add-website]")) {
+        syncHistory();
+        state.websites += 1;
         render();
       } else if (target.matches("[data-delete]")) {
         syncHistory();
@@ -709,6 +761,14 @@
             .map((entry) => `<p data-automation-id="errorMessage">Error: ${entry.label} is required</p>`).join("");
           return;
         }
+        // ?linger: the progress bar moves on at once; My Experience's fields stay in the DOM, hidden, until the next step is drawn.
+        if (lingerMs > 0 && state.step === 1) {
+          state.step += 1;
+          document.querySelector('[data-automation-id="progressBar"]').innerHTML = progressItems();
+          document.getElementById("fields").style.display = "none";
+          setTimeout(render, lingerMs);
+          return;
+        }
         // ?upload: Workday takes a moment to move on, the upload's status alert still on screen.
         if (uploadMode && state.step === 1) { setTimeout(() => { state.step += 1; render(); }, 1000); return; }
         state.step += 1;
@@ -716,20 +776,29 @@
       }
     });
     // ?school=text: the typed school's suggestion layer, drawn inside the field over the controls below it; only leaving the box closes it.
+    // With ?remount=1 it is a portal in <body> beside the form instead (it covers nothing), closed by Escape.
     document.addEventListener("input", (event) => {
       if (!event.target.matches("input[data-suggest]")) return;
       const field = event.target.closest('[data-automation-id^="formField-"]');
       for (const layer of field.querySelectorAll("[data-fixture-suggest]")) layer.remove();
+      if (remount) for (const layer of document.querySelectorAll("[data-fixture-list][data-fixture-suggest]")) layer.remove();
       if (!event.target.value) return;
       const layer = document.createElement("ul");
       layer.setAttribute("role", "listbox");
       layer.setAttribute("data-fixture-suggest", "1");
-      layer.setAttribute("style", "position:absolute;left:0;top:100%;width:480px;height:320px;margin:0;padding:0;list-style:none;background:#fff;z-index:20");
+      layer.setAttribute("style", remount
+        ? "position:absolute;left:900px;top:0;width:240px;height:40px;margin:0;padding:0;list-style:none;background:#fff;z-index:20"
+        : "position:absolute;left:0;top:100%;width:480px;height:320px;margin:0;padding:0;list-style:none;background:#fff;z-index:20");
       const option = document.createElement("li");
       option.setAttribute("role", "option");
       option.textContent = event.target.value;
       layer.appendChild(option);
-      field.appendChild(layer);
+      if (remount) {
+        layer.setAttribute("data-fixture-list", "1");
+        document.body.appendChild(layer);
+      } else {
+        field.appendChild(layer);
+      }
     });
     document.addEventListener("focusout", (event) => {
       if (!event.target.matches || !event.target.matches("input[data-suggest]")) return;
@@ -743,6 +812,12 @@
         setTimeout(() => { for (const element of closing) element.remove(); }, 300);
       } else {
         clearLists();
+        // ?remount=1: Escape on My Experience re-draws the whole step, typed values kept.
+        if (remount && state.step === 1) {
+          syncHistory();
+          clearLists();
+          render();
+        }
       }
     });
   </script>

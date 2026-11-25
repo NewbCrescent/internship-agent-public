@@ -112,13 +112,14 @@ export async function closeWorkdayLists(page: Page, always = false): Promise<voi
  * Clicks a Workday control. When the click is not taken within 5 s (a list left open or a display
  * layer over it: the Add Another and Degree timeouts on Sierra Space, Micron, Rockwell and enGen,
  * 2026-11-25), it focuses the control and presses Enter, the keyboard's own activation. Never forces a click.
+ * The focus is bounded too; a control that never resolves throws a TimeoutError for the caller.
  */
 export async function clickWorkdayControl(page: Page, control: Locator): Promise<void> {
   try {
     await control.click({ timeout: CLICK_WAIT_MS });
   } catch (error) {
     if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
-    await control.focus();
+    await control.focus({ timeout: CLICK_WAIT_MS });
     await page.keyboard.press("Enter");
   }
 }
@@ -127,14 +128,14 @@ export async function clickWorkdayControl(page: Page, control: Locator): Promise
 export async function openWorkdayListbox(page: Page, button: Locator): Promise<string[]> {
   await closeWorkdayLists(page);
   await clickWorkdayControl(page, button);
-  return settleWorkdayOptions(page, () => button.evaluate(listboxOptionsOf, null).catch(() => [] as string[]));
+  return settleWorkdayOptions(page, () => button.evaluate(listboxOptionsOf, null, { timeout: 2_000 }).catch(() => [] as string[]));
 }
 
 /** Clicks the option with exactly this text in the list the button opened; false when that list does not offer it. */
 export async function pickWorkdayListboxOption(page: Page, button: Locator, option: string): Promise<boolean> {
-  const texts = await button.evaluate(listboxOptionsOf, option).catch(() => [] as string[]);
+  const texts = await button.evaluate(listboxOptionsOf, option, { timeout: 2_000 }).catch(() => [] as string[]);
   if (!texts.includes(option)) return false;
-  await page.locator('[data-ia-pick="1"]').first().click();
+  await page.locator('[data-ia-pick="1"]').first().click({ timeout: CLICK_WAIT_MS });
   return true;
 }
 
@@ -149,6 +150,6 @@ export async function pickWorkdayPromptOption(page: Page, option: string): Promi
   await ensureNameShim(page);
   const texts = await page.locator("body").evaluate(promptOptionsShown, option).catch(() => [] as string[]);
   if (!texts.includes(option)) return false;
-  await page.locator('[data-ia-pick="1"]').first().click();
+  await page.locator('[data-ia-pick="1"]').first().click({ timeout: CLICK_WAIT_MS });
   return true;
 }

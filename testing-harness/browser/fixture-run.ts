@@ -258,7 +258,7 @@ async function main(): Promise<void> {
   if (secondWalk.outcome !== "review") failures.push(`workday: expected to stop at Review, got ${secondWalk.outcome} (${secondWalk.errors.join(" ")} ${secondWalk.pauses.map((pause) => pause.question).join(" ")})`);
   type FixtureState = {
     step: number; resumes: string[]; transcript: string | null; submitted: boolean;
-    work: Array<Record<string, string | boolean>>; education: Array<Record<string, string>>;
+    work: Array<Record<string, string | boolean>>; education: Array<Record<string, string>>; websites?: number;
   };
   const fixtureState = (tab: typeof workdayTab) => tab.evaluate(() => (window as unknown as { fixture: FixtureState }).fixture);
   const workdayState = await fixtureState(workdayTab);
@@ -472,6 +472,70 @@ async function main(): Promise<void> {
   const coveredState = await fixtureState(coveredTab);
   if (coveredState.education.length !== 2 || coveredState.education[0]?.degree !== "Bachelor of Arts (BA)" || coveredState.education[1]?.degree !== "High School Diploma") {
     failures.push(`workday covered degree: degrees not chosen: ${JSON.stringify(coveredState.education)}`);
+  }
+
+  const openPauses = (walk: Awaited<ReturnType<typeof walkWorkdayApplication>>) => walk.pauses
+    .filter((pause) => pause.status === "open").map((pause) => `${pause.fieldId}: ${pause.question}`).join(" | ");
+  const threw = (name: string) => (error: unknown) => {
+    failures.push(`workday ${name}: the walk threw: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
+    return null;
+  };
+
+  // Synthetic, modeled on littelfuse.wd1 run <run id> (2026-11-25; no DOM was captured): after My Experience is
+  // saved, the progress bar moves on at once while its hidden fields, the resume input with them, stay in the DOM
+  // for 2.5 s. That hidden input is neither counted as the next step being ready nor read as a "Resume/CV" field.
+  const lingerTab = await launched.newPage();
+  await lingerTab.goto(`${workdayUrl}?gaps=1&linger=2500`);
+  const lingerWorkday = createWorkdayPage(lingerTab);
+  await lingerWorkday.enterApplication();
+  const lingerWalk = await walkWorkdayApplication(lingerWorkday, planWorkday, { mode: "fill", history: historyOptions }).catch(threw("lingering step"));
+  if (lingerWalk) {
+    const lingerState = await fixtureState(lingerTab);
+    const hiddenUpload = [...lingerWalk.decisions, ...lingerWalk.pauses].filter((entry) => entry.fieldId.startsWith("Application Questions::file-upload-input-ref"));
+    if (lingerWalk.outcome !== "review" || lingerState.resumes.join() !== "resume.pdf" || hiddenUpload.length ||
+      !lingerWalk.decisions.some((decision) => decision.fieldId === "Application Questions::formField-whyUs")) {
+      failures.push(`workday lingering step: expected Review with one resume and Application Questions read, got ${lingerWalk.outcome} (resumes ${JSON.stringify(lingerState.resumes)}; ${hiddenUpload.length} hidden-upload records; ${lingerWalk.errors.join(" ")} ${openPauses(lingerWalk)})`);
+    }
+  }
+
+  // Synthetic, modeled on the zoll.wd5 failure of 2026-11-25 13:55Z ("locator.focus: Timeout 30000ms exceeded" on
+  // education row 1's Degree; the re-draw trigger was not captured): Escape on My Experience re-draws every row,
+  // dropping the run's section tags. Each row field re-tags first, so the run is never stopped by a vanished row.
+  const remountTab = await launched.newPage();
+  await remountTab.goto(`${workdayUrl}?school=text&remount=1`);
+  const remountWorkday = createWorkdayPage(remountTab);
+  await remountWorkday.enterApplication();
+  const remountWalk = await walkWorkdayApplication(remountWorkday, planWorkday, { mode: "fill", history: historyOptions }).catch(threw("re-drawn education row"));
+  if (remountWalk) {
+    const remountState = await fixtureState(remountTab);
+    const [remountCollege, remountHighSchool] = remountState.education;
+    const typed = history(2028).education;
+    if (remountWalk.outcome !== "review" || remountState.education.length !== 2 || remountCollege?.degree !== "Bachelor of Arts (BA)" || remountHighSchool?.degree !== "High School Diploma" ||
+      remountCollege.school !== typed[0]!.school || remountHighSchool.school !== typed[1]!.school) {
+      failures.push(`workday re-drawn education row: expected Review with both rows entered, got ${remountWalk.outcome} ${JSON.stringify(remountState.education)} (${remountWalk.errors.join(" ")} ${openPauses(remountWalk)})`);
+    }
+  }
+
+  // Synthetic, modeled on the public description of Workday's My Experience markup and on employer-e.wd5 run
+  // <run id> (every history row "was not added" and no other field of the step was read; no DOM was captured):
+  // sections are role="group" labelled "<Name>-section", Adds are add-button with hidden section text, and a
+  // Websites section with a plain "Add" follows. Each section is found by its own label, and Websites is never used.
+  const ariaTab = await launched.newPage();
+  await ariaTab.goto(`${workdayUrl}?sections=aria`);
+  const ariaWorkday = createWorkdayPage(ariaTab);
+  await ariaWorkday.enterApplication();
+  const ariaWalk = await walkWorkdayApplication(ariaWorkday, planWorkday, { mode: "fill", history: historyOptions }).catch(threw("aria sections"));
+  if (ariaWalk) {
+    const ariaState = await fixtureState(ariaTab);
+    const [ariaTutor, ariaIntern] = ariaState.work;
+    const [ariaCollege, ariaHighSchool] = ariaState.education;
+    const rowPauses = ariaWalk.pauses.filter((pause) => pause.fieldId.endsWith(":row"));
+    if (ariaWalk.outcome !== "review" || rowPauses.length || ariaState.websites !== 0 ||
+      ariaState.work.length !== 2 || ariaTutor?.company !== "Northwind Tutoring" || ariaTutor.title !== "Programming Tutor" || ariaIntern?.company !== "Contoso Identity" ||
+      ariaState.education.length !== 2 || ariaCollege?.school !== "University of California, Berkeley" || ariaCollege.degree !== "Bachelor of Arts (BA)" ||
+      ariaHighSchool?.school !== "Northwind High School" || ariaHighSchool.degree !== "High School Diploma") {
+      failures.push(`workday aria sections: expected Review with both sections entered and no website row, got ${ariaWalk.outcome} (websites ${ariaState.websites}; work ${JSON.stringify(ariaState.work.map((row) => row.company))}; education ${JSON.stringify(ariaState.education.map((row) => [row.school, row.degree]))}; ${ariaWalk.errors.join(" ")} ${openPauses(ariaWalk)})`);
+    }
   }
 
   // Synthetic copy of the lists micron.wd1 offered on 2026-11-25 (run <run id>): a B.A. takes the one general
