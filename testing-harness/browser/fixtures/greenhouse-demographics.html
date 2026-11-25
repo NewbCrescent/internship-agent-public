@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Job Application for Robotics Software Intern at Fixture Robotics</title>
+<style>
+  .select__control { display: flex; flex-wrap: wrap; border: 1px solid #888; min-height: 32px; width: 320px; }
+  .select__value-container { flex: 1; position: relative; display: flex; flex-wrap: wrap; }
+  .select__input { border: 0; width: 100%; min-height: 28px; }
+  .select__multi-value { display: inline-flex; background: #eee; margin: 2px; }
+  .select__multi-value__remove { width: 12px; height: 12px; }
+  .select-shell { position: relative; }
+  .select__menu { border: 1px solid #888; width: 320px; background: #fff; position: absolute; top: 100%; left: 0; z-index: 9999; max-height: 300px; overflow-y: auto; }
+  .select__option { padding: 4px; }
+</style>
+</head>
+<body>
+  <!--
+    A fictional Greenhouse job board page ("Fixture Robotics"), derived from the react-select
+    markup of greenhouse-application.html (itself reduced from read-only 2026-11-19 captures).
+    The one-option checkbox question (a fieldset id="question_7001[]" whose legend holds the
+    statement and whose one box is labelled only "I agree and consent") follows the field id a
+    real Greenhouse run recorded (question_<n>[]_<m>); its legend text is fictional, since the
+    real one was not recorded. The voluntary self-identification lists ("How would you describe
+    your …? (mark all that apply)") are react-select multi-selects (data-multi="true"). Their
+    markup is react-select's standard isMulti classes, ASSUMED for Greenhouse's "mark all that
+    apply" questions, not captured: a choice adds a select__multi-value chip with a
+    select__multi-value__label and a Remove button, removes the placeholder, keeps the menu open,
+    and drops the chosen option from the menu; no select__single-value is ever drawn. The
+    transgender question is an ordinary single react-select. All option texts are fictional.
+    window.fixture.selects records arrays for multi lists and a string for single lists.
+  -->
+  <main>
+    <form id="application-form">
+      <div class="field-wrapper"><label id="first_name-label" for="first_name">First Name<span aria-hidden="true">*</span></label>
+        <input id="first_name" type="text" aria-required="true"></div>
+      <div class="field-wrapper"><label id="last_name-label" for="last_name">Last Name<span aria-hidden="true">*</span></label>
+        <input id="last_name" type="text" aria-required="true"></div>
+      <div class="field-wrapper"><label id="email-label" for="email">Email<span aria-hidden="true">*</span></label>
+        <input id="email" type="text" aria-required="true"></div>
+      <div class="field-wrapper">
+        <fieldset class="checkbox" id="question_7001[]" aria-required="true">
+          <legend class="label checkbox__description">Terms of Use and Privacy Notice <span class="required">*</span></legend>
+          <div class="checkbox__wrapper"><div class="checkbox__input"><input required type="checkbox" id="question_7001[]_1" name="question_7001[]" value="1"></div><label for="question_7001[]_1">I agree and consent</label></div>
+        </fieldset>
+      </div>
+      <div class="field-wrapper" data-select="question_7002" data-multi="true" data-label="How would you describe your gender identity? (mark all that apply)"
+        data-options="Man|Non-binary|Woman|I prefer to self-describe|I don't wish to answer"></div>
+      <div class="field-wrapper" data-select="question_7003" data-multi="true" data-label="How would you describe your racial/ethnic background? (mark all that apply)"
+        data-options="Black or of African descent|East Asian|Hispanic, Latinx or of Spanish Origin|South Asian|White or European|I prefer to self-describe|I don't wish to answer"></div>
+      <div class="field-wrapper" data-select="question_7004" data-multi="true" data-label="How would you describe your sexual orientation? (mark all that apply)"
+        data-options="Asexual|Bisexual and/or pansexual|Gay|Heterosexual|Lesbian|Queer|I prefer to self-describe|I don't wish to answer"></div>
+      <div class="field-wrapper" data-select="question_7005" data-label="Do you identify as transgender?" data-options="Yes|No|I don't wish to answer"></div>
+      <div class="application--submit"><button type="submit" class="btn btn--pill">Submit application</button></div>
+    </form>
+  </main>
+  <script>
+    const state = { checked: [], selects: {} };
+    window.fixture = state;
+    for (const host of document.querySelectorAll("[data-select]")) {
+      const id = host.dataset.select;
+      host.innerHTML = `<div class="select"><div class="select__container">
+        <label id="${id}-label" for="${id}" class="label select__label">${host.dataset.label}</label>
+        <div class="select-shell" data-shell="${id}">
+          <div><div class="select__control"><div class="select__value-container${host.dataset.multi ? " select__value-container--is-multi" : ""}">
+            <div class="select__placeholder" id="react-select-${id}-placeholder">Select...</div>
+            <div class="select__input-container"><input class="select__input" id="${id}" tabindex="0" type="text" aria-autocomplete="list" aria-expanded="false" aria-haspopup="true" aria-labelledby="${id}-label" aria-required="false" role="combobox" aria-describedby="react-select-${id}-placeholder"></div>
+          </div><div class="select__indicators"><button type="button" class="icon-button" aria-label="Toggle flyout" tabindex="-1"></button></div></div></div>
+          <div class="select__menu-slot"></div>
+        </div></div></div>`;
+      if (host.dataset.multi) state.selects[id] = [];
+    }
+    const shellOf = (id) => document.querySelector(`[data-shell="${id}"]`);
+    const hostOf = (id) => document.querySelector(`[data-select="${id}"]`);
+    // A multi list's menu leaves out what is already chosen, as react-select's does.
+    const optionsOf = (id) => hostOf(id).dataset.options.split("|").filter((option) => !(hostOf(id).dataset.multi && state.selects[id].includes(option)));
+    function openMenu(id) {
+      const slot = shellOf(id).querySelector(".select__menu-slot");
+      slot.innerHTML = `<div class="select__menu"><div class="select__menu-list${hostOf(id).dataset.multi ? " select__menu-list--is-multi" : ""}" role="listbox" id="react-select-${id}-listbox">${optionsOf(id)
+        .map((option, index) => `<div class="select__option" role="option" id="react-select-${id}-option-${index}" data-for="${id}">${option}</div>`).join("")}</div></div>`;
+      document.getElementById(id).setAttribute("aria-expanded", "true");
+    }
+    function closeMenus() {
+      for (const slot of document.querySelectorAll(".select__menu-slot")) slot.innerHTML = "";
+      for (const input of document.querySelectorAll(".select__input")) input.setAttribute("aria-expanded", "false");
+    }
+    document.addEventListener("mousedown", (event) => {
+      if (event.target.closest(".select__multi-value__remove")) return;
+      const control = event.target.closest(".select__control");
+      if (control) { closeMenus(); openMenu(control.querySelector(".select__input").id); }
+    });
+    document.addEventListener("click", (event) => {
+      const remove = event.target.closest(".select__multi-value__remove");
+      if (remove) {
+        const chip = remove.closest(".select__multi-value");
+        const id = chip.closest("[data-shell]").dataset.shell;
+        state.selects[id] = state.selects[id].filter((option) => option !== chip.querySelector(".select__multi-value__label").textContent);
+        chip.remove();
+        return;
+      }
+      const option = event.target.closest(".select__option");
+      if (!option) return;
+      const id = option.dataset.for;
+      const container = shellOf(id).querySelector(".select__value-container");
+      container.querySelector(".select__placeholder")?.remove();
+      if (hostOf(id).dataset.multi) {
+        state.selects[id] = [...state.selects[id], option.textContent];
+        container.querySelector(".select__input-container").insertAdjacentHTML("beforebegin",
+          `<div class="select__multi-value"><div class="select__multi-value__label">${option.textContent}</div><div class="select__multi-value__remove" role="button" aria-label="Remove ${option.textContent}"></div></div>`);
+        // The menu stays open, without the chosen option.
+        openMenu(id);
+        return;
+      }
+      state.selects[id] = option.textContent;
+      container.querySelector(".select__single-value")?.remove();
+      container.insertAdjacentHTML("afterbegin", `<div class="select__single-value">${option.textContent}</div>`);
+      closeMenus();
+    });
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeMenus(); });
+    document.addEventListener("change", (event) => {
+      if (event.target.type === "checkbox") {
+        state.checked = [...document.querySelectorAll('input[type="checkbox"]:checked')].map((box) => document.querySelector(`label[for="${CSS.escape(box.id)}"]`).textContent);
+      }
+    });
+    document.getElementById("application-form").addEventListener("submit", (event) => event.preventDefault());
+  </script>
+</body>
+</html>

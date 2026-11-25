@@ -33,3 +33,4 @@ export * from "./coursework";
 export * from "./standing-consent";
 export * from "./export-control";
 export * from "./standard-answers";
+export * from "./fact-options";

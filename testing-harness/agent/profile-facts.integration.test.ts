@@ -165,6 +165,39 @@ describe("pnpm profile:facts", () => {
     database.close();
   });
 
+  it("accepts the 2026-11-24 keys and never prints the new protected values", async () => {
+    const { database, files, output, run } = workspace();
+    files.set("new.json", JSON.stringify({
+      facts: [
+        { key: "willing_background_check", scope: { kind: "global" }, value: true },
+        { key: "willing_to_relocate_at_own_expense", scope: { kind: "country", code: "US" }, value: true },
+        { key: "eeo_sexual_orientation", scope: { kind: "global" }, value: "asexual" },
+        { key: "eeo_transgender", scope: { kind: "global" }, value: "not_transgender" }
+      ]
+    }));
+    expect(await run(["--profile", "demo", "--set-file", "new.json"])).toBe(0);
+    expect(output).toContain("set willing_background_check [global]: Yes");
+    expect(output).toContain("set willing_to_relocate_at_own_expense [country:US]: Yes");
+    expect(output).toContain("set eeo_sexual_orientation [global]: set");
+    expect(output).toContain("set eeo_transgender [global]: set");
+    const printed = output.join("\n").toLowerCase();
+    expect(printed).not.toContain("asexual");
+    expect(printed).not.toContain("not_transgender");
+    expect(getCurrentFact(database, LOCAL_CANDIDATE_ID, "eeo_sexual_orientation", { kind: "global" })?.sensitivity).toBe("protected");
+    expect(getCurrentFact(database, LOCAL_CANDIDATE_ID, "willing_to_relocate_at_own_expense", { kind: "country", code: "US" })?.value).toBe(true);
+
+    output.length = 0;
+    const before = factCount(database);
+    files.set("bad.json", JSON.stringify({ facts: [{ key: "eeo_sexual_orientation", value: "x-unlisted-x" }] }));
+    expect(await run(["--profile", "demo", "--set-file", "bad.json"])).toBe(1);
+    expect(output.join("\n")).not.toContain("x-unlisted-x");
+    expect(output).toContain("invalid: eeo_sexual_orientation [global]: value or scope not allowed");
+    files.set("bad-scope.json", JSON.stringify({ facts: [{ key: "eeo_transgender", scope: { kind: "country", code: "US" }, value: "transgender" }] }));
+    expect(await run(["--profile", "demo", "--set-file", "bad-scope.json"])).toBe(1);
+    expect(factCount(database)).toBe(before);
+    database.close();
+  });
+
   it("refuses relevant coursework, which is saved only with pnpm profile:coursework", async () => {
     const { database, files, output, run } = workspace();
     const before = factCount(database);

@@ -405,3 +405,55 @@ describe("standard legal and background phrasings (fictional companies and place
     expect(await mapper.map("Visa Sponsorship")).toMatchObject({ status: "AMBIGUOUS" });
   });
 });
+
+describe("new candidate facts and option questions (2026-11-24)", () => {
+  it.each([
+    "Are you willing to undergo a background check?",
+    "Would you be willing to submit to a background screening?"
+  ])("maps %s to background-check willingness", async (question) => {
+    expect(await mapper.map(question)).toMatchObject({ status: "MAPPED", key: "willing_background_check", scope: { kind: "global" } });
+  });
+
+  it.each([
+    "Can you pass a background check?",
+    "Do you consent to a background check?",
+    "I authorize Fixture Robotics to conduct a background check",
+    "Have you ever been convicted of a felony?"
+  ])("never maps %s to background-check willingness", async (question) => {
+    const result = await mapper.map(question);
+    expect(result.status === "MAPPED" ? result.key : null).not.toBe("willing_background_check");
+  });
+
+  it("maps the advertised-range comfort question on a list to the salary rule, and a text box to the expectation", async () => {
+    const question = "If posted, are you comfortable with the advertised salary range?";
+    expect(await mapper.map(question, { fieldKind: "select" })).toMatchObject({ status: "MAPPED", key: "salary_expectation_rule" });
+    expect(await mapper.map(question, { fieldKind: "radio" })).toMatchObject({ status: "MAPPED", key: "salary_expectation_rule" });
+    expect(await mapper.map("Are you comfortable with the posted pay range?", { fieldKind: "select" })).toMatchObject({
+      status: "MAPPED", key: "salary_expectation_rule"
+    });
+    const text = await mapper.map(question, { fieldKind: "text" });
+    expect(text.status === "MAPPED" ? text.key : text.status).not.toBe("salary_expectation_rule");
+    expect(await mapper.map("What are your salary expectations?", { fieldKind: "text" })).toMatchObject({ status: "MAPPED", key: "salary_expectation" });
+  });
+
+  it("keeps own-expense relocation apart from plain relocation", async () => {
+    expect(await mapper.map(
+      "Are you located in or near to the city of the advertised role? If not, are you willing to relocate at your own expense?",
+      { postingCountryCode: "US" }
+    )).toMatchObject({ status: "MAPPED", key: "willing_to_relocate_at_own_expense", scope: { kind: "country", code: "US" } });
+    expect(await mapper.map("Are you willing to relocate?", { postingCountryCode: "US" })).toMatchObject({
+      status: "MAPPED", key: "willing_to_relocate", scope: { kind: "country", code: "US" }
+    });
+  });
+
+  it("maps the offer-relative start question to the available start date", async () => {
+    expect(await mapper.map("If offered a position, how soon would you be available to start?")).toMatchObject({
+      status: "MAPPED", key: "available_start_date"
+    });
+  });
+
+  it("blocks transgender and sexual orientation questions as protected", async () => {
+    expect(await mapper.map("Do you identify as transgender?")).toMatchObject({ status: "BLOCKED", policy: "protected" });
+    expect(await mapper.map("How would you describe your sexual orientation?")).toMatchObject({ status: "BLOCKED", policy: "protected" });
+  });
+});

@@ -6,33 +6,39 @@ import type { BrowserField, SelfIdentificationAnswers, SelfIdentificationKey } f
  * deterministic, with three gates, each failing safe (null → the field pauses):
  *
  * 1. The field is an EEO-shaped select or radio group that offers a decline
- *    option ("I don't wish to answer"), which is what makes it voluntary.
- *    Free-text EEO fields and checkbox groups (Workday's CC-305 checkboxes)
- *    are never filled.
+ *    option ("I don't wish to answer"), which is what makes it voluntary. A
+ *    checkbox group counts only when its label says "mark all that apply"
+ *    (Greenhouse's lists); free-text EEO fields and other checkbox groups
+ *    (Workday's CC-305 checkboxes) are never filled.
  * 2. The label names exactly one category (gender; Hispanic/Latino yes/no;
- *    race or ethnicity; veteran; disability) and is not a pronoun,
- *    orientation, transgender, sex-assigned-at-birth, accommodation or open
- *    prompt. The "How would you describe your …" lead-in of standard EEO
- *    lists ("mark all that apply") is not an open prompt.
+ *    race or ethnicity; veteran; disability; sexual orientation; transgender
+ *    identity, 2026-11-24) and is not a pronoun, LGBTQ+,
+ *    sex-assigned-at-birth, accommodation or open prompt. The "How would you
+ *    describe your …" lead-in of standard EEO lists ("mark all that apply")
+ *    is not an open prompt.
  * 3. Exactly one offered option matches the saved answer; two matches are
  *    ambiguous and none is no answer.
  *
  * The saved values never leave this module except as the chosen option text.
  */
-export type SelfIdentificationCategory = "gender" | "hispanic" | "race" | "veteran" | "disability";
+export type SelfIdentificationCategory = "gender" | "hispanic" | "race" | "veteran" | "disability" | "orientation" | "transgender";
 
 const KEY: Record<SelfIdentificationCategory, SelfIdentificationKey> = {
   gender: "eeo_gender",
   hispanic: "eeo_race_ethnicity",
   race: "eeo_race_ethnicity",
   veteran: "eeo_veteran_status",
-  disability: "eeo_disability_status"
+  disability: "eeo_disability_status",
+  orientation: "eeo_sexual_orientation",
+  transgender: "eeo_transgender"
 };
 
 // A voluntary self-identification question always lets the candidate decline.
 const DECLINE = /\bdecline[sd]?\b|\b(?:do not|don't|does not) (?:wish|want|care) to\b|\bprefer not\b|\bchoose not\b|\brather not\b|\bnot to (?:answer|disclose|say|self[- ]?identify)\b|\bno answer\b|\bundisclosed\b/;
 // Questions that mention a category but are not the self-identification itself.
-const NOT_SELF_ID = /\b(?:pronouns?|orientation|lgbt\w*|transgender|assigned at birth|accommodat\w*|why|describe|explain|tell us)\b/;
+const NOT_SELF_ID = /\b(?:pronouns?|lgbt\w*|assigned at birth|accommodat\w*|why|describe|explain|tell us)\b/;
+// A checkbox group is a self-identification list only when it says so (Greenhouse's "mark all that apply").
+const ALL_THAT_APPLY = /\b(?:mark|select|check|choose) all that apply\b/;
 
 function normalize(text: string): string {
   return text
@@ -52,9 +58,10 @@ const isYesNo = (options: string[]) => options.some(yes) && options.some(no);
 
 type Tier = (option: string) => boolean;
 
-/** The one self-identification category a field asks about, or null when it is not a voluntary EEO select/radio. */
+/** The one self-identification category a field asks about, or null when it is not a voluntary EEO select, radio, or "mark all that apply" group. */
 export function selfIdentificationCategory(field: BrowserField): SelfIdentificationCategory | null {
-  if (field.kind !== "select" && field.kind !== "radio") return null;
+  const allThatApply = field.kind === "checkbox" && (field.options?.length ?? 0) >= 2 && ALL_THAT_APPLY.test(normalize(field.label));
+  if (field.kind !== "select" && field.kind !== "radio" && !allThatApply) return null;
   const options = (field.options ?? []).map(normalize).filter(Boolean);
   if (options.length < 2 || !options.some((option) => DECLINE.test(option))) return null;
   // "How would you describe your gender identity?" is the standard EEO lead-in, not an open prompt.
@@ -68,6 +75,8 @@ export function selfIdentificationCategory(field: BrowserField): SelfIdentificat
   }
   if (/\bveterans?\b/.test(label)) categories.push("veteran");
   if (/\bdisabilit(?:y|ies)\b|\bdisabled\b/.test(label)) categories.push("disability");
+  if (/\bsexual orientation\b|\bsexuality\b/.test(label)) categories.push("orientation");
+  if (/\btransgender\b/.test(label)) categories.push("transgender");
   return categories.length === 1 ? categories[0]! : null;
 }
 
@@ -143,8 +152,27 @@ function tiersFor(category: SelfIdentificationCategory, value: string, label: st
         ];
       }
       return null;
+    case "orientation": {
+      const word = ORIENTATION_WORDS[value];
+      if (!word) return null;
+      return [(o) => o === value || (value === "heterosexual" && o === "straight"), (o) => word.test(o) && !/\bnot\b/.test(o)];
+    }
+    case "transgender":
+      if (value === "transgender") return [yes, (o) => /^(?:i am |i'm |i identify as )?(?:a )?transgender\b/.test(o) && !/\bnot\b/.test(o)];
+      if (value === "not_transgender") return [no, (o) => /^(?:i am |i'm )?not transgender\b|^(?:i am |i'm )?cisgender\b/.test(o)];
+      return null;
   }
 }
+
+const ORIENTATION_WORDS: Record<string, RegExp> = {
+  heterosexual: /\b(?:heterosexual|straight)\b/,
+  gay: /\bgay\b/,
+  lesbian: /\blesbian\b/,
+  bisexual: /\bbi-?sexual\b/,
+  pansexual: /\bpan-?sexual\b/,
+  asexual: /\ba-?sexual\b/,
+  queer: /\bqueer\b/
+};
 
 const RACE_VALUES = new Set([
   "hispanic_or_latino",

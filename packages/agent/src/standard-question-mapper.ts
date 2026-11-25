@@ -132,8 +132,14 @@ export function mapStandardQuestion(question: string, context: QuestionContext):
   }
 }
 
+// "Are you comfortable with the advertised salary range?" asked as a list: the salary rule (the posting's stated pay) agrees.
+const RANGE_COMFORT = /\b(?:comfortable|okay|ok|fine|agree|accept(?:able)?|align\w*|happy)\b[^?]{0,60}\b(?:advertised|posted|listed|stated|published|displayed)\b[^?]{0,20}\b(?:range|rate|salary|pay|compensation|wage)\b|\b(?:advertised|posted|listed|stated|published)\s+(?:salary |pay |compensation |hourly )?(?:range|rate)\b[^?]{0,40}\b(?:comfortable|okay|acceptable|agree|align\w*)\b/;
+
 function salary(question: Prepared): QuestionMapping {
   const { n } = question;
+  if (question.choiceField && RANGE_COMFORT.test(n)) {
+    return mapped("salary_expectation_rule", "Comfortable with the posting's advertised pay range; your salary rule is the posting's stated pay.");
+  }
   if (/\b(?:current|previous|prior|last|past|most recent|present)\s+(?:base\s+)?(?:salary|pay|compensation|wage|hourly rate|rate)\b|\bsalary history\b|\bcompensation history\b/.test(n) ||
     /\bminimum\b|\blowest\b/.test(n) ||
     (question.yesNo && /\b(?:comfortable|acceptable|okay|ok|agree|accept|aligns?|fine|willing|meet)\b/.test(n))) {

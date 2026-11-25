@@ -6,7 +6,9 @@ import { manualOnly } from "./submission-mode";
  * truth does not depend on an unknown candidate fact.
  *
  * - INTERNSHIP_AGENT_ACCEPT_DATA_CONSENT=1 accepts data-processing,
- *   data-retention, and privacy-policy consent that is a condition of applying.
+ *   data-retention, and privacy-policy consent that is a condition of applying,
+ *   and a site's terms and conditions or terms of use accepted as a condition
+ *   of applying (the candidate's decision, 2026-11-24).
  * - INTERNSHIP_AGENT_SIGN_ATTESTATIONS=1 signs accuracy certifications,
  *   electronic signatures, acknowledgments (at-will, privacy or applicant
  *   notice, temporary internship, equal-opportunity statement), and
@@ -35,11 +37,12 @@ export type StandingGroup =
   | "data-retention"
   | "data-processing"
   | "privacy-policy"
+  | "terms-of-use"
   | "accuracy-certification"
   | "acknowledgment"
   | "authorization";
 
-export const DATA_CONSENT_GROUPS: ReadonlySet<StandingGroup> = new Set<StandingGroup>(["data-retention", "data-processing", "privacy-policy"]);
+export const DATA_CONSENT_GROUPS: ReadonlySet<StandingGroup> = new Set<StandingGroup>(["data-retention", "data-processing", "privacy-policy", "terms-of-use"]);
 export const ATTESTATION_GROUPS: ReadonlySet<StandingGroup> = new Set<StandingGroup>(["accuracy-certification", "acknowledgment", "authorization"]);
 
 /** The setting a `standing_consent` basis records. */
@@ -131,6 +134,17 @@ const MARKETING = /\bnewsletters?\b|\bmarketing\b|\bpromotional\b|\bjob alerts?\
 const DATA_RETENTION = /\b(?:consent|agree|authori[sz]e|permit|allow)\b[^.]{0,160}\b(?:retain|retention|store|storing|stored|keep|keeping|hold|holding)\b[^.]{0,100}\b(?:data|information|details|application|cv|resume)\b|\bretain(?:s|ing)? my (?:personal )?(?:data|information|application)\b|\bhas my consent to retain\b/i;
 const DATA_PROCESSING = /\b(?:consent|agree|authori[sz]e|permit|allow)\b[^.]{0,160}\b(?:process|processing|processed|collect|collection|collecting|use|using|transfer|transferring)\b[^.]{0,100}\b(?:personal )?(?:data|information|details)\b/i;
 const PRIVACY_POLICY = /\b(?:agree|consent|accept)\b[^.]{0,80}\b(?:privacy (?:policy|notice|statement)|data (?:protection|privacy) (?:policy|notice|statement)|candidate privacy|applicant privacy|gdpr)\b|\bi have read and (?:agree|accept|consent)\b[^.]{0,80}\bprivacy\b/i;
+/**
+ * A site's terms and conditions or terms of use (2026-11-24); employment or offer terms are not site terms,
+ * and never a statement that also asks about texts (textMessageTopic decides those).
+ */
+const TERMS = /\b(?:agree|agrees|agreed|consent|accept|accepts|accepted|acknowledge)\b[^.]{0,120}\b(?:terms (?:and|&) conditions|terms of (?:use|service)|terms and policies)\b|\bi have read(?:,? understood,?)? and (?:agree|accept|consent)\w*\b[^.]{0,120}\bterms\b/i;
+const EMPLOYMENT_TERMS = /\bterms (?:and|&) conditions of (?:employment|the (?:offer|position|internship|role))\b|\bterms of (?:employment|the offer)\b/i;
+/** "<heading>: I agree and consent": a bare agreement after a heading (Greenhouse's one-box question, read with its legend). */
+const HEADED_AGREEMENT = /^(.+):\s*(?:yes[,.]?\s*)?(?:i\s+)?(?:agree|accept|consent)(?:\s*(?:,|and|&)\s*(?:i\s+)?(?:agree|accept|consent|acknowledge|understand))*[.!]?$/i;
+const TERMS_NOUN = /\bterms (?:and|&) conditions\b|\bterms of (?:use|service)\b|\bterms and policies\b/i;
+const PRIVACY_NOUN = /\bprivacy (?:policy|notice|statement)\b|\b(?:candidate|applicant) privacy\b|\bdata (?:privacy|protection)\b|\bgdpr\b/i;
+const PERSONAL_DATA_NOUN = /\bpersonal (?:data|information)\b|\bdata processing\b|\bprocessing of (?:my |your )?(?:personal )?(?:data|information)\b/i;
 
 const CERTIFY = /\b(?:certify|attest|affirm|declare|confirm|represent)\b[^.]{0,120}\b(?:true|accurate|correct|complete|truthful)\b/i;
 const FALSE_STATEMENTS = /\b(?:false|misleading|inaccurate|incomplete)\b[^.]{0,40}\b(?:statements?|information|answers|representations?)\b|\bmisrepresentations?\b|\bomissions?\b/i;
@@ -191,6 +205,10 @@ export function classifyStandingStatement(text: string): StandingClassification 
   if (DATA_RETENTION.test(statement)) groups.push("data-retention");
   if (DATA_PROCESSING.test(statement)) groups.push("data-processing");
   if (PRIVACY_POLICY.test(statement)) groups.push("privacy-policy");
+  const headed = HEADED_AGREEMENT.exec(statement)?.[1] ?? "";
+  if ((TERMS.test(statement) || TERMS_NOUN.test(headed)) && !EMPLOYMENT_TERMS.test(statement) && textMessageTopic(statement) === null) groups.push("terms-of-use");
+  if (PRIVACY_NOUN.test(headed) && !groups.includes("privacy-policy")) groups.push("privacy-policy");
+  if (PERSONAL_DATA_NOUN.test(headed) && !groups.includes("data-processing")) groups.push("data-processing");
   if (CERTIFY.test(statement) || (FALSE_STATEMENTS.test(statement) && CONSEQUENCE.test(statement))) groups.push("accuracy-certification");
   const dataMatched = groups.some((group) => DATA_CONSENT_GROUPS.has(group));
   if (AT_WILL.test(statement) || (!dataMatched && NOTICE_READ.test(statement)) || TEMPORARY.test(statement) || EEO_STATEMENT.test(statement)) {

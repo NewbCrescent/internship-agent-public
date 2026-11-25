@@ -166,6 +166,38 @@ describe("company-, country-, and protected-scoped answers", () => {
     database.close();
   });
 
+  it("resolves the advertised-range comfort list from the salary rule and own-expense relocation per country (2026-11-24)", async () => {
+    const database = workspace();
+    save(database, "salary_expectation_rule", { kind: "global" }, "posting_pay_hourly");
+    save(database, "willing_to_relocate_at_own_expense", { kind: "country", code: "US" }, true);
+    expect(await resolveCandidateQuestion("If posted, are you comfortable with the advertised salary range?", { fieldKind: "select" }, { database }))
+      .toMatchObject({ status: "RESOLVED", fact: { key: "salary_expectation_rule", value: "posting_pay_hourly" } });
+    const combined = "Are you located in or near to the city of the advertised role? If not, are you willing to relocate at your own expense?";
+    expect(await resolveCandidateQuestion(combined, { postingCountryCode: "US", fieldKind: "select" }, { database })).toMatchObject({
+      status: "RESOLVED", displayAnswer: "Yes", fact: { key: "willing_to_relocate_at_own_expense", scope: { kind: "country", code: "US" } }
+    });
+    expect(await resolveCandidateQuestion(combined, { postingCountryCode: "CA", fieldKind: "select" }, { database })).toMatchObject({ status: "NEEDS_INPUT" });
+    // Plain relocation is not answered by the own-expense answer.
+    expect(await resolveCandidateQuestion("Are you willing to relocate?", { postingCountryCode: "US" }, { database })).toMatchObject({ status: "NEEDS_INPUT" });
+    database.close();
+  });
+
+  it("never resolves or stores a saved sexual orientation or transgender answer from a question (2026-11-24)", async () => {
+    const database = workspace();
+    save(database, "eeo_sexual_orientation", { kind: "global" }, "queer");
+    save(database, "eeo_transgender", { kind: "global" }, "not_transgender");
+    for (const question of ["What is your sexual orientation?", "Do you identify as transgender?"]) {
+      const resolution = await resolveCandidateQuestion(question, {}, { database });
+      expect(resolution, question).toMatchObject({ status: "REQUIRES_CONFIRMATION", policy: "protected" });
+      expect("fact" in resolution && resolution.fact).toBeFalsy();
+    }
+    const before = factCount(database);
+    expect(await answerCandidateQuestion({ question: "Do you identify as transgender?", answer: "no", remember: true, context: {} }, { database }))
+      .toMatchObject({ status: "REQUIRES_CONFIRMATION", policy: "protected" });
+    expect(factCount(database)).toBe(before);
+    database.close();
+  });
+
   it("answers relevant coursework from the saved courses and never stores a typed coursework answer", async () => {
     const database = workspace();
     // Neutral fixture: a fictional school and generic course codes.

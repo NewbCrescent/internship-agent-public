@@ -194,3 +194,53 @@ describe("planning saved self-identification and saved answers", () => {
     expect(plan([text], [[text.id, pronouns]]).decisions[0]).toMatchObject({ action: "fill", value: "he/him" });
   });
 });
+
+describe("sexual orientation and transgender identity (2026-11-24)", () => {
+  const decline = ["I prefer to self-describe", "I don't wish to answer"];
+  const orientation = field("How would you describe your sexual orientation? (mark all that apply)", [
+    "Asexual", "Bisexual and/or pansexual", "Gay", "Heterosexual", "Lesbian", "Queer", ...decline
+  ]);
+  const transgender = field("Do you identify as transgender?", ["Yes", "No", "I don't wish to answer"]);
+
+  it("picks the one matching orientation option of a voluntary list", () => {
+    expect(selfIdentificationCategory(orientation)).toBe("orientation");
+    expect(pick(orientation, { eeo_sexual_orientation: "queer" })).toBe("Queer");
+    expect(pick(orientation, { eeo_sexual_orientation: "pansexual" })).toBe("Bisexual and/or pansexual");
+    expect(pick(orientation, { eeo_sexual_orientation: "heterosexual" })).toBe("Heterosexual");
+    expect(pick(field("Sexual orientation", ["Straight", "Gay", "Decline to answer"]), { eeo_sexual_orientation: "heterosexual" })).toBe("Straight");
+    expect(pick(orientation, { eeo_sexual_orientation: "unlisted_value" })).toBeNull();
+  });
+
+  it("never reads asexual as bisexual or pansexual", () => {
+    expect(pick(field("Sexual orientation", ["Bisexual", "Pansexual", "Decline to answer"]), { eeo_sexual_orientation: "asexual" })).toBeNull();
+    expect(pick(field("Sexual orientation", ["Bisexual", "Asexual", "Decline to answer"]), { eeo_sexual_orientation: "asexual" })).toBe("Asexual");
+  });
+
+  it("holds without a decline option, with two matches, or on an LGBTQ+ question", () => {
+    expect(pick(field("Sexual orientation", ["Gay", "Queer", "Heterosexual"]), { eeo_sexual_orientation: "queer" })).toBeNull();
+    expect(pick(field("Sexual orientation", ["Gay man", "Gay woman", "Decline to answer"]), { eeo_sexual_orientation: "gay" })).toBeNull();
+    expect(pick(field("Do you identify as LGBTQ+?", ["Yes", "No", "Decline to answer"]), { eeo_sexual_orientation: "queer", eeo_transgender: "transgender" })).toBeNull();
+    expect(pick(field("What is your sexual orientation and gender?", ["Queer", "Woman", "Decline to answer"]), { eeo_sexual_orientation: "queer", eeo_gender: "female" })).toBeNull();
+  });
+
+  it("answers the transgender question from its own saved answer", () => {
+    expect(selfIdentificationCategory(transgender)).toBe("transgender");
+    expect(pick(transgender, { eeo_transgender: "not_transgender" })).toBe("No");
+    expect(pick(transgender, { eeo_transgender: "transgender" })).toBe("Yes");
+    expect(pick(field("Transgender identity", ["I am transgender", "I am not transgender", "Decline to answer"]), { eeo_transgender: "transgender" })).toBe("I am transgender");
+    expect(pick(field("Transgender identity", ["I am transgender", "I am not transgender", "Decline to answer"]), { eeo_transgender: "not_transgender" })).toBe("I am not transgender");
+    expect(pick(transgender, { eeo_gender: "non_binary" })).toBeNull();
+  });
+
+  it("accepts a \"mark all that apply\" checkbox group, never another checkbox group", () => {
+    const boxes = field("How would you describe your sexual orientation? (mark all that apply)", ["Gay", "Queer", "Heterosexual", ...decline], "checkbox");
+    expect(selfIdentificationCategory(boxes)).toBe("orientation");
+    expect(pick(boxes, { eeo_sexual_orientation: "queer" })).toBe("Queer");
+    const plain = field("Sexual orientation", ["Gay", "Queer", "Heterosexual", ...decline], "checkbox");
+    expect(pick(plain, { eeo_sexual_orientation: "queer" })).toBeNull();
+    const result = plan([boxes], [[boxes.id, { status: "SELF_IDENTIFIED", key: "eeo_sexual_orientation", option: "Queer" }]]);
+    expect(result.pauses).toEqual([]);
+    expect(result.decisions[0]).toMatchObject({ action: "choose", value: "Queer", basis: { kind: "fact", key: "eeo_sexual_orientation", scope: "global" } });
+    expect(result.decisions[0]!.reason).not.toMatch(/queer/i);
+  });
+});

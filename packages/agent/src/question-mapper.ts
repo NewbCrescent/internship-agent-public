@@ -1,5 +1,5 @@
 import { isHearAboutQuestion } from "@internship-agent/browser";
-import { mentionsCompany, normalizeCompanyName, type FactScope, type QuestionContext, type QuestionMapping } from "@internship-agent/domain";
+import { mentionsCompany, normalizeCompanyName, type CandidateFactKey, type FactScope, type QuestionContext, type QuestionMapping } from "@internship-agent/domain";
 import { readPlace } from "@internship-agent/jobs";
 
 import { mapStandardQuestion } from "./standard-question-mapper";
@@ -8,7 +8,7 @@ export interface SemanticQuestionMapper {
   map(question: string, context?: QuestionContext): Promise<QuestionMapping>;
 }
 
-const protectedPattern = /\b(race|ethnicity|ethnic|gender|sex|sexual orientation|disability|disabled|veteran|religion|marital status)\b/i;
+const protectedPattern = /\b(race|ethnicity|ethnic|gender|sex|sexual orientation|transgender|disability|disabled|veteran|religion|marital status)\b/i;
 const attestationPattern = /\b(certify|attest|under penalty|declare that|signature confirms|information (?:is|provided is) true)\b/i;
 const END_DATE = /\blatest\s+(?:possible\s+)?(?:end|finish|available)\b|\bavailable\s+until\b|\bavailability\s+end\b|\blast\s+day\s+of\s+(?:availability|the internship)\b|\b(?:end|finish)\s+date\b.{0,40}\b(?:internship|availability|available)\b|\b(?:internship|availability|available)\b.{0,40}\b(?:end|finish)\s+date\b|\bwhen\s+(?:can|could|would)\s+you\s+(?:end|finish)\b/i;
 const PREVIOUS_EMPLOYMENT = /\b(?:(?:have|had)\s+you\s+(?:ever\s+)?(?:previously\s+|formerly\s+)?(?:been\s+)?(?:work(?:ed)?|employed|intern(?:ed)?)|(?:previously|formerly|ever|before)\s+(?:been\s+)?(?:work(?:ed)?|employed|intern(?:ed)?)|(?:current\s+or\s+)?former\s+(?:employee|intern|worker|contractor)|previous(?:ly)?\s+(?:employee|worker|intern))\b/i;
@@ -18,6 +18,12 @@ const NOT_COURSEWORK = /\b(?:gpa|grade|grades|graded|grading|grade\s+point|marks
 const ELIGIBLE_TO_WORK = /\b(?:legally )?eligible to work\b|\blegally (?:able|permitted) to work\b/i;
 // "Eligible to work" also opens government, export-control, and clearance questions, which only their own saved answers decide.
 const NOT_WORK_AUTHORIZATION = /\b(?:government|federal|public sector|dod|department of defense|defen[cs]e|export\w*|itar|ear|citizen\w*|u\.?\s?s\.? (?:person|national)|clearances?|security|contracts?|contractors?|projects?)\b/i;
+// Relocation the candidate pays for is its own answer (willing_to_relocate_at_own_expense).
+const OWN_EXPENSE = /\b(?:at )?(?:my|your) own (?:expense|cost)\b|\bown expense\b|\bwithout (?:relocation )?(?:assistance|support|reimbursement)\b|\bself[- ]funded\b/i;
+// Willingness to undergo a background check: never a criminal-history answer or a consent or authorization.
+const BACKGROUND_CHECK = /\bbackground (?:check|screening|investigation)s?\b/i;
+const WILLING_TO_UNDERGO = /\b(?:willing|prepared|open)\b[^?]{0,40}\b(?:undergo|submit to|complete|go through|participate in|take)\b|\bwould you (?:undergo|submit to|complete)\b/i;
+const NOT_WILLINGNESS = /\bpass\w*|\bclear(?:ed)?\b|\bconvict\w*|\barrest\w*|\bfelon\w*|\bdrug\w*|\bcredit\b|\bfingerprint\w*|\bclearances?\b|\bresults?\b|\bconsent\w*|\bauthori[sz]\w*|\bagree\w*|\bpermit\b|\ballow\w*|\bdisclos\w*|\bexplain\b|\bdescribe\b/i;
 const EMPLOYER_REFERENCE = /\b(?:here|for us|with us|(?:this|our|the)\s+(?:company|organization|organisation|firm|employer))\b/i;
 
 export class DeterministicQuestionMapper implements SemanticQuestionMapper {
@@ -54,26 +60,29 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
     // Relocation is recorded per country: a named place readable as a country,
     // else the question's own country words, else the posting's one country.
     if (/\b(relocat(?:e|ion|ing)|move)\b/i.test(normalized)) {
+      const ownExpense = OWN_EXPENSE.test(normalized);
+      const relocationKey: CandidateFactKey = ownExpense ? "willing_to_relocate_at_own_expense" : "willing_to_relocate";
+      const suffix = ownExpense ? " (at own expense)" : "";
       const named = context.location ?? extractRelocationLocation(trimmed);
       if (named) {
         const country = countryOfPlace(named);
         if (country) {
           return {
             status: "MAPPED",
-            key: "willing_to_relocate",
+            key: relocationKey,
             scope: { kind: "country", code: country },
             confidence: 0.96,
             method: "deterministic",
-            explanation: `Relocation question naming ${named}, a place in ${country}.`
+            explanation: `Relocation question naming ${named}, a place in ${country}${suffix}.`
           };
         }
         return {
           status: "MAPPED",
-          key: "willing_to_relocate",
+          key: relocationKey,
           scope: { kind: "location", name: named },
           confidence: 0.98,
           method: "deterministic",
-          explanation: `Relocation question scoped to ${named}.`
+          explanation: `Relocation question scoped to ${named}${suffix}.`
         };
       }
       const country = relocationCountry(trimmed, context);
@@ -82,11 +91,11 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
       }
       return {
         status: "MAPPED",
-        key: "willing_to_relocate",
+        key: relocationKey,
         scope: { kind: "country", code: country },
         confidence: 0.95,
         method: "deterministic",
-        explanation: `General relocation question for ${country}.`
+        explanation: `General relocation question for ${country}${suffix}.`
       };
     }
 
@@ -206,6 +215,17 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
         confidence: 0.93,
         method: "deterministic",
         explanation: "Relatives working at this company."
+      };
+    }
+
+    if (BACKGROUND_CHECK.test(normalized) && WILLING_TO_UNDERGO.test(normalized) && !NOT_WILLINGNESS.test(normalized)) {
+      return {
+        status: "MAPPED",
+        key: "willing_background_check",
+        scope: { kind: "global" },
+        confidence: 0.94,
+        method: "deterministic",
+        explanation: "Willingness to undergo a background check (not criminal history, not an authorization)."
       };
     }
 

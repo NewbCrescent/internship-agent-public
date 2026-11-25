@@ -131,7 +131,9 @@ describe("company scope, text facts, and saved self-identification keys", () => 
   });
 
   it("marks saved self-identification answers protected and accepts only their listed values", () => {
-    expect(selfIdentificationKeys).toEqual(["eeo_gender", "eeo_race_ethnicity", "eeo_veteran_status", "eeo_disability_status"]);
+    expect(selfIdentificationKeys).toEqual([
+      "eeo_gender", "eeo_race_ethnicity", "eeo_veteran_status", "eeo_disability_status", "eeo_sexual_orientation", "eeo_transgender"
+    ]);
     for (const key of selfIdentificationKeys) {
       expect(factDefinitions[key].sensitivity).toBe("protected");
       expect(factDefinitions[key].valueType).toBe("text");
@@ -142,6 +144,34 @@ describe("company scope, text facts, and saved self-identification keys", () => 
     expect(fact("eeo_veteran_status", { kind: "global" }, "veteran_not_protected").success).toBe(true);
     expect(fact("eeo_disability_status", { kind: "global" }, "has_disability").success).toBe(true);
     expect(fact("eeo_gender", { kind: "country", code: "US" }, "female").success).toBe(false);
+  });
+
+  it("adds sexual orientation and transgender identity as protected global self-identification facts (2026-11-24)", () => {
+    for (const key of ["eeo_sexual_orientation", "eeo_transgender"] as const) {
+      expect(factDefinitions[key].sensitivity).toBe("protected");
+      expect(factDefinitions[key].reusePolicy).toBe("auto");
+      expect(factDefinitions[key].explicitUserSourceRequired).toBe(true);
+      expect(factDefinitions[key].allowedScopes).toEqual(["global"]);
+    }
+    for (const value of ["heterosexual", "gay", "lesbian", "bisexual", "pansexual", "asexual", "queer"]) {
+      expect(fact("eeo_sexual_orientation", { kind: "global" }, value).success).toBe(true);
+    }
+    expect(fact("eeo_sexual_orientation", { kind: "global" }, "fictional-unlisted").success).toBe(false);
+    expect(fact("eeo_sexual_orientation", { kind: "country", code: "US" }, "queer").success).toBe(false);
+    expect(fact("eeo_transgender", { kind: "global" }, "transgender").success).toBe(true);
+    expect(fact("eeo_transgender", { kind: "global" }, "not_transgender").success).toBe(true);
+    expect(fact("eeo_transgender", { kind: "global" }, "yes").success).toBe(false);
+  });
+
+  it("adds background-check willingness and own-expense relocation as boolean facts (2026-11-24)", () => {
+    expect(factDefinitions.willing_background_check.sensitivity).toBe("standard");
+    expect(fact("willing_background_check", { kind: "global" }, true).success).toBe(true);
+    expect(fact("willing_background_check", { kind: "global" }, "yes").success).toBe(false);
+    expect(fact("willing_background_check", { kind: "country", code: "US" }, true).success).toBe(false);
+    expect(fact("willing_to_relocate_at_own_expense", { kind: "country", code: "US" }, true).success).toBe(true);
+    expect(fact("willing_to_relocate_at_own_expense", { kind: "location", name: "Fixture City" }, false).success).toBe(true);
+    expect(fact("willing_to_relocate_at_own_expense", { kind: "global" }, true).success).toBe(true);
+    expect(fact("willing_to_relocate_at_own_expense", { kind: "company", name: "Fixture Robotics" }, true).success).toBe(false);
   });
 
   it("parses text and date answers", () => {

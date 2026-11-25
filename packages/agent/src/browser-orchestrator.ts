@@ -70,6 +70,7 @@ import {
   type EducationInputs,
   type FieldResolution,
   type IcimsAccountSteps,
+  type PlannerInputs,
   type PostSubmitEvidence,
   type UnfilledField,
   type WorkdayPage,
@@ -118,7 +119,7 @@ import { greenhouseSecurityCodeLookup } from "./greenhouse-security-code";
 import { assertHandshakeSignedIn } from "./handshake-session-service";
 import { applyVoiceDrafts, createDefaultVoiceDrafter, draftSourcesFor, type VoiceDrafter } from "./voice-drafting";
 import { AutomaticRunStopped, IcimsAccountHeld, WorkdayAccountHeld } from "./run-errors";
-import { postingQuestionContext, savedSelfIdentification } from "./saved-answers";
+import { postingLocationNames, postingQuestionContext, savedSelfIdentification } from "./saved-answers";
 import { saveIcimsEvidenceQuietly, savePostSubmitEvidenceQuietly, saveWorkdayEvidenceQuietly } from "./submit-evidence";
 import { ensureIcimsAccount, type IcimsAccountRuntime } from "./icims-account-service";
 import { getIcimsAccount } from "./icims-account-store";
@@ -633,6 +634,62 @@ async function resolveFields(
   return resolutions;
 }
 
+/** The planner's inputs for a run: profile contact and education, package answers, standing settings, and the posting's places. */
+function plannerInputsFor(database: DatabaseSync, candidateId: string, candidate: ReturnType<typeof getCandidate>, input: {
+  resolutions: Map<string, FieldResolution>;
+  packageAnswers: Array<{ prompt: string; text: string }>;
+  variantId: string | null;
+  transcriptDocumentId: string | null;
+  profile: ApplicationProfile;
+  standing: StandingConsentSettings;
+  postingLocations: string[];
+}): PlannerInputs {
+  return {
+    profile: {
+      email: candidate?.email,
+      phone: candidate?.phone,
+      portfolioUrl: candidate?.portfolioUrl,
+      fullName: candidate?.fullName,
+      preferredName: candidate?.preferredName,
+      linkedinUrl: candidate?.linkedinUrl,
+      githubUrl: candidate?.githubUrl,
+      legalFirstName: candidate?.legalFirstName,
+      legalLastName: candidate?.legalLastName,
+      addressLine1: candidate?.addressLine1,
+      addressLine2: candidate?.addressLine2,
+      addressCity: candidate?.addressCity,
+      addressRegion: candidate?.addressRegion,
+      addressPostalCode: candidate?.addressPostalCode,
+      addressCountry: candidate?.addressCountry,
+      phoneType: candidate?.phoneType,
+      fieldOfStudy: candidate?.fieldOfStudy,
+      gpa: candidate?.gpa
+    },
+    resolutions: input.resolutions,
+    packageAnswers: input.packageAnswers,
+    variantId: input.variantId,
+    transcriptDocumentId: input.transcriptDocumentId,
+    education: {
+      school: candidate?.school,
+      degree: candidate?.degree,
+      startMonth: candidate?.educationStartMonth,
+      graduation: runGraduation(database, candidateId, input.profile, candidate)
+    },
+    standing: standingPlannerInputs(candidate, input.standing),
+    postingLocations: input.postingLocations
+  };
+}
+
+/** The run's own package answers for planning its pauses again; none when the current package is another one or cannot be read. */
+function runPackageAnswers(database: DatabaseSync, run: BrowserRun): Array<{ prompt: string; text: string }> {
+  try {
+    const current = getCurrentPackage(database, run.jobId);
+    return current && current.package.id === run.packageId ? current.package.answers.map(({ prompt, text }) => ({ prompt, text })) : [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * The Milestone 7 orchestration seam. Runs advance through explicit,
  * auditable steps — start, answer pauses, continue, approve submission,
@@ -778,39 +835,15 @@ export async function startBrowserRun(
     const profile: ApplicationProfile = channel ? "transcript" : "default";
     const uploaded = uploadedResumeFor(profile, database, candidateId);
     const resolutions = await resolveFields(form, database, { ...questionContextFor(channel), ...postingQuestionContext(posting) });
-    const plan = planAutofill(form, {
-      profile: {
-        email: candidate?.email,
-        phone: candidate?.phone,
-        portfolioUrl: candidate?.portfolioUrl,
-        fullName: candidate?.fullName,
-        preferredName: candidate?.preferredName,
-        linkedinUrl: candidate?.linkedinUrl,
-        githubUrl: candidate?.githubUrl,
-        legalFirstName: candidate?.legalFirstName,
-        legalLastName: candidate?.legalLastName,
-        addressLine1: candidate?.addressLine1,
-        addressLine2: candidate?.addressLine2,
-        addressCity: candidate?.addressCity,
-        addressRegion: candidate?.addressRegion,
-        addressPostalCode: candidate?.addressPostalCode,
-        addressCountry: candidate?.addressCountry,
-        phoneType: candidate?.phoneType,
-        fieldOfStudy: candidate?.fieldOfStudy,
-        gpa: candidate?.gpa
-      },
+    const plan = planAutofill(form, plannerInputsFor(database, candidateId, candidate, {
       resolutions,
       packageAnswers: current.package.answers.map((answer) => ({ prompt: answer.prompt, text: answer.text })),
       variantId: variant.id,
       transcriptDocumentId: transcript?.id ?? null,
-      education: {
-        school: candidate?.school,
-        degree: candidate?.degree,
-        startMonth: candidate?.educationStartMonth,
-        graduation: runGraduation(database, candidateId, profile, candidate)
-      },
-      standing: standingPlannerInputs(candidate, standing)
-    });
+      profile,
+      standing,
+      postingLocations: postingLocationNames(posting)
+    }));
     const decisions = withUploadedResume(channel
       ? plan.decisions.map((decision): FillDecision => decision.action === "upload" && decision.basis?.kind === "variant"
         ? { ...decision, reason: "Uploads your tailored resume printed with your 2029 graduation date." }
@@ -1151,7 +1184,24 @@ export async function continueBrowserRun(
       const outcome = await page.advanceToApplicationForm();
       if (outcome.moved) form = await recognizeCurrentForm(page);
     }
-    const resolutions = await resolveFields(form, database, { ...questionContextFor(channel), ...postingQuestionContext(getJobPosting(database, run.jobId)) });
+    const posting = getJobPosting(database, run.jobId);
+    const resolutions = await resolveFields(form, database, { ...questionContextFor(channel), ...postingQuestionContext(posting) });
+    const candidate = getCandidate(database, LOCAL_CANDIDATE_ID);
+    const packageAnswers = runPackageAnswers(database, run);
+    // Open pauses nothing answered are planned again with today's rules: a standing setting, a saved
+    // self-identification answer, or a rule added since the run paused may answer them now.
+    const replanned = planAutofill(form, plannerInputsFor(database, LOCAL_CANDIDATE_ID, candidate, {
+      resolutions,
+      packageAnswers,
+      variantId: run.variantId,
+      transcriptDocumentId: null,
+      profile: channel ? "transcript" : "default",
+      standing,
+      postingLocations: postingLocationNames(posting)
+    }));
+    const fresh = new Map(replanned.decisions.map((entry) => [entry.fieldId, entry]));
+    const freshPauses = new Map(replanned.pauses.map((entry) => [entry.fieldId, entry]));
+    const settled = new Map<string, PauseRecord>();
     const decisions: FillDecision[] = [];
     // An answer that fits no option of its list reopens its pause instead of being typed into the list.
     const reopened = new Set<string>();
@@ -1177,18 +1227,35 @@ export async function continueBrowserRun(
           continue;
         }
         decisions.push(answered);
-      } else if (field && resolution?.status === "RESOLVED") {
-        const answered = answeredPauseDecision(field, resolution.display, { kind: "fact", key: resolution.key, scope: resolution.scope });
-        decisions.push(!answered
-          ? decision
-          : answered.action === "skip"
-            ? answered
-            : { ...answered, reason: "Candidate memory now answers this pause." });
-      } else {
-        decisions.push(decision);
+        continue;
       }
+      if (field && resolution?.status === "RESOLVED") {
+        const answered = answeredPauseDecision(field, resolution.display, { kind: "fact", key: resolution.key, scope: resolution.scope });
+        if (answered) {
+          decisions.push(answered.action === "skip" ? answered : { ...answered, reason: "Candidate memory now answers this pause." });
+          // The pause is answered now, so it no longer holds the run (as Workday's continue does).
+          if (pause?.status === "open") settled.set(pause.fieldId, { ...pause, status: "answered", answer: pause.sensitive ? null : resolution.display });
+          continue;
+        }
+      }
+      const next = field ? fresh.get(field.id) : undefined;
+      if (field && pause && pause.status === "open" && !pause.safeguard && !pause.upload && next && next.action !== "upload") {
+        decisions.push(next);
+        const sensitive = pause.sensitive || isSensitiveRole(classifyFieldRole(field));
+        if (next.action === "pause") {
+          // Same position, today's question, sensitivity and options; still open.
+          const today = freshPauses.get(field.id);
+          settled.set(pause.fieldId, today ? { ...today, draft: today.draft ?? pause.draft } : pause);
+        } else {
+          // A protected option is never copied into the pause record.
+          const answer = sensitive ? null : next.action === "check" ? "yes" : next.action === "skip" ? null : next.value;
+          settled.set(pause.fieldId, { ...pause, sensitive, status: "answered", answer });
+        }
+        continue;
+      }
+      decisions.push(decision);
     }
-    const pauses = run.pauses.map((entry) => (reopened.has(entry.fieldId) ? { ...entry, status: "open" as const, answer: null } : entry));
+    const pauses = run.pauses.map((entry) => reopened.has(entry.fieldId) ? { ...entry, status: "open" as const, answer: null } : settled.get(entry.fieldId) ?? entry);
     const uploadPathFor = await prepareUploads(
       database,
       dataDir,
@@ -1203,12 +1270,14 @@ export async function continueBrowserRun(
     if (stillOpen === 0 && applied === 0 && !filled.decisions.some((decision) => decision.action === "keep")) {
       throw new Error(noFormReachedReason(page.url()));
     }
-    const settled = updateBrowserRun(database, runId, {
+    const updated = updateBrowserRun(database, runId, {
       decisions: filled.decisions,
       pauses: filled.pauses,
       status: stillOpen > 0 ? "paused-needs-input" : "awaiting-approval"
     });
-    return { run: settled, form, applied };
+    // Statements newly accepted under the standing settings, logged once with their exact text.
+    logStandingAcceptances(database, run.jobId, filled.decisions, run.decisions);
+    return { run: updated, form, applied };
   } finally {
     await page.close();
   }

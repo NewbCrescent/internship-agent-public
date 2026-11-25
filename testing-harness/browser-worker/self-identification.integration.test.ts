@@ -10,6 +10,7 @@ import {
   approveApplication,
   cancelBrowserRun,
   confirmRunAts,
+  continueBrowserRun,
   evaluateAndPersistMatch,
   getApplicationPackage,
   prepareApplication,
@@ -29,6 +30,7 @@ import {
   revokeCandidateFact,
   saveCandidateFact,
   seedDevelopmentData,
+  updateBrowserRun,
   type SaveCandidateFactInput
 } from "@internship-agent/db";
 import { autoSubmitBlockers, type BrowserField, type BrowserRun, type FactScope } from "@internship-agent/domain";
@@ -384,6 +386,122 @@ describe("saved voluntary self-identification answers in browser runs", () => {
     ]);
     expect(decision(run, "heard-text")).toMatchObject({ action: "fill", value: "Online job board", basis: { kind: "fact", key: "how_heard" } });
     expect(decision(run, "heard-select")).toMatchObject({ action: "choose", value: "LinkedIn", basis: { kind: "fact", key: "how_heard" } });
+    database.close();
+  });
+});
+
+describe("continuing a held run plans its open pauses again (2026-11-24)", () => {
+  const OFF = { acceptDataConsent: false, signAttestations: false };
+  const DATA_ON = { acceptDataConsent: true, signAttestations: false };
+  const decline = ["I prefer to self-describe", "I don't wish to answer"];
+  // Fictional option list in Greenhouse's "mark all that apply" shape.
+  const RACIAL: RawControl = {
+    tag: "select", id: "racial-background", label: "How would you describe your racial/ethnic background? (mark all that apply)", required: false,
+    options: ["Black or of African descent", "East Asian", "Hispanic, Latinx or of Spanish Origin", "South Asian", "White or European", ...decline]
+  };
+  const TERMS_LABEL = "Terms of Use and Privacy Notice: I agree and consent";
+  const TERMS_BOX: RawControl = { tag: "input", type: "checkbox", id: "terms", label: TERMS_LABEL, required: true };
+  const AGE: RawControl = { tag: "select", id: "age", label: "Are you 18 years of age or older?", required: true, options: ["Yes", "No"] };
+
+  async function startHeld(database: DatabaseSync, jobId: string, controls: RawControl[], standingConsent = OFF) {
+    const page = fakePage(controls);
+    const dataDir = disposableDataDir();
+    const started = await startBrowserRun(jobId, GREENHOUSE_URL, { database, dataDir, openPage: async () => page, standingConsent, voiceDrafter: null });
+    if (!started.run.atsConfirmed) confirmRunAts(started.run.id, "greenhouse", { database });
+    return { run: getBrowserRun(database, started.run.id)!, dataDir };
+  }
+  const continueWith = (database: DatabaseSync, runId: string, dataDir: string, controls: RawControl[], standingConsent = OFF) => {
+    const page = fakePage(controls);
+    return continueBrowserRun(runId, { database, dataDir, openPage: async () => page, standingConsent }).then((report) => ({ ...report, page }));
+  };
+  const eventTexts = (database: DatabaseSync, jobId: string) =>
+    (database.prepare("SELECT detail FROM application_events WHERE job_id = ?").all(jobId) as Array<{ detail: string | null }>).map((row) => row.detail ?? "");
+
+  it("answers an EEO pause from a self-identification answer saved after the run paused, copying no option into the pause", async () => {
+    const database = disposableDatabase();
+    const jobId = approvedJobId(database);
+    const controls = [RACIAL, START, SUBMIT];
+    const { run, dataDir } = await startHeld(database, jobId, controls);
+    expect(run.status).toBe("paused-needs-input");
+    expect(run.pauses).toEqual([expect.objectContaining({ fieldId: "racial-background", sensitive: true, status: "open" })]);
+
+    saveFact(database, "eeo_race_ethnicity", { kind: "global" }, "white");
+    const continued = await continueWith(database, run.id, dataDir, controls);
+    expect(continued.page.filled.get("racial-background")).toBe("White or European");
+    expect(decision(continued.run, "racial-background")).toMatchObject({ action: "choose", value: "White or European", basis: { kind: "fact", key: "eeo_race_ethnicity" } });
+    expect(continued.run.pauses).toEqual([expect.objectContaining({ fieldId: "racial-background", status: "answered", answer: null, sensitive: true })]);
+    expect(continued.run.status).toBe("awaiting-approval");
+    for (const text of eventTexts(database, jobId)) expect(text).not.toContain("White or European");
+    database.close();
+  });
+
+  it("replaces a pause older code built (package prose, not sensitive) with today's sensitive pause", async () => {
+    const database = disposableDatabase();
+    const jobId = approvedJobId(database);
+    const controls = [RACIAL, START, SUBMIT];
+    const { run, dataDir } = await startHeld(database, jobId, controls);
+    // The record a run started before the eeo role named "racial|ethnic" kept: package prose as the question, not sensitive.
+    const stale = 'The verified package answers "How would you describe your racial/ethnic background? (mark all that apply)" with prose, which is a choice; the known answer "Relevant experience: fixture prose" is not one of its options.';
+    updateBrowserRun(database, run.id, {
+      decisions: run.decisions.map((entry) => entry.fieldId === "racial-background" ? { ...entry, reason: stale, pause: { question: stale, key: null, scope: null, safeguard: false } } : entry),
+      pauses: run.pauses.map((entry) => entry.fieldId === "racial-background" ? { ...entry, question: stale, sensitive: false } : entry)
+    });
+    const continued = await continueWith(database, run.id, dataDir, controls);
+    expect(continued.run.status).toBe("paused-needs-input");
+    const pause = continued.run.pauses.find((entry) => entry.fieldId === "racial-background")!;
+    expect(pause).toMatchObject({ status: "open", sensitive: true });
+    expect(pause.question).not.toContain("Relevant experience");
+    expect(decision(continued.run, "racial-background")!.reason).not.toContain("Relevant experience");
+    database.close();
+  });
+
+  it("accepts a terms box under the standing setting turned on since the run paused, logging the exact statement once", async () => {
+    const database = disposableDatabase();
+    const jobId = approvedJobId(database);
+    const controls = [TERMS_BOX, START, SUBMIT];
+    const { run, dataDir } = await startHeld(database, jobId, controls, OFF);
+    expect(run.status).toBe("paused-needs-input");
+    expect(run.pauses.map((entry) => entry.fieldId)).toEqual(["terms"]);
+
+    const continued = await continueWith(database, run.id, dataDir, controls, DATA_ON);
+    expect(continued.page.filled.get("terms")).toBe("true");
+    expect(decision(continued.run, "terms")).toMatchObject({
+      action: "check", basis: { kind: "standing_consent", setting: "accept_data_consent", group: "terms-of-use", statement: TERMS_LABEL }
+    });
+    expect(continued.run.pauses).toEqual([expect.objectContaining({ fieldId: "terms", status: "answered", answer: "yes" })]);
+    expect(continued.run.status).toBe("awaiting-approval");
+    expect(eventTexts(database, jobId).filter((text) => text === `Accepted data consent: '${TERMS_LABEL}'`)).toHaveLength(1);
+    database.close();
+  });
+
+  it("marks a pause candidate memory now answers as answered, so it no longer holds the run", async () => {
+    const database = disposableDatabase();
+    const jobId = approvedJobId(database);
+    const controls = [AGE, START, SUBMIT];
+    const { run, dataDir } = await startHeld(database, jobId, controls);
+    expect(run.pauses).toEqual([expect.objectContaining({ fieldId: "age", status: "open" })]);
+
+    saveFact(database, "age_18_or_older", { kind: "global" }, true);
+    const continued = await continueWith(database, run.id, dataDir, controls);
+    expect(decision(continued.run, "age")).toMatchObject({ action: "choose", value: "Yes", reason: "Candidate memory now answers this pause." });
+    expect(continued.run.pauses).toEqual([expect.objectContaining({ fieldId: "age", status: "answered", answer: "Yes" })]);
+    expect(continued.run.status).toBe("awaiting-approval");
+    database.close();
+  });
+
+  it("keeps a demographic field sensitive when the page will not take its saved option", async () => {
+    const database = disposableDatabase();
+    const jobId = approvedJobId(database, (db) => saveFact(db, "eeo_race_ethnicity", { kind: "global" }, "white"));
+    const page = fakePage([RACIAL, START, SUBMIT]);
+    page.chooseOption = async (field: BrowserField, option: string) => {
+      if (field.id === "racial-background") throw new Error("fixture: the list did not accept the option");
+      page.filled.set(field.id, option);
+    };
+    const started = await startBrowserRun(jobId, GREENHOUSE_URL, { database, dataDir: disposableDataDir(), openPage: async () => page, standingConsent: OFF, voiceDrafter: null });
+    const pause = started.run.pauses.find((entry) => entry.fieldId === "racial-background")!;
+    expect(pause).toMatchObject({ sensitive: true, status: "open" });
+    expect(pause.question).toContain(RACIAL.label);
+    expect(pause.question).not.toContain("White or European");
     database.close();
   });
 });

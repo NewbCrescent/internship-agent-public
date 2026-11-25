@@ -4,6 +4,7 @@ import { promptSearchTerms, type AtsKind, type BrowserField, type FillDecision, 
 
 import { chooseApplyEntry, dismissCookieBanner, type ApplyEntryCandidate } from "./apply-entry";
 import { isDoverOrAshby } from "./ats/adapters";
+import { classifyFieldRole, isSensitiveRole } from "./ats/field-roles";
 import { matchSuggestion } from "./autofill-planner";
 import { findVisibleChallengeIn, SubmissionChallenged, SubmissionRefused, type VisibleChallenge } from "./challenge";
 import { isSubmitControl, readNewConfirmation, recognizeForm, waitForStableControls, type RawControl } from "./form-recognition";
@@ -133,7 +134,7 @@ export function unfilledPause(field: BrowserField, reason: string): { decision: 
       suggestedKey: null,
       suggestedScope: null,
       safeguard: false,
-      sensitive: false,
+      sensitive: isSensitiveRole(classifyFieldRole(field)),
       upload: field.kind === "file",
       status: "open",
       answer: null,
@@ -872,8 +873,19 @@ async function readComboboxOptions(page: Page, scope: Page | Locator, id: string
  * Picks one option of a react-select list and checks that the control shows
  * it. Greenhouse's phone-country list shows only the chosen country's dialing
  * code ("+1" for "United States +1"), which counts as showing that option.
+ * A react-select multi-select ("mark all that apply") shows the choice as a
+ * chip, which counts as showing it.
  */
 async function chooseComboboxOption(page: Page, control: Locator, field: BrowserField, option: string): Promise<void> {
+  const shown = () => control.evaluate((element) => {
+    const box = element.closest('[class*="select__control"]');
+    return {
+      single: box?.querySelector('[class*="single-value"]')?.textContent?.trim() ?? "",
+      multi: Array.from(box?.querySelectorAll('[class*="multi-value__label"]') ?? []).map((chip) => chip.textContent?.trim() ?? "")
+    };
+  });
+  // Already chosen: react-select hides chosen options from a multi menu.
+  if ((await shown()).multi.includes(option)) return;
   await settleOpenMenus(page);
   await control.click({ timeout: 5_000 });
   // A list that loads its options (Greenhouse's Degree catalog) shows them a moment after opening.
@@ -885,9 +897,13 @@ async function chooseComboboxOption(page: Page, control: Locator, field: Browser
     : page.locator('[class*="select__option"]').filter({ hasText: new RegExp(`^\\s*${option.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`) }).first();
   await target.click({ timeout: 5_000 });
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    const shown = await control.evaluate((element) =>
-      element.closest('[class*="select__control"]')?.querySelector('[class*="single-value"]')?.textContent?.trim() ?? "");
-    if (shown === option || (/^\+\d{1,4}$/.test(shown) && option.endsWith(` ${shown}`))) return;
+    const { single, multi } = await shown();
+    if (single === option || (/^\+\d{1,4}$/.test(single) && option.endsWith(` ${single}`))) return;
+    if (multi.includes(option)) {
+      // A multi menu stays open after a choice.
+      await page.keyboard.press("Escape").catch(() => undefined);
+      return;
+    }
     await page.waitForTimeout(200);
   }
   throw new Error(`"${field.label}" did not accept the option.`);
@@ -1117,7 +1133,9 @@ export function attachedNamesFromText(text: string): string[] {
  * phone title's `_required`; a fieldset checkbox group with no legend takes its
  * question-title label (Ashby's checkbox groups), never an option's label. A short Greenhouse question label
  * with no "?" takes its `<id>-description` question as well ("HISTORY WITH
- * IRONVALE: Have you previously applied to a position at Ironvale?"). A control
+ * IRONVALE: Have you previously applied to a position at Ironvale?"). A lone
+ * checkbox labelled only by an agreement ("I agree and consent") in a fieldset
+ * takes the legend in front. A control
  * with neither id nor name is tagged `data-ia-control="ia-control-<n>"` and
  * carries that tag as its ref; the tag stays the same across repeated
  * collections, so a field id from an earlier recognition still names the
@@ -1331,6 +1349,18 @@ export function collectControlsIn(root: Element): RawControl[] {
     if (!description || description.length > 240 || !description.endsWith("?")) return label;
     return `${label}: ${description}`;
   };
+  const BARE_AGREEMENT = /^(?:yes[,.]?\s*)?(?:i\s+)?(?:agree|accept|consent|acknowledge|understand|confirm)(?:\s*(?:,|and|&)\s*(?:i\s+)?(?:agree|accept|consent|acknowledge|understand|confirm))*[.!]?$/i;
+  /**
+   * A lone checkbox whose own label is only an agreement ("I agree and consent") inside a fieldset with a
+   * legend (Greenhouse's one-option checkbox question) takes the legend in front: "<legend>: <label>".
+   */
+  const withFieldsetQuestion = (element: Element, label: string | undefined): string | undefined => {
+    if (!label || !(element instanceof HTMLInputElement) || element.type !== "checkbox" || label.length > 60 || !BARE_AGREEMENT.test(unstar(label))) return label;
+    const fieldset = element.closest("fieldset");
+    if (!fieldset || !root.contains(fieldset) || fieldset.querySelectorAll('input[type="checkbox"]').length !== 1) return label;
+    const question = unstar(textOf(fieldset.querySelector("legend")) || byIds(fieldset.getAttribute("aria-labelledby"))).replace(/:\s*$/, "").trim();
+    return question && question !== unstar(label) ? `${question}: ${unstar(label)}` : label;
+  };
   /** A stable handle for a control with neither id nor name: the same element keeps its tag across collections. */
   const refOf = (element: Element): string => {
     const existing = element.getAttribute("data-ia-control");
@@ -1493,7 +1523,7 @@ export function collectControlsIn(root: Element): RawControl[] {
     if ((input instanceof HTMLTextAreaElement || TEXT_LIKE.includes(type ?? ""))
       && HONEYPOT.test(`${ownLabel ?? ""} ${input.getAttribute("aria-label") ?? ""} ${input.getAttribute("placeholder") ?? ""} ${input.getAttribute("name") ?? ""} ${input.id ?? ""}`)) continue;
     const rawLabel = type === "file" ? fileLabel(input, ownLabel) : ownLabel;
-    const label = withDescription(input, rawLabel === undefined ? undefined : unstar(rawLabel) || undefined);
+    const label = withFieldsetQuestion(input, withDescription(input, rawLabel === undefined ? undefined : unstar(rawLabel) || undefined));
     const required = requiredOf(input, rawLabel);
     const describedBy = input.getAttribute("aria-describedby") ?? "";
     if (input instanceof HTMLInputElement && input.getAttribute("role") === "combobox"

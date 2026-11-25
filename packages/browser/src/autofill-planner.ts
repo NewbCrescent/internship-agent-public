@@ -4,6 +4,7 @@ import type {
   PauseRecord,
   RecognizedForm
 } from "@internship-agent/domain";
+import { factOption, FACT_OPTION_KEYS, samePlace } from "@internship-agent/domain";
 import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, isStandardAnswerKey, matchOfferedOption, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption } from "@internship-agent/domain";
 
 import { classifyFieldRole, classifyUploadRole, isSensitiveRole } from "./ats/field-roles";
@@ -55,6 +56,8 @@ export type PlannerInputs = {
   education?: EducationInputs;
   /** The candidate's standing consent and attestation settings; absent, consent boxes pause and signatures wait. */
   standing?: StandingInputs;
+  /** The posting's places ("City, Region" or its stated text), for "are you located in or near the city" options. */
+  postingLocations?: string[];
 };
 
 export type EducationInputs = {
@@ -122,7 +125,8 @@ export function planAutofill(form: RecognizedForm, inputs: PlannerInputs): Autof
       // exactly one offered option matches; otherwise the candidate answers
       // in-session and nothing is stored.
       const saved = inputs.resolutions.get(field.id);
-      if (saved?.status === "SELF_IDENTIFIED" && (field.kind === "select" || field.kind === "radio") && field.options?.includes(saved.option)) {
+      if (saved?.status === "SELF_IDENTIFIED" && (field.kind === "select" || field.kind === "radio" || (field.kind === "checkbox" && (field.options?.length ?? 0) >= 2)) &&
+        field.options?.includes(saved.option)) {
         decisions.push({
           fieldId: field.id,
           action: "choose",
@@ -392,6 +396,8 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
   if (resolution?.status === "RESOLVED") {
     const year = graduationYearDecision(field, resolution);
     if (year) return year;
+    const picked = factOptionDecision(field, resolution, inputs);
+    if (picked) return picked;
     if (field.widget === "autocomplete" && field.kind === "select") {
       return suggest(field, resolution.display, { kind: "fact", key: resolution.key, scope: resolution.scope });
     }
@@ -509,6 +515,31 @@ function rememberedSuggestion(
     reason: "Your saved answer, typed into the site's suggestion list.",
     pause: null
   };
+}
+
+/** A saved fact whose value picks an offered option by a rule (packages/domain fact-options.ts); the salary rule is never typed or suggested. */
+function factOptionDecision(field: BrowserField, resolution: Extract<FieldResolution, { status: "RESOLVED" }>, inputs: PlannerInputs): FillDecision | null {
+  if (!FACT_OPTION_KEYS.has(resolution.key)) return null;
+  const basis = { kind: "fact" as const, key: resolution.key, scope: resolution.scope };
+  const listed = (field.kind === "select" || field.kind === "radio") && field.widget !== "autocomplete" && field.options?.length ? field.options : null;
+  // A combined "located near the city, or relocate at your own expense?" list is decided only by its rule:
+  // its plain "No" would also deny living near the city, so a saved No never picks it.
+  const relocation = resolution.key === "willing_to_relocate_at_own_expense";
+  const exact = !relocation && listed?.some((option) => option.toLocaleLowerCase("en-US") === resolution.display.toLocaleLowerCase("en-US"));
+  const picked = listed && !exact ? factOption(resolution.key, resolution.value, listed, {
+    today: inputs.standing?.today,
+    nearPosting: samePlace(contactField("currentLocation", inputs.profile), inputs.postingLocations)
+  }) : null;
+  if (picked) return { fieldId: field.id, action: "choose", value: picked.option, basis, reason: picked.reason, pause: null };
+  if ((resolution.key === "salary_expectation_rule" || (relocation && listed)) && !exact) {
+    return pauseDecision(field, {
+      question: `The saved answer is not among the options for "${field.label}". How should it be answered?`,
+      key: resolution.key,
+      scope: resolution.scope,
+      safeguard: false
+    });
+  }
+  return null;
 }
 
 /** A graduation date asked for as a year only ("Expected graduation year"): the year option, or the year typed. */

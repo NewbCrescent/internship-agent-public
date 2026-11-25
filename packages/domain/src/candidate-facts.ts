@@ -45,7 +45,7 @@ type FactDefinition = {
   explicitUserSourceRequired: boolean;
 };
 
-export const selfIdentificationKeys = ["eeo_gender", "eeo_race_ethnicity", "eeo_veteran_status", "eeo_disability_status"] as const;
+export const selfIdentificationKeys = ["eeo_gender", "eeo_race_ethnicity", "eeo_veteran_status", "eeo_disability_status", "eeo_sexual_orientation", "eeo_transgender"] as const;
 export type SelfIdentificationKey = (typeof selfIdentificationKeys)[number];
 /** Saved voluntary self-identification answers by key; only browser runs' EEO matching reads these. */
 export type SelfIdentificationAnswers = Partial<Record<SelfIdentificationKey, string>>;
@@ -61,6 +61,8 @@ export const eeoRaceEthnicitySchema = z.enum([
 ]);
 export const eeoVeteranStatusSchema = z.enum(["not_veteran", "veteran_not_protected", "protected_veteran"]);
 export const eeoDisabilityStatusSchema = z.enum(["no_disability", "has_disability"]);
+export const eeoSexualOrientationSchema = z.enum(["heterosexual", "gay", "lesbian", "bisexual", "pansexual", "asexual", "queer"]);
+export const eeoTransgenderSchema = z.enum(["transgender", "not_transgender"]);
 
 export const factDefinitions = {
   willing_to_relocate: {
@@ -181,6 +183,26 @@ export const factDefinitions = {
     reusePolicy: "auto",
     explicitUserSourceRequired: true
   },
+  // Willingness only; never the criminal_conviction fact or the attestation setting's background-check authorization.
+  willing_background_check: {
+    label: "Willing to undergo a background check",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "standard",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  // A separate key from willing_to_relocate, which does not say who pays for the move.
+  willing_to_relocate_at_own_expense: {
+    label: "Willing to relocate at own expense",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global", "country", "location"],
+    sensitivity: "standard",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
   // Built from candidate_coursework at resolve time (pnpm profile:coursework); never stored as a fact.
   relevant_coursework: {
     label: "Relevant coursework",
@@ -222,6 +244,24 @@ export const factDefinitions = {
     label: "Disability status (voluntary self-identification)",
     valueType: "text",
     valueSchema: eeoDisabilityStatusSchema,
+    allowedScopes: ["global"],
+    sensitivity: "protected",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  eeo_sexual_orientation: {
+    label: "Sexual orientation (voluntary self-identification)",
+    valueType: "text",
+    valueSchema: eeoSexualOrientationSchema,
+    allowedScopes: ["global"],
+    sensitivity: "protected",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  eeo_transgender: {
+    label: "Transgender identity (voluntary self-identification)",
+    valueType: "text",
+    valueSchema: eeoTransgenderSchema,
     allowedScopes: ["global"],
     sensitivity: "protected",
     reusePolicy: "auto",
@@ -445,11 +485,15 @@ export const candidateFactKeySchema = z.enum([
   "relatives_at_company",
   "available_end_date",
   "work_arrangement",
+  "willing_background_check",
+  "willing_to_relocate_at_own_expense",
   "relevant_coursework",
   "eeo_gender",
   "eeo_race_ethnicity",
   "eeo_veteran_status",
   "eeo_disability_status",
+  "eeo_sexual_orientation",
+  "eeo_transgender",
   "us_citizen",
   "us_person_export_controls",
   "security_clearance_eligible",

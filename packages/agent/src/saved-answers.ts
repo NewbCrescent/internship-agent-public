@@ -31,6 +31,11 @@ export function postingQuestionContext(
   };
 }
 
+/** The posting's places as "City, Region" (else the stated text), for "are you located in or near the city" options. */
+export function postingLocationNames(posting: Pick<JobPosting, "locations"> | null | undefined): string[] {
+  return (posting?.locations ?? []).map((location) => location.city && location.region ? `${location.city}, ${location.region}` : location.raw);
+}
+
 /** A location's country: the stored code, else the single country its region or text names; null otherwise. */
 function locationCountry(location: Pick<JobLocation, "countryCode" | "region" | "raw">): string | null {
   if (location.countryCode) return location.countryCode.toUpperCase();

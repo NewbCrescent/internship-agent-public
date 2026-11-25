@@ -13,7 +13,11 @@
  *     { "key": "<fact key>", "scope": { "kind": "global" }, "value": "<true | false | text | YYYY-MM-DD>", "note": "<optional provenance>" },
  *     { "key": "willing_to_relocate", "scope": { "kind": "country", "code": "<ISO country>" }, "value": "<true | false>" },
  *     { "key": "previously_worked_here", "scope": { "kind": "company", "name": "<employer>" }, "value": "<true | false>" },
- *     { "key": "eeo_gender", "value": "<one of: male | female | non_binary>" }
+ *     { "key": "eeo_gender", "value": "<one of: male | female | non_binary>" },
+ *     { "key": "willing_background_check", "value": <true | false> },
+ *     { "key": "willing_to_relocate_at_own_expense", "scope": { "kind": "country", "code": "<ISO country>" }, "value": <true | false> },
+ *     { "key": "eeo_sexual_orientation", "value": "<one of: heterosexual | gay | lesbian | bisexual | pansexual | asexual | queer>" },
+ *     { "key": "eeo_transgender", "value": "<one of: transgender | not_transgender>" }
  *   ],
  *   "revoke": [{ "key": "<fact key>", "scope": { "kind": "global" } }]
  * }

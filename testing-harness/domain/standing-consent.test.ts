@@ -96,7 +96,8 @@ describe("the standing whitelist", () => {
 
   it("leaves consent that is not about application data alone", () => {
     expect(standingStatementDecision("I consent to receive phone calls", BOTH)).toEqual({ verdict: "none" });
-    expect(standingStatementDecision("I agree to the terms of use", BOTH)).toEqual({ verdict: "none" });
+    // Terms of use are accepted under the data-consent setting since 2026-11-24 (terms-consent.test.ts).
+    expect(standingStatementDecision("I agree to the terms of use", BOTH)).toEqual({ verdict: "accept", setting: "accept_data_consent", groups: ["terms-of-use"] });
   });
 });
 

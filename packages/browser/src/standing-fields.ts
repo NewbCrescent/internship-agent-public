@@ -29,6 +29,9 @@ export const TEXT_MESSAGE_QUESTION = "text messages: this does not ask only abou
 const TEXTS_YES = "Your text-message rule (2026-11-20): Yes to texts about this application.";
 const TEXTS_NO = "Your text-message rule (2026-11-20): No to marketing or job-alert texts.";
 const SIGNATURE_NO_NAME = "electronic signature: add your legal first and last name (or full name) on the profile page";
+/** Terms are accepted only as a condition of applying (2026-11-24): an optional terms field is left to the usual rules. */
+const optionalTerms = (decision: { verdict: string; groups?: readonly string[] }, field: BrowserField): boolean =>
+  decision.verdict === "accept" && (decision.groups ?? []).includes("terms-of-use") && !field.required;
 
 /** Marketing, newsletter, and talent-pool opt-ins a list or radio set declines (domain MARKETING without the text-message terms). */
 const DECLINABLE_MARKETING = /\bnewsletters?\b|\bmarketing\b|\bpromotional\b|\bjob alerts?\b|\btalent (?:community|network|pool)\b|\bfuture (?:job |career )?(?:opportunities|openings|roles|positions)\b|\bsubscribe\b|\bmailing list\b/i;
@@ -91,6 +94,9 @@ export function standingFieldDecision(field: BrowserField, form: RecognizedForm,
   if (field.kind === "checkbox" && (field.options?.length ?? 0) < 2) {
     const decision = standingStatementDecision(field.label, standing);
     if (decision.verdict === "accept") {
+      if (optionalTerms(decision, field)) {
+        return { fieldId: field.id, action: "skip", value: null, basis: null, reason: "Optional terms checkbox left unchecked: terms are accepted only when applying requires it.", pause: null };
+      }
       return {
         fieldId: field.id,
         action: "check",
@@ -110,7 +116,7 @@ export function standingFieldDecision(field: BrowserField, form: RecognizedForm,
   }
   if ((field.kind === "select" || field.kind === "radio") && (field.options?.length ?? 0) >= 2) {
     const decision = standingStatementDecision(field.label, standing);
-    const option = decision.verdict === "accept" ? affirmativeOption(field.options!) : null;
+    const option = decision.verdict === "accept" && !optionalTerms(decision, field) ? affirmativeOption(field.options!) : null;
     if (decision.verdict === "accept" && option) {
       return {
         fieldId: field.id,
