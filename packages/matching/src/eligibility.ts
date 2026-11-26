@@ -427,9 +427,9 @@ function hasExplicitAlternative(text: string, requiredLevel: RegExp, alternative
   return !/[.;\n]/.test(connector) && /\bor\b|\//i.test(connector);
 }
 
-/** Whether a posting title targets Master's or PhD candidates. */
+/** Whether a posting title targets only Master's or PhD candidates; a title that also names a bachelor's level ("BS/MS/PhD") does not. */
 export function titleNamesGraduateStudy(title: string): boolean {
-  return DOCTORATE_LEVEL.test(title) || MASTER_LEVEL.test(title);
+  return (DOCTORATE_LEVEL.test(title) || MASTER_LEVEL.test(title)) && !BACHELOR_LEVEL.test(title);
 }
 
 /** Whether a requirement names graduate study without accepting a bachelor's or stating a bachelor's alternative. */

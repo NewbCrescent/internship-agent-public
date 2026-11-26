@@ -82,6 +82,40 @@ describe("software or adjacent role", () => {
   });
 });
 
+describe("technical research roles", () => {
+  // The candidate (2026-11-26): "I am fine with research summer". Technical research counts; non-technical research and
+  // titles named for graduate students do not. Title-only cases modelled on board titles.
+  it.each([
+    "ML Research Intern", "Quantitative Research Intern", "Research Intern (BS/MS/PhD)",
+    "Research Intern - Reinforcement Learning, Self-Driving", "Research Internships", "Research Engineer Intern",
+    "Security Research Intern", "HCI Research Intern", "Computational Biology Research Intern",
+    "Software Engineer Intern (BS/MS/PhD)", "Software Engineer Intern"
+  ])("pursues %s", (title) => {
+    expect(judgeRole(title).outcome).toBe("apply");
+  });
+
+  it.each([
+    "PhD Research Intern", "UX Research Intern", "Market Research Intern", "User Research Intern", "Policy Research Intern",
+    "Clinical Research Intern", "Biology Research Intern", "Equity Research Intern", "Research Intern (MS/PhD)",
+    "Research Scientist Intern (PhD)"
+  ])("skips %s", (title) => {
+    expect(judgeRole(title).outcome).toBe("skip");
+  });
+
+  it("names why a title skips", () => {
+    expect(judgeRole("PhD Research Intern")).toEqual({ outcome: "skip", reasons: ['Role: "PhD" in the title names a graduate-level role.'] });
+    expect(judgeRole("Market Research Intern")).toEqual({ outcome: "skip", reasons: ['Role: "Market" research is not technical research.'] });
+    expect(judgeRole("Finance Intern"))
+      .toEqual({ outcome: "skip", reasons: ["Role: the title names no software, adjacent engineering, or technical research work."] });
+  });
+
+  it("pursues a research posting open to undergraduates for the target", () => {
+    expect(judgeTargetPosting({
+      title: "Research Intern (BS/MS/PhD)", text: "Join our research team this summer.", employmentType: "INTERNSHIP", countryCodes: ["US"], onHandshake: false
+    }, summer)).toEqual({ outcome: "apply", reasons: [] });
+  });
+});
+
 describe("location", () => {
   it("passes a stated US location, skips another country, and holds silence", () => {
     expect(judgeLocation(["US"]).outcome).toBe("apply");
@@ -190,6 +224,55 @@ describe("pay", () => {
     expect(judgeTargetPosting({ ...posting, title: "Software Engineering Intern", compensation: { minimum: 0, maximum: 0, period: "HOUR" } }, summer))
       .toEqual({ outcome: "skip", reasons: ["Pay: the posting states zero pay."] });
     expect(judgeTargetPosting({ ...posting, title: "Software Engineering Intern", compensation: hourly }, summer)).toEqual(pass);
+  });
+
+  // The candidate (2026-11-26), on research internships: "as long as it is payed". Fictional postings.
+  describe("credit-only, volunteer, and research pay", () => {
+    const researchUnpaid = { outcome: "skip", reasons: ["Pay: research internship is unpaid or for credit."] };
+    const research = (title: string, text: string, compensation: Parameters<typeof judgePay>[0]["compensation"] = null) =>
+      judgeTargetPosting({ title, text, employmentType: "INTERNSHIP", countryCodes: ["US"], onHandshake: false, compensation }, summer);
+
+    it("rules out an unpaid or volunteer research posting and pursues a paid or silent one", () => {
+      expect(research("Research Intern (unpaid, academic credit)", "Join our research team.")).toEqual(researchUnpaid);
+      expect(research("Volunteer Research Assistant", "Join our research team.")).toEqual(researchUnpaid);
+      expect(research("Research Assistant - Volunteer", "Join our research team.")).toEqual(researchUnpaid);
+      expect(research("Research Intern", "The pay for this internship is $45/hr.", { minimum: 45, maximum: 45, period: "HOUR" }))
+        .toEqual({ outcome: "apply", reasons: [] });
+      expect(research("Research Intern", "Join our research team this summer.")).toEqual({ outcome: "apply", reasons: [] });
+    });
+
+    it.each([
+      "This research internship is for academic credit only.",
+      "Students receive academic credit in lieu of pay.",
+      "A stipend is not provided.",
+      "No stipend is provided.",
+      "This internship is uncompensated.",
+      "This is a volunteer research position.",
+      "This position is without pay.",
+      "There is no compensation for this internship."
+    ])("rules out the research description %s", (text) => {
+      expect(judgePay({ title: "Research Intern", text, compensation: null })).toEqual(researchUnpaid);
+    });
+
+    it("rules out credit-only and volunteer wording for every internship", () => {
+      expect(body("This internship is offered for academic credit only.")).toEqual(unpaid);
+      expect(judgePay({ title: "Volunteer Software Engineering Intern", text: "We build software.", compensation: null })).toEqual(unpaid);
+      expect(judgePay({ title: "Software Engineering Intern (Academic Credit)", text: "We build software.", compensation: null })).toEqual(unpaid);
+    });
+
+    it.each([
+      "Interns are paid $30 per hour and may also earn academic credit.",
+      "Academic credit is available in addition to pay.",
+      "Please note that housing or a housing stipend is not provided.",
+      "No stipend is provided for housing.",
+      "Our volunteer program pairs employees with local schools."
+    ])("passes %s", (text) => {
+      expect(body(text)).toEqual(pass);
+    });
+
+    it.each(["Software Engineer Intern (Credit Risk)", "Credit Card Platform Software Intern"])("passes the title %s", (title) => {
+      expect(judgePay({ title, text: "We build software.", compensation: null })).toEqual(pass);
+    });
   });
 });
 

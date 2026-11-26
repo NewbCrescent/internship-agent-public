@@ -109,6 +109,11 @@ describe("reviewPursuit", () => {
     expect(result).toEqual({ pursue: false, reason: "The title targets graduate study." });
   });
 
+  it("pursues a title that also names a bachelor's level", () => {
+    const result = pursue({ title: "Research Intern (BS/MS/PhD)", ...single("Experience with Elixir", "SKILL", SKILL_REVIEW_REASON) });
+    expect(result).toEqual({ pursue: true, unverified: ["Experience with Elixir"] });
+  });
+
   it("does not pursue a missing degree or a missing full-time answer", () => {
     const missing = pursue(single("Bachelor's degree in Computer Science", "DEGREE",
       "No degree is recorded on the profile, so degree eligibility needs candidate review."));

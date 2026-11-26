@@ -15,6 +15,7 @@
     "pipeline:watch": "tsx --env-file-if-exists=.env packages/agent/scripts/pipeline-watch.ts",
     "pipeline:status": "tsx --env-file-if-exists=.env packages/agent/scripts/pipeline-status.ts",
     "discovery:trace": "tsx --env-file-if-exists=.env packages/agent/scripts/discovery-trace.ts",
+    "sources:import-boards": "tsx --env-file-if-exists=.env packages/agent/scripts/import-boards.ts",
     "pipeline:audit": "tsx --env-file-if-exists=.env packages/agent/scripts/pipeline-audit.ts",
     "pipeline:schedule": "tsx --env-file-if-exists=.env packages/agent/scripts/schedule-pipeline.ts",
     "pipeline:retry": "tsx --env-file-if-exists=.env packages/agent/scripts/pipeline-retry.ts",

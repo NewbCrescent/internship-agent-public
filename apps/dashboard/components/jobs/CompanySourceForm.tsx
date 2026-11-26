@@ -5,7 +5,10 @@ import { initialJobActionState } from "@/app/jobs/action-state";
 import { addDiscoverySourceAction, pollDiscoverySourceAction } from "@/app/jobs/actions";
 
 export function CompanySourceForm({ sources, pipelineStartedAt }: {
-  sources: Array<{ id: string; label: string; url: string | null; lastFetchedAt: string | null }>;
+  sources: Array<{
+    id: string; label: string; url: string | null; lastFetchedAt: string | null;
+    failureCount: number; lastError: string | null; retryAfter: string | null; importedFrom: string | null;
+  }>;
   /** Set while `pnpm pipeline:run` holds this workspace's lock; board checks wait for it. */
   pipelineStartedAt: string | null;
 }) {
@@ -28,6 +31,8 @@ export function CompanySourceForm({ sources, pipelineStartedAt }: {
     <ul className="fact-list">{sources.map((source) => <li key={source.id}>
       <strong>{source.label}</strong> · {source.url ? <a href={source.url} target="_blank" rel="noopener noreferrer">View source</a> : null}
       {source.lastFetchedAt ? <span> · last attempted {new Date(source.lastFetchedAt).toLocaleString()}</span> : null}
+      {source.importedFrom ? <span> · imported from {source.importedFrom}</span> : null}
+      {source.failureCount > 0 ? <span> · failing ({source.failureCount}): {source.lastError}{source.retryAfter ? `; next automatic check after ${new Date(source.retryAfter).toLocaleString()}` : ""}</span> : null}
       <form action={pollAction}><input type="hidden" name="sourceId" value={source.id} /><button className="review-button" type="submit" disabled={pollPending || pipelineStartedAt !== null}>Check board</button></form>
     </li>)}</ul>
     <p className={`form-message ${pollState.status}`} aria-live="polite">{pollState.message}</p>

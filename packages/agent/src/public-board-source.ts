@@ -1,9 +1,22 @@
 import { z } from "zod";
 import { discoveredItemSchema, employerPublication, type PostingPublication, type DiscoveredItem } from "@internship-agent/domain";
 
-type Board = { kind: "greenhouse" | "lever" | "ashby"; slug: string };
+import type { DiscoveryFetchEvent, DiscoveryRowEvent } from "./discovery-trace";
+
+export type PublicBoard = { kind: "greenhouse" | "lever" | "ashby"; slug: string };
+type Board = PublicBoard;
 type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
 const MAX_RESPONSE_BYTES = 5_000_000;
+const MAX_BOARD_POSTINGS = 100;
+const INTERN_TITLE = /\b(intern|internship|co-op)\b/i;
+
+/** A board request that failed; `status` is the HTTP status when the board answered. */
+export class PublicBoardError extends Error {
+  constructor(message: string, readonly status: number | null) {
+    super(message);
+    this.name = "PublicBoardError";
+  }
+}
 
 const greenhouseJob = z.object({ title: z.string(), absolute_url: z.url(), content: z.string().optional(), first_published: z.unknown().optional() });
 const leverJob = z.object({ text: z.string(), hostedUrl: z.url(), descriptionPlain: z.string().optional(), description: z.string().optional() });
@@ -81,7 +94,8 @@ async function boundedJson(response: Response): Promise<unknown> {
 
 export async function fetchPublicBoard(
   source: { label: string; url: string },
-  fetcher: Fetcher = fetch
+  fetcher: Fetcher = fetch,
+  observe: { onRow?: (event: DiscoveryRowEvent) => void; onFetch?: (event: DiscoveryFetchEvent) => void } = {}
 ): Promise<DiscoveredItem[]> {
   const board = parsePublicBoardUrl(source.url);
   const endpoint = board.kind === "greenhouse"
@@ -89,18 +103,63 @@ export async function fetchPublicBoard(
     : board.kind === "lever"
       ? `https://api.lever.co/v0/postings/${board.slug}?mode=json`
       : `https://api.ashbyhq.com/posting-api/job-board/${board.slug}`;
-  const response = await fetcher(endpoint, { redirect: "error", signal: AbortSignal.timeout(15_000) });
-  if (!response.ok) throw new Error(`The public board answered ${response.status}.`);
-  const payload = await boundedJson(response);
-  const jobs: Array<{ title: string; url: string; text: string; publication?: PostingPublication | null }> = board.kind === "greenhouse"
-    ? z.object({ jobs: z.array(greenhouseJob).max(2_000) }).parse(payload).jobs.map((job) => ({ title: job.title, url: job.absolute_url, text: job.content ?? "", publication: employerPublication(job.first_published, job.absolute_url, "first_published") }))
-    : board.kind === "lever"
-      ? z.array(leverJob).max(2_000).parse(payload).map((job) => ({ title: job.text, url: job.hostedUrl, text: job.descriptionPlain ?? job.description ?? "" }))
-      : z.object({ jobs: z.array(ashbyJob).max(2_000) }).parse(payload).jobs.filter((job) => job.isListed !== false).map((job) => ({ title: job.title, url: job.jobUrl, text: job.descriptionPlain ?? job.descriptionHtml ?? "", publication: employerPublication(job.publishedAt, job.jobUrl, "publishedAt") }));
-  return jobs
-    .filter((job) => /\b(intern|internship|co-op)\b/i.test(job.title) && validPostingUrl(job.url))
-    .map((job) => ({ title: job.title, companyName: source.label, text: plainText(job.text), sourceUrl: job.url, publication: job.publication ?? null }))
-    .filter((job) => job.text.length >= 80)
-    .slice(0, 100)
-    .map((job) => discoveredItemSchema.parse(job));
+  let status: number;
+  let jobs: Array<{ title: string; url: string; text: string; publication?: PostingPublication | null }>;
+  try {
+    const response = await fetcher(endpoint, { redirect: "error", signal: AbortSignal.timeout(15_000) });
+    status = response.status;
+    if (!response.ok) {
+      try { await response.body?.cancel(); } catch { /* the status is the answer */ }
+      throw new PublicBoardError(`The public board answered ${response.status}.`, response.status);
+    }
+    const payload = await boundedJson(response);
+    jobs = board.kind === "greenhouse"
+      ? z.object({ jobs: z.array(greenhouseJob).max(2_000) }).parse(payload).jobs.map((job) => ({ title: job.title, url: job.absolute_url, text: job.content ?? "", publication: employerPublication(job.first_published, job.absolute_url, "first_published") }))
+      : board.kind === "lever"
+        ? z.array(leverJob).max(2_000).parse(payload).map((job) => ({ title: job.text, url: job.hostedUrl, text: job.descriptionPlain ?? job.description ?? "" }))
+        : z.object({ jobs: z.array(ashbyJob).max(2_000) }).parse(payload).jobs.filter((job) => job.isListed !== false).map((job) => ({ title: job.title, url: job.jobUrl, text: job.descriptionPlain ?? job.descriptionHtml ?? "", publication: employerPublication(job.publishedAt, job.jobUrl, "publishedAt") }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    observe.onFetch?.({
+      url: endpoint, decision: "board-fetch-failed",
+      status: error instanceof PublicBoardError ? error.status : null, reason: message.slice(0, 300)
+    });
+    throw error;
+  }
+
+  // Internship titles are traced row by row; other titles are only counted on the fetch line.
+  const rows: DiscoveryRowEvent[] = [];
+  const kept: DiscoveredItem[] = [];
+  let internships = 0;
+  jobs.forEach((job, index) => {
+    if (!INTERN_TITLE.test(job.title)) return;
+    internships += 1;
+    const base = { row: index + 1, company: source.label, title: job.title, url: job.url, host: hostOf(job.url) };
+    if (!validPostingUrl(job.url)) {
+      rows.push({ ...base, decision: "invalid-link", reason: "the board's posting link is not a public https link" });
+      return;
+    }
+    const text = plainText(job.text);
+    if (text.length < 80) {
+      rows.push({ ...base, decision: "unavailable", reason: "the board gives fewer than 80 characters of description" });
+      return;
+    }
+    if (kept.length >= MAX_BOARD_POSTINGS) {
+      rows.push({ ...base, decision: "not-reached", reason: `past this board's limit of ${MAX_BOARD_POSTINGS} internship postings` });
+      return;
+    }
+    kept.push(discoveredItemSchema.parse({ title: job.title, companyName: source.label, text, sourceUrl: job.url, publication: job.publication ?? null }));
+    rows.push({ ...base, decision: "resolved", reason: "read from the public board", postingUrl: job.url });
+  });
+  observe.onFetch?.({
+    url: endpoint, decision: "board-fetched", status,
+    reason: `${jobs.length} jobs, ${internships} internship titles, ${kept.length} kept`,
+    jobs: jobs.length, internships, kept: kept.length
+  });
+  for (const row of rows) observe.onRow?.(row);
+  return kept;
+}
+
+function hostOf(raw: string): string {
+  try { return new URL(raw).hostname; } catch { return ""; }
 }

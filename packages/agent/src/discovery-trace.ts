@@ -22,8 +22,16 @@ export type DiscoveryRowEvent = {
 export type DiscoveryIngestEvent = {
   company: string; title: string; postingUrl: string; decision: DiscoveryIngestDecision; reason: string; jobId?: string;
 };
+/** What one public board request did. */
+export type DiscoveryFetchDecision = "board-fetched" | "board-fetch-failed";
+/** One public board request: its API endpoint, HTTP status (null when none came back), and the board's counts when read. */
+export type DiscoveryFetchEvent = {
+  url: string; decision: DiscoveryFetchDecision; status: number | null; reason: string;
+  jobs?: number; internships?: number; kept?: number;
+};
 export type DiscoveryTrace = {
   row(event: DiscoveryRowEvent): void;
+  fetch(event: DiscoveryFetchEvent): void;
   ingest(event: DiscoveryIngestEvent): void;
   end(outcome?: { error?: string }): void;
   readonly path: string;
@@ -43,7 +51,7 @@ const LABELS: Record<string, string> = {
   "already-known": "already known", stale: "older than the age limit", closed: "closed on the list",
   "not-internship": "not an internship", "off-season": "another season", "duplicate-row": "listed twice",
   "invalid-link": "invalid link", "failed-to-parse": "failed to parse", unsupported: "unsupported", unavailable: "unavailable",
-  "not-reached": "not reached this check"
+  "not-reached": "not reached this check", "board-fetched": "board fetched", "board-fetch-failed": "board fetch failed"
 };
 
 export function discoveryTraceDirectory(dataDir: string): string {
@@ -58,7 +66,14 @@ export function discoveryTraceDirectory(dataDir: string): string {
 export function openDiscoveryTrace(
   dataDir: string,
   source: { label: string; url: string },
-  options: { now?: () => Date; passId?: string } = {}
+  options: {
+    now?: () => Date; passId?: string;
+    /**
+     * Whether quiet rows are written this pass. When given, the day's file is
+     * not read to decide it (public boards pass false: they write no quiet rows).
+     */
+    full?: boolean;
+  } = {}
 ): DiscoveryTrace {
   const now = options.now ?? (() => new Date());
   const started = now();
@@ -87,8 +102,8 @@ export function openDiscoveryTrace(
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     chmodSync(directory, 0o700);
   } catch (error) { fail(error); }
-  let full = true;
-  if (writeError === null) {
+  let full = options.full ?? true;
+  if (writeError === null && options.full === undefined) {
     try {
       full = !readFileSync(path, "utf8").includes('{"type":"pass","list":' + JSON.stringify(source.url) + ",");
     } catch { full = true; }
@@ -111,6 +126,23 @@ export function openDiscoveryTrace(
         company: cap(event.company, 200), title: cap(event.title, 200), host: event.host, url: cap(event.url, 500),
         decision: event.decision, reason: cap(event.reason, 300),
         ...(event.postingUrl !== undefined ? { postingUrl: cap(event.postingUrl, 500) } : {})
+      });
+    },
+    fetch(event) {
+      if (ended) return;
+      tally(counts, event.decision);
+      const host = hostOf(event.url);
+      if (event.decision === "board-fetch-failed") {
+        tally(reasons, event.decision + ": " + event.reason);
+        tally(hosts, host);
+      }
+      write({
+        type: "fetch", list: source.url, pass: passId, at: now().toISOString(),
+        company: cap(source.label, 200), host, url: cap(event.url, 500), status: event.status,
+        decision: event.decision, reason: cap(event.reason, 300),
+        ...(event.jobs !== undefined ? { jobs: event.jobs } : {}),
+        ...(event.internships !== undefined ? { internships: event.internships } : {}),
+        ...(event.kept !== undefined ? { kept: event.kept } : {})
       });
     },
     ingest(event) {
@@ -189,7 +221,7 @@ export function summarizeDiscoveryTrace(
       }
       if (line.type === "pass") { group.at = line.at; group.source = text(line.source); }
       else if (line.type === "end") group.end = line;
-      else if (line.type === "row" || line.type === "ingest") group.events.push(line);
+      else if (line.type === "row" || line.type === "ingest" || line.type === "fetch") group.events.push(line);
     }
   }
   const passes = [...groups.values()].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
@@ -207,9 +239,12 @@ export function summarizeDiscoveryTrace(
       return [...lines, "No row matching \"" + options.find + "\" in the kept discovery traces (" + DISCOVERY_TRACE_RETENTION_DAYS +
         " days). Rows already known or older than the age limit are written once per day per list."];
     }
-    return [...lines, ...matches.map(({ group, event }) => event.at + " " + (group.source || group.list) + " " +
-      (event.type === "ingest" ? "stored" : "row " + text(event.row)) + ": " + text(event.company) + " — " + text(event.title) +
-      " (" + text(event.host) + "): " + label(text(event.decision)) + " — " + text(event.reason))];
+    return [...lines, ...matches.map(({ group, event }) => event.type === "fetch"
+      ? event.at + " " + (group.source || group.list) + " board fetch: " + text(event.company) + " (" + text(event.host) + "): " +
+        label(text(event.decision)) + " — " + text(event.reason)
+      : event.at + " " + (group.source || group.list) + " " +
+        (event.type === "ingest" ? "stored" : "row " + text(event.row)) + ": " + text(event.company) + " — " + text(event.title) +
+        " (" + text(event.host) + "): " + label(text(event.decision)) + " — " + text(event.reason))];
   }
 
   for (const group of passes.slice(0, options.passes ?? 10)) {
@@ -256,6 +291,7 @@ function computedReasons(events: TraceLine[]): Map<string, number> {
   for (const event of events) {
     const decision = text(event.decision);
     if (event.type === "row" && QUIET.has(decision)) continue;
+    if (event.type === "fetch" && decision === "board-fetched") continue;
     tally(reasons, decision + ": " + text(event.reason));
   }
   return reasons;
@@ -263,7 +299,10 @@ function computedReasons(events: TraceLine[]): Map<string, number> {
 
 function computedHosts(events: TraceLine[]): Map<string, number> {
   const hosts = new Map<string, number>();
-  for (const event of events) if (event.type === "row" && HOST_COUNTED.has(text(event.decision))) tally(hosts, text(event.host));
+  for (const event of events) {
+    if ((event.type === "row" && HOST_COUNTED.has(text(event.decision))) ||
+      (event.type === "fetch" && text(event.decision) === "board-fetch-failed")) tally(hosts, text(event.host));
+  }
   return hosts;
 }
 

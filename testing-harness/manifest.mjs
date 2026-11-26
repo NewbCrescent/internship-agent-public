@@ -23,7 +23,7 @@ export const suiteManifest = [
     mutation: "none",
     timeoutMs: 30_000,
     reportPrefixes: [],
-    description: "Typed candidate facts, scope normalization (including the Handshake application-channel scope), sensitive-source policy, country/minimum-pay URL filter parsing, Review focus settings, filtering (silence never hides a posting), and ranking, the application target (term, software or adjacent role, US location, unpaid postings ruled out with the false positives kept, current AI judgment), the AI bar and skip line, the application intent schema and term-standing label, and the auto-submit policy (numeric and unlimited daily-cap settings, manual mode) and its run blockers (Oracle Cloud HCM and SmartRecruiters named as recognized sites the candidate approves); the exact company scope (a Yes for previous employment or relatives must name the company), text facts, and the protected voluntary self-identification keys; question-memory normalization (accents, case, punctuation, trailing required/optional markers; C++ and C# kept apart), exact single-option matching, and the never-save rules (company-named, why/interest, employer-specific, consent, sensitive, contact, essay, upload, coursework); the coursework file schema, the deterministic coursework answer, and course evidence text. The resume-source setting and profile-to-channel rule. Standing consent and attestations: both settings (manual mode turns them off), one accepted example per whitelist group with only its own setting, fact statements (citizenship, U.S. person, export control, clearance, debarment, criminal history, prior employment, non-compete, relatives, work authorization, age) and marketing opt-ins never accepted, clipped labels never accepted, and the signature and date label rules (fictional statements); fact vetoes isolated per group (factGroupsOf), the narrowed demographic veto, and the first-person-fact veto; the candidate's text-message rule (textMessageTopic): texts about this application, marketing or job-alert texts, and mixed, other-channel (WhatsApp, calls, email), topic-less, or clipped questions read as unclear, with non-text questions untouched (fictional statements)."
+    description: "Typed candidate facts, scope normalization (including the Handshake application-channel scope), sensitive-source policy, country/minimum-pay URL filter parsing, Review focus settings, filtering (silence never hides a posting), and ranking, the application target (term, software or adjacent role or technical research (graduate-only, UX, market, and other non-technical research titles skipped), US location, unpaid, credit-only, and volunteer postings ruled out (research postings with their own reason) with the false positives kept, current AI judgment), the AI bar and skip line, the application intent schema and term-standing label, and the auto-submit policy (numeric and unlimited daily-cap settings, manual mode) and its run blockers (Oracle Cloud HCM and SmartRecruiters named as recognized sites the candidate approves); the exact company scope (a Yes for previous employment or relatives must name the company), text facts, and the protected voluntary self-identification keys; question-memory normalization (accents, case, punctuation, trailing required/optional markers; C++ and C# kept apart), exact single-option matching, and the never-save rules (company-named, why/interest, employer-specific, consent, sensitive, contact, essay, upload, coursework); the coursework file schema, the deterministic coursework answer, and course evidence text. The resume-source setting and profile-to-channel rule. Standing consent and attestations: both settings (manual mode turns them off), one accepted example per whitelist group with only its own setting, fact statements (citizenship, U.S. person, export control, clearance, debarment, criminal history, prior employment, non-compete, relatives, work authorization, age) and marketing opt-ins never accepted, clipped labels never accepted, and the signature and date label rules (fictional statements); fact vetoes isolated per group (factGroupsOf), the narrowed demographic veto, and the first-person-fact veto; the candidate's text-message rule (textMessageTopic): texts about this application, marketing or job-alert texts, and mixed, other-channel (WhatsApp, calls, email), topic-less, or clipped questions read as unclear, with non-text questions untouched (fictional statements)."
   },
   {
     id: "semantic-question-mapping",
@@ -131,7 +131,7 @@ export const suiteManifest = [
     mutation: "local-temporary",
     timeoutMs: 45_000,
     reportPrefixes: [],
-    description: "Watcher tick and pipeline pass against a disposable workspace (injected GitHub and source fetches): the pass runs after the tick's own sources read, tick after tick in one process, and the pipeline lock is released on every path, including an early failure, and the pass's Discord notice is sent once per item after the lock is released, while a failed notice or pass never leaves the lock held. Internal failures and already-approved runs stay out of candidate DMs, while a later manual field correction keeps its original Q number. Pursued-on-fit postings are logged and written to pipeline-status.json. Each checked source writes its discovery trace in the workspace's data directory."
+    description: "Watcher tick and pipeline pass against a disposable workspace (injected GitHub and source fetches): the pass runs after the tick's own sources read, tick after tick in one process, and the pipeline lock is released on every path, including an early failure, and the pass's Discord notice is sent once per item after the lock is released, while a failed notice or pass never leaves the lock held. Internal failures and already-approved runs stay out of candidate DMs, while a later manual field correction keeps its original Q number. Pursued-on-fit postings are logged and written to pipeline-status.json. Each checked source writes its discovery trace in the workspace's data directory. Public boards in a pass: at most four fetches in flight, one ingest at a time, a 6-hour per-board interval, failing and missing boards backed off, and the boards summary line."
   },
   {
     id: "discord-notify",
@@ -251,7 +251,7 @@ export const suiteManifest = [
     mutation: "none",
     timeoutMs: 30_000,
     reportPrefixes: [],
-    description: "Hard eligibility ordering (stated vs inferred vs silent), Handshake-only graduation dates, explainable keyword scoring, and grounded AI competitiveness response validation; relocation willingness read for the location's country. The needs-review pursuit allowlist (review-pursuit.ts): only unverified skill, experience, degree-wording, and B.S./B.A. findings pass; graduate study, missing facts, statements of fact, failures, and other reasons do not."
+    description: "Hard eligibility ordering (stated vs inferred vs silent), Handshake-only graduation dates, explainable keyword scoring, and grounded AI competitiveness response validation; relocation willingness read for the location's country. The needs-review pursuit allowlist (review-pursuit.ts): only unverified skill, experience, degree-wording, and B.S./B.A. findings pass; graduate study, missing facts, statements of fact, failures, and other reasons do not. A graduate-study title that also names a bachelor's level (\"BS/MS/PhD\") is not graduate-only."
   },
   {
     id: "job-normalization-contracts",
@@ -275,7 +275,7 @@ export const suiteManifest = [
     mutation: "local-temporary",
     timeoutMs: 45_000,
     reportPrefixes: [],
-    description: "Migration, profile database isolation, seed, preferences, posting projection, fact revision, revocation, base resumes, transcripts, browser sessions, GPA, resume entry revisions, approval, ordering, and archival, and application intent storage against disposable SQLite; the 0030 candidate_facts rebuild keeps rows, the supersede chain, indexes, and AI-fit triggers; candidate coursework (migration 0031) replace, no-op, rollback, and AI-fit context bumps; migration 0034 bumps the AI-fit context only for FIT_CONTEXT_FACT_KEYS facts (graduation_date), keeps other fit triggers, and does not bump on apply; recorded question wordings (migration 0036) recorded, seen again, found exact then normalized, revoked, the target CHECK, and a database without the table read as empty."
+    description: "Migration, profile database isolation, seed, preferences, posting projection, fact revision, revocation, base resumes, transcripts, browser sessions, GPA, resume entry revisions, approval, ordering, and archival, and application intent storage against disposable SQLite; the 0030 candidate_facts rebuild keeps rows, the supersede chain, indexes, and AI-fit triggers; candidate coursework (migration 0031) replace, no-op, rollback, and AI-fit context bumps; migration 0034 bumps the AI-fit context only for FIT_CONTEXT_FACT_KEYS facts (graduation_date), keeps other fit triggers, and does not bump on apply; recorded question wordings (migration 0036) recorded, seen again, found exact then normalized, revoked, the target CHECK, and a database without the table read as empty; migration 0037 adds imported boards' provenance and fetch-health columns, saves imported boards atomically, and reads pre-0037 rows with defaults."
   },
   {
     id: "memory-resolution",
@@ -408,6 +408,18 @@ export const suiteManifest = [
     timeoutMs: 30_000,
     reportPrefixes: [],
     description: "Explicit read-only command, never selected by a gate: summarizes the workspace's discovery traces (counts by decision and reason, dropped hosts per pass) and finds a listing by company, title, or link."
+  },
+  {
+    id: "board-import-cli",
+    features: ["discovery"],
+    tier: "benchmark",
+    script: "sources:import-boards",
+    requires: ["node", "pnpm", "node-sqlite"],
+    network: "none",
+    mutation: "local-profile-database",
+    timeoutMs: 60_000,
+    reportPrefixes: [],
+    description: "Explicit operational command, never selected by a gate: imports a reviewed JSON list of public Greenhouse, Lever, and Ashby boards into the chosen workspace's discovery sources (at most 300 new per import, deduped by kind and slug, provenance recorded); --dry-run opens the database read-only and writes nothing."
   },
   {
     id: "profile-answers-cli",
@@ -551,7 +563,7 @@ export const suiteManifest = [
     mutation: "local-temporary",
     timeoutMs: 60_000,
     reportPrefixes: [],
-    description: "Batch and cross-source duplicate skipping, distinct same-title requisitions, ingest, analysis, promotion, and rate-limited source fetch against disposable SQLite. The per-listing discovery trace (discovery-traces/<date>.jsonl: incremental lines, owner-only modes, quiet rows once per day per list, final counts by decision, 14-day pruning, the pnpm discovery:trace summary and --find) and its ingest outcomes for a checked source."
+    description: "Batch and cross-source duplicate skipping, distinct same-title requisitions, ingest, analysis, promotion, and rate-limited source fetch against disposable SQLite. The per-listing discovery trace (discovery-traces/<date>.jsonl: incremental lines, owner-only modes, quiet rows once per day per list, final counts by decision, 14-day pruning, the pnpm discovery:trace summary and --find) and its ingest outcomes for a checked source. The public board import (Track 52): row validation, kind-and-slug dedupe against every source and earlier rows, a read-only dry run, the 300-board cap with intern-posting rows first, and recorded provenance; board fetch health (a 404 board and a failing board backed off, cleared on success), a board with no internship postings finishing as an empty run, and fetch lines in the trace."
   },
   {
     id: "outcome-contracts",

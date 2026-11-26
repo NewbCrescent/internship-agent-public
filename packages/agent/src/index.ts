@@ -7,6 +7,8 @@ export * from "./application-record";
 export * from "./discovery-orchestrator";
 export * from "./discovery-trace";
 export * from "./public-board-source";
+export * from "./board-polling";
+export * from "./board-import";
 export * from "./github-job-list-source";
 export * from "./host-pacer";
 export * from "./posting-page-sources";

@@ -5,7 +5,7 @@ import { AUTO_SUBMIT_MIN_FIT_FLOOR } from "./submission-mode";
 /**
  * Which postings the automatic pipeline pursues for the candidate's stated
  * target (INTERNSHIP_AGENT_TARGET_TERM, for example summer-2027): the right
- * term, a software or adjacent role, a US location, not stated as unpaid, and a current AI
+ * term, a software or adjacent role or a technical research one, a US location, not stated as unpaid, and a current AI
  * judgment at or above the candidate's bar. Every step reads only stated
  * text; silence is never a pass for the location and AI steps, so an unknown
  * sends the posting to the candidate instead of out the door.
@@ -88,19 +88,43 @@ export function judgeTerm(posting: Pick<TargetPosting, "title" | "text" | "emplo
 }
 
 const SOFTWARE = /\b(?:software|swe|sde|developer|programmer|programming|full[\s-]?stack|back[\s-]?end|front[\s-]?end|web|mobile|ios|android|platform|devops|sre|site reliability|infrastructure|cloud|distributed systems|data engineer(?:ing)?|machine learning|ml|ai|artificial intelligence|deep learning|llm|genai|generative ai|computer vision|nlp|data scientist|data science|security engineer(?:ing)?|application security|automation engineer|test engineer|sdet|qa engineer|computer science|engineering intern(?:ship)?|technology intern(?:ship)?|tech intern(?:ship)?|forward deployed|member of technical staff|technical staff)\b/i;
-const NOT_SOFTWARE = /\b(?:ph\.?\s?d|doctoral|master'?s|mba|sales|marketing|recruit(?:ing|er)?|human resources|people operations|accounting|tax|audit|legal|paralegal|procurement|sourcing|supply chain|mechanical|electrical|civil|chemical|manufacturing|hardware|analog|rf|asic|fpga|pcb|silicon|product manager|product management|program manager|project manager|designer|ux|graphic|copywriter|communications|policy|actuarial|underwriting|trading|trader|quantitative research(?:er)?|research scientist|investment banking|wealth management|clinical|nursing|pharmacy|technician|customer success|business analyst|financial analyst|business operations|business development|strategy|content|administration|administrator)\b/i;
+const NOT_SOFTWARE = /\b(?:sales|marketing|recruit(?:ing|er)?|human resources|people operations|accounting|tax|audit|legal|paralegal|procurement|sourcing|supply chain|mechanical|electrical|civil|chemical|manufacturing|hardware|analog|rf|asic|fpga|pcb|silicon|product manager|product management|program manager|project manager|designer|ux|graphic|copywriter|communications|policy|actuarial|underwriting|trading|trader|investment banking|wealth management|clinical|nursing|pharmacy|technician|customer success|business analyst|financial analyst|business operations|business development|strategy|content|administration|administrator)\b/i;
 const ANALYST_ONLY = /\banaly(?:st|tics)\b/i;
 const ANALYST_ENGINEERING = /\b(?:engineer(?:ing)?|developer|software|scientist)\b/i;
 
-/** Software engineering or adjacent (ML/AI, data, infrastructure, security engineering), from the title. */
+/** Titles named for graduate students; one that also names a bachelor's level ("BS/MS/PhD") is open to undergraduates. */
+const GRADUATE_LEVEL = /\b(?:ph\.?\s?d|doctoral|doctorate|master'?s|mba|research scientist)\b/i;
+const UNDERGRADUATE_LEVEL = /\b(?:bachelor'?s?|undergrad(?:uate)?s?|b\.?\s?s|b\.?\s?a)\b/i;
+// Technical research counts (the candidate, 2026-11-26: "I am fine with research summer"); market, UX, policy,
+// clinical, and wet-lab research without a computing focus does not.
+const RESEARCH = /\bresearch(?:ers?)?\b/i;
+const NON_TECHNICAL_RESEARCH = /\b(?:market|consumer|customer|brand|user|design|equity|investment|economic|economics|social|survey|qualitative|political|historical|history|wet[- ]lab|biology|biological|life sciences?|medical|health|patient|psychology|education|editorial|journalism|media)\b/i;
+const TECHNICAL_RESEARCH = /\b(?:computational|computing|computer|robotics?|robot|autonomy|autonomous|self[- ]driving|reinforcement learning|algorithms?|systems|quantitative|quant|hci|human[- ]computer|bioinformatics|statistic(?:s|al)|mathematic(?:s|al)|optimization|simulation|perception|compilers?|networking|cryptography|security)\b/i;
+
+/**
+ * Software engineering or adjacent (ML/AI, data, infrastructure, security
+ * engineering), or technical research (the candidate, 2026-11-26: "I am fine
+ * with research summer"), from the title. A title named for graduate students
+ * skips unless it also names a bachelor's level.
+ */
 export function judgeRole(title: string): TargetDecision {
   const excluded = NOT_SOFTWARE.exec(title);
   if (excluded) return { outcome: "skip", reasons: [`Role: "${excluded[0]}" in the title is outside software engineering and adjacent roles.`] };
+  const graduate = GRADUATE_LEVEL.exec(title);
+  if (graduate && !UNDERGRADUATE_LEVEL.test(title)) {
+    return { outcome: "skip", reasons: [`Role: "${graduate[0]}" in the title names a graduate-level role.`] };
+  }
   if (ANALYST_ONLY.test(title) && !ANALYST_ENGINEERING.test(title)) {
     return { outcome: "skip", reasons: ["Role: an analyst role is not software engineering or adjacent."] };
   }
-  if (!SOFTWARE.test(title)) return { outcome: "skip", reasons: ["Role: the title names no software or adjacent engineering work."] };
-  return { outcome: "apply", reasons: [] };
+  if (SOFTWARE.test(title)) return { outcome: "apply", reasons: [] };
+  if (RESEARCH.test(title)) {
+    const nonTechnical = NON_TECHNICAL_RESEARCH.exec(title);
+    return nonTechnical && !TECHNICAL_RESEARCH.test(title)
+      ? { outcome: "skip", reasons: [`Role: "${nonTechnical[0]}" research is not technical research.`] }
+      : { outcome: "apply", reasons: [] };
+  }
+  return { outcome: "skip", reasons: ["Role: the title names no software, adjacent engineering, or technical research work."] };
 }
 
 /** A stated US location passes; another country skips; no stated country goes to the candidate. */
@@ -123,31 +147,54 @@ export function judgeSource(onHandshake: boolean): TargetDecision {
 // internships" (a plural is about internships in general) are not statements
 // that this one is.
 const NOT_THIS_ONE = String.raw`(?<!\bpaid\s*(?:or|and|\/)\s*)(?<!\b(?:not|never)\s+(?:an?\s+)?)`;
+// A stipend for housing, travel, or the like is not the internship's pay.
+const STIPEND_KIND = String.raw`(?<!\b(?:housing|relocation|travel|meals?|commuting|commuter|parking|equipment|transportation|transit|moving|living)\s+)`;
+const NOT_FOR_EXPENSES = String.raw`(?!\s+(?:for|toward|towards)\s+(?:housing|relocation|travel|meals?|commut\w*|parking|equipment|expenses?)\b)`;
 const UNPAID_STATEMENTS = [
   /[([]\s*unpaid\s*[)\]]/i,
   new RegExp(NOT_THIS_ONE + String.raw`\bunpaid\s+(?:(?:summer|part[- ]time|full[- ]time|remote|virtual)\s+)?(?:intern(?:ship)?|position|role|opportunity|placement|program|externship|fellowship)\b`, "i"),
   /\b(?:intern(?:ship)?|position|role|opportunity|placement|program)\s+(?:is|will be)\s+(?:an?\s+)?unpaid\b/i,
   // "No compensation will be provided", not "no compensation for travel" or "no compensation decisions".
   /\bno\s+(?:monetary\s+|financial\s+)?compensation\b(?!\s+(?:(?:for|of)\s+(?:travel|relocation|housing|expenses?|mileage|parking|commuting|overtime|meals?)|decisions?|discrimination|history|data|information|structure|philosophy|questions?)\b)/i,
-  /\b(?:this|it)\s+(?:is|will be)\s+an?\s+(?:unpaid\s+)?volunteer\s+(?:position|role|internship|opportunity)\b/i
+  /\b(?:this|it)\s+(?:is|will be)\s+an?\s+(?:unpaid\s+)?volunteer\s+(?:position|role|internship|opportunity)\b/i,
+  // Credit-only, volunteer, and no-stipend wording also means unpaid (the candidate, 2026-11-26: "as long as it is payed").
+  /\b(?:academic|course|college|university|school)\s+credit\s+only\b/i,
+  /\bonly\s+(?:for\s+|receive\s+|earn\s+)?(?:academic|course|college|university|school)\s+credit\b/i,
+  /\bcredit[- ]only\b/i,
+  /\b(?:academic|course|college|university|school)\s+credit\s+(?:in\s+lieu\s+of|instead\s+of|rather\s+than)\s+(?:pay|payment|compensation|wages?|salary)\b/i,
+  new RegExp(STIPEND_KIND + String.raw`\bstipend\s+(?:is\s+|will\s+)?not\s+(?:be\s+)?(?:provided|offered|available|included|paid)\b` + NOT_FOR_EXPENSES, "i"),
+  new RegExp(String.raw`\bno\s+stipend\s+(?:is\s+|will\s+be\s+)?(?:provided|offered|available|included|paid)\b` + NOT_FOR_EXPENSES, "i"),
+  /\b(?:intern(?:ship)?|position|role|opportunity|placement|program)\s+(?:is|will be)\s+(?:not\s+paid|uncompensated|without\s+(?:pay|compensation))\b/i,
+  /\buncompensated\s+(?:(?:summer|research|part[- ]time|full[- ]time|remote|virtual)\s+)?(?:intern(?:ship)?|position|role|opportunity|placement|program)\b/i,
+  /\b(?:a|an|this|our)\s+volunteer\s+(?:(?:research|software|engineering|data)\s+)?(?:intern(?:ship)?|assistant(?:ship)?|researcher|role|position|opportunity)\b/i
 ];
 // In a title, "unpaid" alone ("Internship - Unpaid") or "(Volunteer)" also
 // counts, unless "unpaid" names something other than the internship ("Unpaid Invoices").
 const UNPAID_TITLE = [
   new RegExp(NOT_THIS_ONE + String.raw`\bunpaid\b(?!\s+(?:invoices?|balances?|bills?|claims?|leave|accounts?|debts?|wages?|taxes|time)\b)`, "i"),
-  /[([]\s*volunteer\s*[)\]]/i
+  /[([]\s*volunteer\s*[)\]]/i,
+  /[([]\s*(?:(?:for\s+)?(?:academic|course|school|college|university)\s+credit|for\s+credit|credit\s+only)\s*[)\]]/i,
+  /\bfor\s+(?:academic|course|school|college|university)\s+credit\b/i,
+  /\bvolunteer\s+(?:(?:research|software|engineering|data|web|developer|technology|tech|it|machine|learning|ml|ai)\s+){0,2}(?:intern(?:ship)?|assistant(?:ship)?|researcher|developer|engineer|position|role)\b/i,
+  /[-–—,|:]\s*volunteer\s*$/i
 ];
 
 function statesUnpaid(text: string): boolean {
   return UNPAID_STATEMENTS.some((pattern) => pattern.test(text));
 }
 
+const UNPAID_REASON = "Pay: the posting says the internship is unpaid.";
+const RESEARCH_UNPAID_REASON = "Pay: research internship is unpaid or for credit.";
+
 /**
  * Unpaid internships are not pursued (the candidate's rule, 2026-11-24:
  * "unpaid inter ships should be ruled out"). A title or description that
  * states the internship is unpaid, or an extracted pay of exactly zero, skips;
  * a description that says unpaid while a positive figure was extracted goes to
- * the candidate. Silence on pay passes.
+ * the candidate. Silence on pay passes. Academic or course credit only (or in
+ * lieu of pay), volunteer, uncompensated, and no-stipend wording counts as
+ * unpaid too (the candidate, 2026-11-26, on research internships: "as long as
+ * it is payed"); a research title gets its own reason.
  */
 export function judgePay(posting: Pick<TargetPosting, "title" | "text" | "compensation">): TargetDecision {
   const pay = posting.compensation ?? null;
@@ -155,13 +202,14 @@ export function judgePay(posting: Pick<TargetPosting, "title" | "text" | "compen
   if (figures.length > 0 && figures.every((value) => value === 0)) {
     return { outcome: "skip", reasons: ["Pay: the posting states zero pay."] };
   }
+  const unpaid: TargetDecision = { outcome: "skip", reasons: [RESEARCH.test(posting.title) ? RESEARCH_UNPAID_REASON : UNPAID_REASON] };
   if (UNPAID_TITLE.some((pattern) => pattern.test(posting.title)) || statesUnpaid(posting.title)) {
-    return { outcome: "skip", reasons: ["Pay: the posting says the internship is unpaid."] };
+    return unpaid;
   }
   if (statesUnpaid(posting.text)) {
     return figures.some((value) => value > 0)
       ? { outcome: "review", reasons: ["Pay: the description calls the internship unpaid but also states pay."] }
-      : { outcome: "skip", reasons: ["Pay: the posting says the internship is unpaid."] };
+      : unpaid;
   }
   return { outcome: "apply", reasons: [] };
 }

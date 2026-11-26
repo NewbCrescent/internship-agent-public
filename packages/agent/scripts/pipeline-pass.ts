@@ -6,7 +6,8 @@ import { closeProfileDatabase, getJobPosting, getProfileDatabase, listBrowserRun
 import { applicationRecordPdfPath } from "@internship-agent/browser";
 import type { WorkspaceProfile } from "@internship-agent/domain";
 
-import { fetchCompanySource, type FetchBatch } from "../src/discovery-orchestrator";
+import { checkPublicBoards, fetchCompanySource, type FetchBatch } from "../src/discovery-orchestrator";
+import { isPublicBoardSource } from "../src/board-polling";
 import { advancePipeline, pipelineSettings, type PipelineReport } from "../src/pipeline-orchestrator";
 import { unverifiedRequirements } from "../src/fit-pursuit";
 import { readDoorbellState, ringListDoorbell, writeDoorbellState } from "../src/list-doorbell";
@@ -31,6 +32,8 @@ export async function runPipelinePass(options: {
   lockHeld?: boolean;
   /** Tests inject the source fetch; production fetches each source. */
   fetchBatch?: FetchBatch;
+  /** Tests inject the public boards' fetch. */
+  boardFetcher?: (url: string, init?: RequestInit) => Promise<Response>;
   /** Tests replace the advance step; production runs advancePipeline. */
   advance?: typeof advancePipeline;
   /** Tests inject the Discord transport (fetch, the 429 wait, the timeout). */
@@ -62,7 +65,11 @@ export async function runPipelinePass(options: {
       `auto-submit ${autoSubmit ? `on (AI ${autoSubmit.minFit}+, ${dailyCapLabel})` : "off"}.`);
     const sources = listDiscoverySources(database).filter((entry) => entry.enabled && entry.url &&
       (options.sourceIds === "all" || options.sourceIds.includes(entry.id)));
-    for (const source of sources) {
+    // Lists are checked one after another; public boards afterwards, only when due and a few at a time.
+    const lists = sources.filter((source) => !isPublicBoardSource(source));
+    const boards = sources.filter(isPublicBoardSource);
+    let checked: string[] = [];
+    for (const source of lists) {
       try {
         const { run, sourceNotes, errors, traceError } = await fetchCompanySource(source.id, {
           database, fetchBatch: options.fetchBatch, traceDirectory: dataDir
@@ -73,6 +80,11 @@ export async function runPipelinePass(options: {
       } catch (error) {
         log(`${source.label}: ${error instanceof Error ? error.message : String(error)}`);
       }
+    }
+    if (boards.length) {
+      checked = (await checkPublicBoards(database, boards, {
+        log, traceDirectory: dataDir, fetchBatch: options.fetchBatch, fetcher: options.boardFetcher
+      })).checked;
     }
     const report = await (options.advance ?? advancePipeline)({ database, dataDir, settings, retryStopped: options.retryStopped });
     const name = (jobId: string) => describe(database, jobId);
@@ -96,7 +108,7 @@ export async function runPipelinePass(options: {
     }
     for (const error of report.errors) log(`  ${error}`);
     writeStatus(dataDir, {
-      startedAt, finishedAt: new Date().toISOString(), sources: sources.map((source) => source.label),
+      startedAt, finishedAt: new Date().toISOString(), sources: [...lists.map((source) => source.label), ...checked],
       submitted: report.submitted.map((entry) => ({ job: name(entry.jobId), jobId: entry.jobId, confirmation: entry.confirmation.slice(0, 300) })),
       held: report.held.map((entry) => ({ job: name(entry.jobId), jobId: entry.jobId, reasons: entry.reasons })),
       ruledOut: report.skipped.map((entry) => ({ job: name(entry.jobId), jobId: entry.jobId, reasons: entry.reasons })),

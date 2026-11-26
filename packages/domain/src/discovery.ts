@@ -18,7 +18,15 @@ export const discoverySourceSchema = z.object({
   rateLimitPerMinute: z.number().int().min(1).max(600),
   enabled: z.boolean(),
   createdAt: z.iso.datetime(),
-  lastFetchedAt: z.iso.datetime().nullable()
+  lastFetchedAt: z.iso.datetime().nullable(),
+  /** Where an imported board came from (a scout run), when it was imported, and the page that showed it (migration 0037). */
+  importedFrom: z.string().max(300).nullable(),
+  importedAt: z.iso.datetime().nullable(),
+  evidenceUrl: z.string().max(2_000).nullable(),
+  /** A public board's fetch health: consecutive failures, the last error, and when a pass may check it again. */
+  failureCount: z.number().int().min(0),
+  lastError: z.string().max(500).nullable(),
+  retryAfter: z.iso.datetime().nullable()
 });
 
 export const discoveredItemSchema = z.object({

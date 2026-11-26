@@ -19,6 +19,13 @@ type SourceRow = {
   enabled: number;
   created_at: string;
   last_fetched_at: string | null;
+  // Migration 0037; optional so a database opened read-only before it is applied still parses.
+  imported_from?: string | null;
+  imported_at?: string | null;
+  evidence_url?: string | null;
+  failure_count?: number;
+  last_error?: string | null;
+  retry_after?: string | null;
 };
 
 type RunRow = {
@@ -42,7 +49,13 @@ function parseSource(row: SourceRow): DiscoverySource {
     rateLimitPerMinute: row.rate_limit_per_minute,
     enabled: row.enabled === 1,
     createdAt: row.created_at,
-    lastFetchedAt: row.last_fetched_at
+    lastFetchedAt: row.last_fetched_at,
+    importedFrom: row.imported_from ?? null,
+    importedAt: row.imported_at ?? null,
+    evidenceUrl: row.evidence_url ?? null,
+    failureCount: row.failure_count ?? 0,
+    lastError: row.last_error ?? null,
+    retryAfter: row.retry_after ?? null
   });
 }
 
@@ -72,7 +85,13 @@ export function saveDiscoverySource(
     rateLimitPerMinute: input.rateLimitPerMinute ?? 30,
     enabled: true,
     createdAt: new Date().toISOString(),
-    lastFetchedAt: null
+    lastFetchedAt: null,
+    importedFrom: null,
+    importedAt: null,
+    evidenceUrl: null,
+    failureCount: 0,
+    lastError: null,
+    retryAfter: null
   });
   database.prepare(`
     INSERT INTO discovery_sources (id, kind, label, url, rate_limit_per_minute, enabled, created_at)
@@ -84,6 +103,62 @@ export function saveDiscoverySource(
 export function listDiscoverySources(database: DatabaseSync): DiscoverySource[] {
   const rows = database.prepare("SELECT * FROM discovery_sources ORDER BY created_at").all() as SourceRow[];
   return rows.map(parseSource);
+}
+
+/**
+ * Saves imported public boards in one transaction: every board is saved, or
+ * none is. Each records where it came from (migration 0037).
+ */
+export function saveImportedBoardSources(
+  database: DatabaseSync,
+  boards: ReadonlyArray<{ label: string; url: string; importedFrom: string; importedAt: string; evidenceUrl: string }>,
+  rateLimitPerMinute = 6
+): DiscoverySource[] {
+  const saved: DiscoverySource[] = [];
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    const insert = database.prepare(`
+      INSERT INTO discovery_sources
+        (id, kind, label, url, rate_limit_per_minute, enabled, created_at, imported_from, imported_at, evidence_url)
+      VALUES (?, 'company-page', ?, ?, ?, 1, ?, ?, ?, ?)
+    `);
+    for (const board of boards) {
+      const source = discoverySourceSchema.parse({
+        id: randomUUID(),
+        kind: "company-page",
+        label: board.label,
+        url: board.url,
+        rateLimitPerMinute,
+        enabled: true,
+        createdAt: board.importedAt,
+        lastFetchedAt: null,
+        importedFrom: board.importedFrom,
+        importedAt: board.importedAt,
+        evidenceUrl: board.evidenceUrl,
+        failureCount: 0,
+        lastError: null,
+        retryAfter: null
+      });
+      insert.run(source.id, source.label, source.url, source.rateLimitPerMinute, source.createdAt,
+        source.importedFrom, source.importedAt, source.evidenceUrl);
+      saved.push(source);
+    }
+    database.exec("COMMIT;");
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
+  return saved;
+}
+
+/** Records a public board's fetch health: failures in a row, the last error, and the earliest next pass check. */
+export function updateDiscoverySourceHealth(
+  database: DatabaseSync,
+  sourceId: string,
+  health: { failureCount: number; lastError: string | null; retryAfter: string | null }
+): void {
+  database.prepare("UPDATE discovery_sources SET failure_count = ?, last_error = ?, retry_after = ? WHERE id = ?")
+    .run(health.failureCount, health.lastError === null ? null : health.lastError.slice(0, 500), health.retryAfter, sourceId);
 }
 
 /** Reserve a source poll before network I/O, including attempts that fail. */

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { addCompanySource, readDoorbellState, savePostSubmitEvidence } from "@internship-agent/agent";
 import {
-  closeProfileDatabase, createDatabase, persistNormalizedPosting, resolveProfileDatabasePath, resolveProfileDataDirectory,
+  closeProfileDatabase, createDatabase, listDiscoverySources, persistNormalizedPosting, resolveProfileDatabasePath, resolveProfileDataDirectory,
   saveApplicationPackage, saveBrowserRun, setJobStatus, updateBrowserRun
 } from "@internship-agent/db";
 import type { BrowserPage } from "@internship-agent/browser";
@@ -209,6 +209,116 @@ describe("pipeline watcher pass", () => {
     expect(lines).toContainEqual(expect.stringMatching(/^  pursued on AI fit 86 .*: unverified Experience with Elixir$/));
     const status = JSON.parse(readFileSync(join(dataDir, "pipeline-status.json"), "utf8")) as { pursuedOnFit: unknown };
     expect(status.pursuedOnFit).toEqual([{ job: jobId, jobId, fit: 86, unverified: ["Experience with Elixir"] }]);
+  });
+
+  it("checks public boards four at a time, at most once per 6 hours, and backs failing boards off", async () => {
+    const dataDir = resolveProfileDataDirectory("real");
+    const seed = createDatabase(resolveProfileDatabasePath("real"));
+    seed.prepare("UPDATE discovery_sources SET enabled = 0 WHERE url LIKE 'https://github.com/%'").run();
+    const boards = [
+      addCompanySource("Alpha Freight", "https://boards.greenhouse.io/alpha", 6, seed),
+      addCompanySource("Bravo Analytics", "https://boards.greenhouse.io/bravo", 6, seed),
+      addCompanySource("Charlie Robotics", "https://jobs.lever.co/charlie", 6, seed),
+      addCompanySource("Delta Health", "https://jobs.ashbyhq.com/delta", 6, seed),
+      addCompanySource("Gone Systems", "https://boards.greenhouse.io/gone", 6, seed),
+      addCompanySource("Flaky Energy", "https://jobs.lever.co/flaky", 6, seed)
+    ];
+    seed.close();
+    const [alpha, bravo, charlie, delta, gone, flaky] = boards.map((board) => board.id);
+    const endpoint: Record<string, string> = {
+      [alpha!]: "https://boards-api.greenhouse.io/v1/boards/alpha/jobs?content=true",
+      [bravo!]: "https://boards-api.greenhouse.io/v1/boards/bravo/jobs?content=true",
+      [charlie!]: "https://api.lever.co/v0/postings/charlie?mode=json",
+      [delta!]: "https://api.ashbyhq.com/posting-api/job-board/delta",
+      [gone!]: "https://boards-api.greenhouse.io/v1/boards/gone/jobs?content=true",
+      [flaky!]: "https://api.lever.co/v0/postings/flaky?mode=json"
+    };
+    let requested: string[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const senior = (slug: string) => JSON.stringify({ jobs: [
+      { title: "Senior Engineer", absolute_url: `https://boards.greenhouse.io/${slug}/jobs/1`, content: "A fictional senior role." }
+    ] });
+    const boardFetcher = async (url: string) => {
+      requested.push(url);
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        if (url === endpoint[alpha!]) return new Response(senior("alpha"), { status: 200 });
+        if (url === endpoint[bravo!]) return new Response(senior("bravo"), { status: 200 });
+        if (url === endpoint[charlie!]) return new Response("[]", { status: 200 });
+        if (url === endpoint[delta!]) return new Response(JSON.stringify({ jobs: [] }), { status: 200 });
+        if (url === endpoint[gone!]) return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+        throw new TypeError("fetch failed");
+      } finally {
+        inFlight -= 1;
+      }
+    };
+    const advance = async (): Promise<PipelineReport> => ({
+      analyzed: [], prepared: [], started: [], stopped: [], waiting: [], held: [], skipped: [], submitted: [], errors: []
+    });
+    const pass = async () => {
+      requested = [];
+      const lines: string[] = [];
+      await runPipelinePass({ profile: "real", sourceIds: "all", log: (line) => lines.push(line), boardFetcher, advance });
+      return lines;
+    };
+    const withDatabase = <T>(read: (database: ReturnType<typeof createDatabase>) => T): T => {
+      const database = createDatabase(resolveProfileDatabasePath("real"));
+      try { return read(database); } finally { database.close(); }
+    };
+    const health = () => withDatabase((database) => new Map(listDiscoverySources(database).map((source) => [source.id, source])));
+    const moveFetches = (hoursAgo: number) => withDatabase((database) => {
+      database.prepare("UPDATE discovery_sources SET last_fetched_at = ? WHERE url NOT LIKE 'https://github.com/%'")
+        .run(new Date(Date.now() - hoursAgo * 3_600_000).toISOString());
+    });
+
+    const first = await pass();
+    const firstAt = Date.now();
+    expect(requested.slice().sort()).toEqual(Object.values(endpoint).sort());
+    expect(maxInFlight).toBeLessThanOrEqual(4);
+    expect(maxInFlight).toBeGreaterThanOrEqual(2);
+    expect(first, first.join("\n")).toContain("Public boards: checked 6 (2 failed), not due 0, backed off 0, left for a later pass 0.");
+    expect(first).toContain("Gone Systems: The public board answered 404.");
+    expect(first).toContain("Flaky Energy: fetch failed");
+    // Empty boards are not logged one by one.
+    expect(first.some((line) => line.startsWith("Alpha Freight:"))).toBe(false);
+    let sources = health();
+    expect(sources.get(gone!)).toMatchObject({ failureCount: 1 });
+    expect(sources.get(gone!)?.lastError).toContain("404");
+    expect(Math.abs(Date.parse(sources.get(gone!)!.retryAfter!) - (firstAt + 7 * 24 * 3_600_000))).toBeLessThan(60_000);
+    expect(sources.get(flaky!)).toMatchObject({ failureCount: 1, lastError: "fetch failed" });
+    expect(Math.abs(Date.parse(sources.get(flaky!)!.retryAfter!) - (firstAt + 12 * 3_600_000))).toBeLessThan(60_000);
+    for (const id of [alpha, bravo, charlie, delta]) expect(sources.get(id!)).toMatchObject({ failureCount: 0, retryAfter: null });
+    const traceFile = join(dataDir, "discovery-traces", readdirSync(join(dataDir, "discovery-traces"))[0]!);
+    const fetchLines = () => readFileSync(traceFile, "utf8").trim().split("\n")
+      .map((line) => JSON.parse(line) as { type: string }).filter((line) => line.type === "fetch");
+    expect(fetchLines()).toHaveLength(6);
+    const status = JSON.parse(readFileSync(join(dataDir, "pipeline-status.json"), "utf8")) as { sources: string[] };
+    expect(status.sources.slice().sort()).toEqual(boards.map((board) => board.label).sort());
+
+    // An hour later nothing is due: the healthy boards wait 6 hours, the failing ones are backed off.
+    moveFetches(1);
+    const second = await pass();
+    expect(requested).toEqual([]);
+    expect(second).toContain("Public boards: checked 0 (0 failed), not due 4, backed off 2, left for a later pass 0.");
+
+    // Seven hours later the healthy boards are due again; the failing ones are still backed off.
+    moveFetches(7);
+    await pass();
+    expect(requested.slice().sort()).toEqual([endpoint[alpha!], endpoint[bravo!], endpoint[charlie!], endpoint[delta!]].sort());
+
+    // Once its back-off ends, the failing board is retried alone and backed off twice as long.
+    withDatabase((database) => database.prepare("UPDATE discovery_sources SET retry_after = ? WHERE id = ?")
+      .run(new Date(Date.now() - 60_000).toISOString(), flaky!));
+    await pass();
+    const retriedAt = Date.now();
+    expect(requested).toEqual([endpoint[flaky!]]);
+    sources = health();
+    expect(sources.get(flaky!)?.failureCount).toBe(2);
+    expect(Math.abs(Date.parse(sources.get(flaky!)!.retryAfter!) - (retriedAt + 24 * 3_600_000))).toBeLessThan(60_000);
+    expect(sources.get(gone!)?.failureCount).toBe(1);
   });
 });
 

@@ -21,6 +21,7 @@ import {
   saveDiscoverySource,
   saveDiscoverySkips,
   startDiscoveryRun,
+  updateDiscoverySourceHealth,
   type DiscoveryRun
 } from "@internship-agent/db";
 import {
@@ -31,18 +32,19 @@ import {
   REQUIREMENT_LABELS_UNAVAILABLE,
   selectPromotion
 } from "@internship-agent/jobs";
-import { discoverySkipInputSchema, type DiscoveredItem, type JobPostingStatus } from "@internship-agent/domain";
+import { discoverySkipInputSchema, type DiscoveredItem, type DiscoverySource, type JobPostingStatus } from "@internship-agent/domain";
 
 import { ingestPosting } from "./job-ingestion-orchestrator";
 import { prepareApplication } from "./application-orchestrator";
 import { evaluateAndPersistMatch } from "./match-orchestrator";
-import { fetchPublicBoard, parsePublicBoardUrl } from "./public-board-source";
+import { fetchPublicBoard, parsePublicBoardUrl, PublicBoardError } from "./public-board-source";
+import { BOARD_CHECK_CONCURRENCY, BOARD_CHECKS_PER_PASS, boardRetryAfter, isPublicBoardSource, planBoardChecks } from "./board-polling";
 import { canonicalGitHubJobListUrl, fetchGitHubJobList, postingLinkKey } from "./github-job-list-source";
 import { pipelineSettings } from "./pipeline-orchestrator";
 import { fitTargetDecision, postingTargetDecision, targetTerm } from "./application-target";
 import { mapWithConcurrency, modelConcurrency } from "./concurrency";
 import { labelsPendingNotice } from "./requirement-relabel";
-import { openDiscoveryTrace, type DiscoveryRowEvent, type DiscoveryTrace } from "./discovery-trace";
+import { openDiscoveryTrace, type DiscoveryFetchEvent, type DiscoveryRowEvent, type DiscoveryTrace } from "./discovery-trace";
 import type { ModelProvider } from "./model/provider";
 
 export const MAX_BATCH_ITEMS = 100;
@@ -71,7 +73,15 @@ const LIVE_STATUSES: ReadonlySet<JobPostingStatus> = new Set([
 ]);
 
 type FetchedBatch = { items: DiscoveredItem[]; notes: string[] };
-type FetchContext = { knownLinkKeys: ReadonlySet<string>; onRow?: (event: DiscoveryRowEvent) => void };
+type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
+type FetchContext = {
+  knownLinkKeys: ReadonlySet<string>;
+  onRow?: (event: DiscoveryRowEvent) => void;
+  /** Public boards report each request (endpoint, status, counts) for the discovery trace. */
+  onFetch?: (event: DiscoveryFetchEvent) => void;
+  /** Tests inject the public board fetch; production uses fetch. */
+  fetcher?: Fetcher;
+};
 export type FetchBatch = (
   source: { label: string; url: string },
   context: FetchContext
@@ -81,7 +91,9 @@ async function defaultFetchBatch(source: { label: string; url: string }, context
   if (new URL(source.url).hostname === "github.com") {
     return fetchGitHubJobList(source, fetch, { knownLinkKeys: context.knownLinkKeys, onRow: context.onRow });
   }
-  return { items: await fetchPublicBoard(source), notes: [] };
+  const items = await fetchPublicBoard(source, context.fetcher ?? fetch, { onRow: context.onRow, onFetch: context.onFetch });
+  // A board with no internship postings right now is a completed, empty check, not an error.
+  return { items, notes: items.length ? [] : ["No internship postings on this board right now."] };
 }
 
 /**
@@ -116,21 +128,43 @@ export async function fetchCompanySource(
     provider?: ModelProvider;
     /** The workspace data directory; when given, the check writes its discovery trace there. */
     traceDirectory?: string;
+    /** Tests inject the public board fetch; production uses fetch. */
+    fetcher?: Fetcher;
+    /** Runs the ingest step; a pass checking boards concurrently passes a gate that runs one ingest at a time. */
+    ingestGate?: <T>(task: () => Promise<T>) => Promise<T>;
   } = {}
 ): Promise<BatchReport> {
   const database = options.database ?? getDatabase();
   const source = reserveDiscoveryFetch(database, sourceId);
   if (!source.url) throw new Error("The company source has no URL to fetch.");
-  const trace = options.traceDirectory ? openDiscoveryTrace(options.traceDirectory, { label: source.label, url: source.url }) : null;
+  const board = isPublicBoardSource(source);
+  // A board writes no quiet rows, so its trace need not read the day's file to decide.
+  const trace = options.traceDirectory
+    ? openDiscoveryTrace(options.traceDirectory, { label: source.label, url: source.url }, board ? { full: false } : {})
+    : null;
   try {
     const fetchBatch = options.fetchBatch ?? defaultFetchBatch;
     // Every current posting, whatever its status, is known; its link is not re-fetched.
-    const knownLinkKeys = new Set(listCurrentPostingIdentities(database)
+    // The board path never reads these keys, so a board check does not load them.
+    const knownLinkKeys = board ? new Set<string>() : new Set(listCurrentPostingIdentities(database)
       .flatMap((posting) => postingLinkKey(posting.sourceUrl) ?? []));
-    const fetched = await fetchBatch(
-      { label: source.label, url: source.url },
-      { knownLinkKeys, ...(trace ? { onRow: (event: DiscoveryRowEvent) => trace.row(event) } : {}) }
-    );
+    let fetched: Awaited<ReturnType<FetchBatch>>;
+    try {
+      fetched = await fetchBatch(
+        { label: source.label, url: source.url },
+        {
+          knownLinkKeys,
+          ...(options.fetcher ? { fetcher: options.fetcher } : {}),
+          ...(trace ? { onRow: (event: DiscoveryRowEvent) => trace.row(event), onFetch: (event: DiscoveryFetchEvent) => trace.fetch(event) } : {})
+        }
+      );
+    } catch (error) {
+      if (board) recordBoardFailure(database, source, error);
+      throw error;
+    }
+    if (board && (source.failureCount > 0 || source.lastError || source.retryAfter)) {
+      updateDiscoverySourceHealth(database, source.id, { failureCount: 0, lastError: null, retryAfter: null });
+    }
     const { items, notes } = Array.isArray(fetched) ? { items: fetched, notes: [] } : fetched;
     for (const item of items.slice(MAX_BATCH_ITEMS)) {
       trace?.ingest({
@@ -138,13 +172,78 @@ export async function fetchCompanySource(
         decision: "not-reached", reason: "past this check's batch limit of " + MAX_BATCH_ITEMS + " postings"
       });
     }
-    const report = await processDiscoveredItems(database, sourceId, items.slice(0, MAX_BATCH_ITEMS), [], { ...options, trace }, notes);
+    const ingest = options.ingestGate ?? (<T>(task: () => Promise<T>) => task());
+    const report = await ingest(() => processDiscoveredItems(database, sourceId, items.slice(0, MAX_BATCH_ITEMS), [], { ...options, trace }, notes));
     trace?.end();
     return { ...report, traceError: trace?.writeError ?? null };
   } catch (error) {
     trace?.end({ error: error instanceof Error ? error.message : String(error) });
     throw error;
   }
+}
+
+/** Marks a failed board fetch and backs the board off; it never masks the fetch's own error. */
+function recordBoardFailure(database: DatabaseSync, source: DiscoverySource, error: unknown): void {
+  try {
+    const failureCount = source.failureCount + 1;
+    const status = error instanceof PublicBoardError ? error.status : null;
+    updateDiscoverySourceHealth(database, source.id, {
+      failureCount,
+      lastError: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+      retryAfter: boardRetryAfter(failureCount, status, new Date())
+    });
+  } catch { /* the fetch error is what the caller reports */ }
+}
+
+/**
+ * A pass's public boards: only those due (see planBoardChecks), at most
+ * `concurrency` fetches in flight, and one board's ingest at a time so the
+ * cross-board duplicate checks stay correct. Logs only boards that stored,
+ * prepared, or failed, then one summary line.
+ */
+export async function checkPublicBoards(
+  database: DatabaseSync,
+  boards: readonly DiscoverySource[],
+  options: {
+    log: (line: string) => void;
+    traceDirectory?: string;
+    fetchBatch?: FetchBatch;
+    fetcher?: Fetcher;
+    now?: Date;
+    limit?: number;
+    concurrency?: number;
+  }
+): Promise<{ checked: string[]; failed: number; notDue: number; backedOff: number; deferred: number }> {
+  const { log } = options;
+  const plan = planBoardChecks(boards, options.now ?? new Date(), options.limit ?? BOARD_CHECKS_PER_PASS);
+  let tail: Promise<unknown> = Promise.resolve();
+  const gate = <T>(task: () => Promise<T>): Promise<T> => {
+    const run = tail.then(task);
+    tail = run.catch(() => undefined);
+    return run;
+  };
+  let failed = 0;
+  await mapWithConcurrency(plan.due, options.concurrency ?? BOARD_CHECK_CONCURRENCY, async (source) => {
+    try {
+      const { run, sourceNotes, errors, traceError } = await fetchCompanySource(source.id, {
+        database, fetchBatch: options.fetchBatch, fetcher: options.fetcher, traceDirectory: options.traceDirectory, ingestGate: gate
+      });
+      if (run.ingested || run.promoted || errors.length) {
+        log(`${source.label}: fetched ${run.fetched}, duplicates ${run.deduped}, new ${run.ingested}, prepared ${run.promoted}.` +
+          (sourceNotes.length ? " " + sourceNotes.join(" ") : "") + (errors.length ? ` ${errors.length} error(s).` : ""));
+      }
+      if (traceError) log(`${source.label}: discovery trace not written (${traceError}).`);
+    } catch (error) {
+      failed += 1;
+      log(`${source.label}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+  log(`Public boards: checked ${plan.due.length} (${failed} failed), not due ${plan.notDue.length}, ` +
+    `backed off ${plan.backedOff.length}, left for a later pass ${plan.deferred.length}.`);
+  return {
+    checked: plan.due.map((source) => source.label),
+    failed, notDue: plan.notDue.length, backedOff: plan.backedOff.length, deferred: plan.deferred.length
+  };
 }
 
 export function addCompanySource(
@@ -206,6 +305,11 @@ async function processDiscoveredItems(
     throw new Error(errors[0] ?? "The batch held no usable postings.");
   }
   const run = startDiscoveryRun(database, sourceId);
+  if (items.length === 0) {
+    // An empty check (a board with no internship postings) loads no posting identities.
+    const finished = finishDiscoveryRun(database, run.id, { fetched: 0, deduped: 0, ingested: 0, analyzed: 0, promoted: 0 });
+    return { run: finished, jobIds: [], promotedJobIds: [], skippedJobIds: [], feedbackSkippedJobIds: [], errors, sourceNotes };
+  }
   const { unique, duplicates: batchDuplicates } = dedupeItems(items, (item) => [
     `posting:${postingDedupeKey(item.companyName, item.title, item.text)}`,
     ...(item.sourceUrl ? [`url:${item.sourceUrl}`] : [])

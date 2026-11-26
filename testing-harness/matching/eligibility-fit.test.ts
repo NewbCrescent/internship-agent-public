@@ -311,6 +311,10 @@ describe("deterministic eligibility", () => {
     expect(evaluateJobMatch(titled, enabled).verdict).toBe("NOT_QUALIFIED");
     expect(evaluateJobMatch(posting({ title: "Master's Research Intern" }), enabled).verdict).toBe("NOT_QUALIFIED");
     expect(evaluateJobMatch(posting({ title: "Master the Product Intern" }), enabled).verdict).toBe("QUALIFIED");
+    // A title that also names a bachelor's level is open to undergraduates (2026-11-26: "I am fine with research summer").
+    expect(evaluateJobMatch(posting({ title: "Research Intern (BS/MS/PhD)" }), enabled).verdict).toBe("QUALIFIED");
+    expect(evaluateJobMatch(posting({ title: "Software Engineering Intern (BS/MS)" }), enabled).verdict).toBe("QUALIFIED");
+    expect(evaluateJobMatch(posting({ title: "Research Intern (MS/PhD)" }), enabled).verdict).toBe("NOT_QUALIFIED");
 
     const bachelorsAlternative = posting({ requirements: [{ ...requirement, text: "Must be pursuing a Bachelor's or Master's degree in computer science." }] });
     expect(evaluateJobMatch(bachelorsAlternative, enabled).verdict).toBe("QUALIFIED");
