@@ -1,4 +1,5 @@
-import { atsKindNeedsApproval, type AtsClassification, type AtsKind, type AtsSignal } from "@internship-agent/domain";
+import { atsKindNeedsApproval, atsKindOwnsUrl, type AtsClassification, type AtsKind, type AtsSignal } from "@internship-agent/domain";
+import { adapterProfileFor } from "./adapters";
 
 type ScoredKind = { kind: AtsKind; confidence: number; signals: AtsSignal[] };
 
@@ -13,7 +14,9 @@ type AdapterSignals = {
  * Deterministic ATS signal tables. Each adapter declares the URL, title,
  * and body patterns that identify it; classification scores all three and
  * picks the strongest. Weights keep a bare URL match from deciding alone:
- * a confident call needs corroboration from the page itself.
+ * a confident call needs corroboration from the page itself. A kind reaches
+ * the automatic band only on its own site (atsKindOwnsUrl), and Workday off
+ * its own host is not Workday at all (Track 38).
  */
 const ADAPTERS: AdapterSignals[] = [
   {
@@ -29,9 +32,10 @@ const ADAPTERS: AdapterSignals[] = [
     body: [/lever\.co/i, /lever-/i, /posting-requirements/i]
   },
   {
+    // A careers title and a bare "workday" in a URL say nothing about Workday (Track 38: MITRE's Phenom page).
     kind: "workday",
-    url: [/myworkdayjobs\.com/i, /workday/i, /\.wd\d+\.myworkdayjobs/i],
-    title: [/workday/i, /careers/i],
+    url: [/\.myworkdayjobs\.com/i, /\.myworkdaysite\.com/i, /\.wd\d+\.myworkdayjobs/i],
+    title: [/workday/i],
     body: [/workday/i, /wd-\d+/i, /candidate home/i]
   },
   {
@@ -104,6 +108,8 @@ const ADAPTERS: AdapterSignals[] = [
 export const ATS_AUTO_THRESHOLD = 0.6;
 /** At or above this the candidate confirms; below it the generic flow waits. */
 export const ATS_CONFIRM_THRESHOLD = 0.3;
+/** A kind's ceiling on a page not on its own site (atsKindOwnsUrl): below ATS_AUTO_THRESHOLD, so the candidate confirms it. */
+export const ATS_UNOWNED_CEILING = 0.55;
 
 export function classifyAts(url: string, title: string, bodyText: string): AtsClassification {
   const scored: ScoredKind[] = ADAPTERS.map((adapter) => {
@@ -118,7 +124,10 @@ export function classifyAts(url: string, title: string, bodyText: string): AtsCl
     for (const pattern of adapter.body) {
       if (pattern.test(body)) signals.push({ source: "body", pattern: String(pattern), weight: 0.4 });
     }
-    const confidence = Math.min(1, signals.reduce((total, signal) => total + signal.weight, 0));
+    let confidence = Math.min(1, signals.reduce((total, signal) => total + signal.weight, 0));
+    // Workday is only ever walked on its own host, by its own adapter; elsewhere a mention of Workday is not Workday.
+    if (adapter.kind === "workday" && !atsKindOwnsUrl("workday", url)) return { kind: adapter.kind, confidence: 0, signals: [] };
+    if (!atsKindOwnsUrl(adapter.kind, url)) confidence = Math.min(confidence, ATS_UNOWNED_CEILING);
     return { kind: adapter.kind, confidence, signals };
   });
   scored.sort((a, b) => b.confidence - a.confidence);
@@ -135,6 +144,9 @@ export function atsFlowFor(classification: AtsClassification): AtsFlow {
   if (classification.kind === "unknown") return "generic";
   // Recognized for display only: the candidate approves each run (domain ats.ts).
   if (atsKindNeedsApproval(classification.kind)) return "confirm";
+  // A several-page portal (Workday) is walked only by its own adapter on its own host (browser-orchestrator routes
+  // parseWorkdayUrl runs there); the generic filler never proceeds on one by itself (Track 38).
+  if (adapterProfileFor(classification.kind)?.multipage) return "confirm";
   if (classification.confidence >= ATS_AUTO_THRESHOLD) return "auto";
   return "confirm";
 }

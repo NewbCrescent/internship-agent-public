@@ -37,6 +37,7 @@ import {
   SubmissionNeedsInput,
   SubmissionRefused,
   SubmissionUnconfirmed,
+  SUBMIT_TARGET_FIELD,
   submitEvidenceRoot,
   type BrowserPage,
   type CoveringDialog,
@@ -624,6 +625,47 @@ describe("browser run lifecycle", () => {
     database.close();
   });
 
+  /** Starts an approved run on the default Handshake page, then submits through `page`; returns what the submit threw. */
+  async function heldSubmit(page: BrowserPage) {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = approvedJobId(database);
+    const started = await startBrowserRun(jobId, "https://app.joinhandshake.com/apply/900001", { database, dataDir, openPage: async () => fakePage() });
+    expect(started.run.status).toBe("awaiting-approval");
+    approveRunSubmission(started.run.id, undefined, { database });
+    const failure = await submitBrowserRun(started.run.id, { database, dataDir, openPage: async () => page }).catch((error: unknown) => error);
+    return { database, dataDir, jobId, failure };
+  }
+
+  function expectSubmitTargetHold(held: Awaited<ReturnType<typeof heldSubmit>>, flag: { clicked: boolean }, message: string) {
+    const { database, dataDir, jobId, failure } = held;
+    expect(failure).toBeInstanceOf(SubmissionHeld);
+    expect(String((failure as Error).message)).toContain(message);
+    expect(flag.clicked).toBe(false);
+    const run = getBrowserRuns(jobId, database)[0]!;
+    expect(run.status).toBe("paused-needs-input");
+    expect(run.submissionApprovedAt).toBeNull();
+    expect(run.pauses).toEqual(expect.arrayContaining([expect.objectContaining({ fieldId: SUBMIT_TARGET_FIELD, safeguard: true, status: "open", label: "Submit button" })]));
+    expect(run.decisions.find((decision) => decision.fieldId === SUBMIT_TARGET_FIELD)).toMatchObject({ action: "pause" });
+    expect(existsSync(join(dataDir, "applications", jobId, "submit-evidence"))).toBe(false);
+    expect(jobStatus(database, jobId)).not.toBe("SUBMITTED");
+    database.close();
+  }
+
+  it("holds a submit whose page still shows a step's Next and no submit control: nothing is clicked and the approval is withdrawn (Track 38)", async () => {
+    const flag = { clicked: false };
+    const page = Object.assign(fakePage({ submitted: flag }), { stepButtons: async () => ({ submit: false, next: "Next" }) });
+    expectSubmitTargetHold(await heldSubmit(page), flag, `still shows a "Next" button and no submit control`);
+  });
+
+  it("holds a submit when no submit control of the form's own is shown: nothing is clicked and the approval is withdrawn (Track 38)", async () => {
+    const flag = { clicked: false };
+    const page = { ...fakePage({ submitted: flag }), submitControlShown: async () => false };
+    const held = await heldSubmit(page);
+    expect(String((held.failure as Error).message).startsWith("No submit control of the application form itself")).toBe(true);
+    expectSubmitTargetHold(held, flag, "a cookie banner's button or a step's \"Next\" is never clicked as submit");
+  });
+
   it("chooses an answered list option on continue, and reopens an answer that is not among the options", async () => {
     const controls: RawControl[] = [
       { tag: "select", id: "team", label: "Which team do you prefer?", required: true, options: ["Platform", "Data"] },
@@ -710,6 +752,9 @@ const FILE_CONTROLS: RawControl[] = [
   { tag: "input", type: "file", id: "resume", label: "Resume", required: true },
   { tag: "button", label: "Submit application" }
 ];
+
+/** A fictional Phenom-style apply step on an employer host (Track 38; MITRE's was taken for Workday). */
+const PHENOM_STEPS_URL = "https://careers.fixturelabs.example/us/en/apply?jobSeqNo=R300003&step=1&stepname=personalInformation";
 
 function setApplicationType(database: DatabaseSync, jobId: string, type: "HANDSHAKE_INTERNAL" | "EXTERNAL_ATS") {
   database.prepare("UPDATE jobs SET application_type = ? WHERE id = ?").run(type, jobId);
@@ -1778,6 +1823,78 @@ describe("retrying a browser run", () => {
       expect(events.some((event) => event.detail?.startsWith(AUTO_SUBMIT_EVENT + ": summer 2027 term, software or adjacent role, US location, AI fit 86"))).toBe(true);
       expect(events.map((event) => event.to_status)).not.toContain("APPROVED");
       database.close();
+    });
+
+    it("never takes a Phenom-shaped several-page form that mentions Workday for Workday, never approves or clicks it (Track 38)", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDataDir();
+      const jobId = approvedJobId(database, "qualified");
+      setApplicationType(database, jobId, "EXTERNAL_ATS");
+      strongFit(database, jobId);
+      const flag = { clicked: false };
+      const pages: Array<ReturnType<typeof fakePage>> = [];
+      const report = await advancePipeline({
+        database, dataDir, settings: policy(), voiceDrafter: null,
+        openPage: async () => {
+          const page = fakePage({
+            url: PHENOM_STEPS_URL,
+            title: "Applying for a job | Fixture Labs Careers",
+            body: "My Information\nMy experience\nApplication Questions\nReview\nFor Fixture Labs internal employees, please submit your application internally directly through Workday.\nNext",
+            // Fields the fixture's saved facts answer, so only the classification decides (before Track 38 it was submitted).
+            controls: [
+              { tag: "input", type: "text", id: "q1", label: "What is your available start date?", required: true },
+              { tag: "input", type: "text", id: "q2", label: "Favorite color?", required: false },
+              { tag: "button", label: "Next" }
+            ],
+            submitted: flag
+          });
+          pages.push(page);
+          return Object.assign(page, { stepButtons: async () => ({ submit: false, next: "Next" }) });
+        }
+      });
+      expect(report.submitted).toEqual([]);
+      expect(flag.clicked).toBe(false);
+      expect(pages.every((page) => page.filled.size === 0)).toBe(true);
+      expect(getBrowserRuns(jobId, database)).toEqual([]);
+      expect(report.stopped).toEqual([{ jobId, reason: expect.stringContaining("continues over several pages") }]);
+      expect(details(database, jobId).some((event) => event.detail?.startsWith(AUTO_SUBMIT_EVENT))).toBe(false);
+      database.close();
+    });
+
+    it("holds an auto-submit whose page is not on the recognized kind's own site, typing and clicking nothing (Track 38)", async () => {
+      const GREENHOUSE_URL = "https://job-boards.greenhouse.io/fixturelabs/jobs/1";
+      const greenhouse = () => fakePage({ url: GREENHOUSE_URL, title: "Job Application for Intern at Fixture Labs", body: "Powered by Greenhouse" });
+      for (const onSite of [false, true]) {
+        const database = disposableDatabase();
+        const dataDir = disposableDataDir();
+        const jobId = approvedJobId(database, "qualified");
+        strongFit(database, jobId);
+        const flag = { clicked: false };
+        const submitPage = fakePage({ url: onSite ? GREENHOUSE_URL : "https://careers.fixturelabs.example/apply", submitted: flag });
+        let opens = 0;
+        const report = await advancePipeline({
+          database, dataDir, settings: policy(), voiceDrafter: null,
+          openPage: async () => { opens += 1; return opens === 1 ? greenhouse() : submitPage; }
+        });
+        const run = getBrowserRuns(jobId, database)[0]!;
+        // The run is recognized on Greenhouse's own page, but its recorded address is the posting's, off Greenhouse's site.
+        expect(run.atsKind).toBe("greenhouse");
+        if (onSite) {
+          // Positive control: the same run submitted through Greenhouse's own page is sent.
+          expect(report.submitted).toEqual([{ jobId, confirmation: expect.stringContaining("application was received") }]);
+          expect(flag.clicked).toBe(true);
+        } else {
+          expect(report.submitted).toEqual([]);
+          expect(report.held).toEqual([{ jobId, reasons: [expect.stringContaining("is not on Greenhouse's own site")] }]);
+          expect(flag.clicked).toBe(false);
+          expect(submitPage.filled.size).toBe(0);
+          expect(run.status).toBe("paused-needs-input");
+          expect(run.submissionApprovedAt).toBeNull();
+          expect(run.pauses).toEqual(expect.arrayContaining([expect.objectContaining({ fieldId: SUBMIT_TARGET_FIELD, safeguard: true, status: "open" })]));
+          expect(jobStatus(database, jobId)).not.toBe("SUBMITTED");
+        }
+        database.close();
+      }
     });
 
     it("submits a clean run with the uploaded resume and never prints the tailored one", async () => {
@@ -3449,6 +3566,7 @@ describe("post-submit outcomes", () => {
     // Fictional codes; the step's wording follows third-party descriptions, not a capture.
     const CODE = "K7QPZXMW";
     const OTHER_CODE = "R4TV9BNC";
+    // Automatic submits start on this Greenhouse address too: the policy submits only on the recognized kind's own site (Track 38).
     const CODE_STEP_URL = "https://job-boards.greenhouse.io/fixturerobotics/jobs/1000001";
     const STEP_TEXT = "Robotics Software Intern. We sent an 8-character security code to your email address. Enter it below, then submit your application again.";
     const codeWait = { pollMs: 1, timeoutMs: 50, sleep: async () => undefined };
@@ -3627,7 +3745,7 @@ describe("post-submit outcomes", () => {
       const { result: report, calls } = await withConsoleSpy(() => advancePipeline({
         database, dataDir, settings: automatic, voiceDrafter: null, submitWait: wait,
         securityCodeMailbox: fakeMailbox([securityMail(companyOf(database, jobId))]), securityCodeWait: codeWait,
-        openPage: async () => { opens += 1; return opens === 1 ? fakePage() : step.page; }
+        openPage: async () => { opens += 1; return opens === 1 ? fakePage({ url: CODE_STEP_URL }) : step.page; }
       }));
       expect(report.submitted).toEqual([{ jobId, confirmation: expect.stringContaining("Thank you for applying") }]);
       expect(step.entry).toMatchObject({ calls: 1, matched: true });
@@ -3645,7 +3763,7 @@ describe("post-submit outcomes", () => {
       const { result: report, calls } = await withConsoleSpy(() => advancePipeline({
         database, dataDir, settings: automatic, voiceDrafter: null, submitWait: wait,
         securityCodeMailbox: fakeMailbox([securityMail(companyOf(database, jobId))]), securityCodeWait: codeWait,
-        openPage: async () => { opens += 1; return opens === 1 ? fakePage() : step.page; }
+        openPage: async () => { opens += 1; return opens === 1 ? fakePage({ url: CODE_STEP_URL }) : step.page; }
       }));
       expect(report.submitted).toEqual([]);
       expect(step.entry).toMatchObject({ calls: 1, matched: true });

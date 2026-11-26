@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Applying for a job | Fixture Labs Careers</title>
+  <style>
+    .osano-cm-dialog { position: fixed; left: 0; right: 0; bottom: 0; min-height: 80px; padding: 16px; background: #fff; border-top: 1px solid #333; z-index: 10; }
+    .osano-cm-dialog--hidden { visibility: hidden; }
+    .osano-cm-button { margin-right: 8px; padding: 8px 16px; }
+  </style>
+</head>
+<body>
+  <!--
+    A synthetic Phenom-style apply step 1 ("Fixture Labs", job R300003) behind an Osano-style cookie banner.
+    DERIVED from the 2026-11-25 read-only capture of a live Phenom apply step 1 and its Osano banner (Track 38),
+    structure only: the banner comes first in body, its three buttons carry no type attribute (so each reports
+    type "submit"), a dismissed banner is hidden with visibility:hidden and keeps its box (an assumption that
+    matches the live hidden info dialog), the step's only button is an explicit type="submit" "Next", and the
+    page says internal employees apply "through Workday". Every name, host, and id is fictional.
+    `?banner=0` removes the banner on load.
+  -->
+  <div class="osano-cm-window">
+    <div class="osano-cm-window__dialog osano-cm-dialog osano-cm-dialog--position_bottom osano-cm-dialog--type_bar" role="dialog" aria-label="Cookie Consent Banner">
+      <div class="osano-cm-dialog__content osano-cm-content">This website uses cookies.</div>
+      <div class="osano-cm-dialog__buttons osano-cm-buttons">
+        <button class="osano-cm-accept osano-cm-buttons__button osano-cm-button osano-cm-button--type_accept">Accept</button>
+        <button class="osano-cm-deny osano-cm-buttons__button osano-cm-button osano-cm-button--type_deny">Deny Non-Essential</button>
+        <button class="osano-cm-manage osano-cm-buttons__button osano-cm-button osano-cm-button--type_manage">Manage Preferences</button>
+      </div>
+    </div>
+  </div>
+  <header>
+    <nav><button class="subnav-dropdown">Career Paths</button></nav>
+  </header>
+  <main>
+    <h1>You are applying for - Robotics Intern (R300003)</h1>
+    <ol class="steps">
+      <li>My Information</li>
+      <li>My experience</li>
+      <li>Application Questions</li>
+      <li>Additional application questions</li>
+      <li>Voluntary disclosures</li>
+      <li>Review</li>
+    </ol>
+    <p>For Fixture Labs internal employees, please submit your application internally directly through Workday.</p>
+    <button type="button" class="upload-resume-btn btn primary-button">Upload Resume</button>
+    <form class="rjsf" id="application">
+      <div class="form-group field field-string">
+        <label class="control-label" for="cntryFields.firstName">First Name</label>
+        <div><input type="text" class="form-control" id="cntryFields.firstName" required></div>
+      </div>
+      <div class="form-group field field-string">
+        <label class="control-label" for="cntryFields.lastName">Last Name</label>
+        <div><input type="text" class="form-control" id="cntryFields.lastName" required></div>
+      </div>
+      <div class="form-group field field-string">
+        <label class="control-label" for="email">Email Address</label>
+        <div><input type="text" class="form-control" id="email" name="email" required></div>
+      </div>
+      <div class="navigation personalInformation-step">
+        <button type="submit" id="next" class="btn btn-navigate btn-next">Next</button>
+      </div>
+    </form>
+  </main>
+  <script>
+    window.fixture = { accepted: false, denied: false, next: false };
+    if (new URL(location.href).searchParams.get("banner") === "0") document.querySelector(".osano-cm-window")?.remove();
+    const dialog = document.querySelector(".osano-cm-dialog");
+    document.querySelector(".osano-cm-accept")?.addEventListener("click", () => {
+      window.fixture.accepted = true;
+      dialog.classList.add("osano-cm-dialog--hidden");
+    });
+    document.querySelector(".osano-cm-deny")?.addEventListener("click", () => {
+      window.fixture.denied = true;
+      dialog.classList.add("osano-cm-dialog--hidden");
+    });
+    document.getElementById("application").addEventListener("submit", (event) => {
+      event.preventDefault();
+      window.fixture.next = true;
+    });
+  </script>
+</body>
+</html>

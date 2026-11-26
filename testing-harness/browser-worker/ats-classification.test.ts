@@ -4,10 +4,12 @@ import {
   adapterProfileFor,
   adoptablePopup,
   applicationWallReason,
+  ATS_UNOWNED_CEILING,
   atsFlowFor,
   chooseApplyEntry,
   chooseConsentControl,
   chooseNavigationEntry,
+  claimedSiteHoldReason,
   classifyAts,
   classifyFieldRole,
   closedPostingNotice,
@@ -19,12 +21,13 @@ import {
   planAutofill,
   recognizeForm,
   siteWallReason,
+  submitTargetHoldReason,
   type ApplyEntryCandidate,
   type ConsentCandidate,
   type NavigationEntryCandidate,
   type RawControl
 } from "@internship-agent/browser";
-import { ATS_KINDS_NEEDING_APPROVAL, type BrowserField } from "@internship-agent/domain";
+import { ATS_KINDS_NEEDING_APPROVAL, atsKindOwnsUrl, type BrowserField } from "@internship-agent/domain";
 
 describe("ATS classification", () => {
   it("recognizes Greenhouse, Lever, Workday, and Handshake patterns", () => {
@@ -460,5 +463,80 @@ describe("canonical field roles", () => {
     });
     expect(plan.decisions[0]?.action).toBe("pause");
     expect(plan.pauses[0]?.sensitive).toBe(true);
+  });
+});
+
+describe("site ownership (Track 38)", () => {
+  const PHENOM_STEPS_URL = "https://careers.fixturelabs.example/us/en/apply?jobSeqNo=R300003&step=1&stepname=personalInformation";
+
+  it("never takes a Phenom-shaped step that mentions Workday on an employer host for Workday", () => {
+    const classification = classifyAts(
+      PHENOM_STEPS_URL,
+      "Applying for a job | Fixture Labs Careers",
+      "My Information\nMy experience\nApplication Questions\nReview\nFor Fixture Labs internal employees, please submit your application internally directly through Workday.\nNext"
+    );
+    expect(classification.kind).toBe("unknown");
+    expect(atsFlowFor(classification)).toBe("generic");
+  });
+
+  it("drops Workday's weak URL word and careers-title signals", () => {
+    expect(classifyAts("https://careers.example.com/jobs/1?src=workday", "Careers", "Apply").kind).not.toBe("workday");
+    expect(classifyAts("https://careers.example.com/jobs/1", "Careers at Example", "Candidate Home").kind).not.toBe("workday");
+    const own = classifyAts("https://fixture.wd5.myworkdayjobs.com/en-US/careers/job/Intern_R1", "Intern - Workday", "Candidate Home");
+    expect(own.kind).toBe("workday");
+    expect(own.confidence).toBe(1);
+  });
+
+  it("keeps a kind below the automatic band off its own site unless it carries its embed marker", () => {
+    const offSite = classifyAts("https://careers.fixture.example/jobs/1", "Job Application for Intern at Fixture", "Powered by Greenhouse boards.greenhouse");
+    expect(offSite.kind).toBe("greenhouse");
+    expect(offSite.confidence).toBeLessThanOrEqual(ATS_UNOWNED_CEILING);
+    expect(atsFlowFor(offSite)).toBe("confirm");
+    const embedded = classifyAts("https://careers.fixture.example/jobs/1?gh_jid=1", "Job Application for Intern at Fixture", "Powered by Greenhouse boards.greenhouse");
+    expect(embedded.kind).toBe("greenhouse");
+    expect(embedded.confidence).toBeGreaterThanOrEqual(0.6);
+    expect(atsFlowFor(embedded)).toBe("auto");
+  });
+
+  it("never lets a several-page kind proceed by itself in the generic flow", () => {
+    expect(atsFlowFor({ kind: "workday", confidence: 1, signals: [] })).toBe("confirm");
+  });
+
+  it("tells each kind's own site from any other", () => {
+    const cases: Array<[string, string, boolean]> = [
+      ["workday", "https://fixture.wd5.myworkdayjobs.com/en-US/careers", true],
+      ["workday", "https://x.myworkdaysite.com/recruiting/fixture", true],
+      ["workday", PHENOM_STEPS_URL, false],
+      ["greenhouse", "https://job-boards.greenhouse.io/fixture/jobs/1", true],
+      ["greenhouse", "https://careers.fixture.example/jobs?gh_jid=123", true],
+      ["greenhouse", "https://careers.fixture.example/jobs/123", false],
+      ["ashby", "https://careers.fixture.example/jobs?ashby_jid=abc", true],
+      ["dover", "https://app.dover.io/apply/job/1", true],
+      ["dover", "https://jobs.dover.com/job/1", true],
+      ["dover", "https://dover.com/careers", false],
+      ["dover", "https://andover.io/apply", false],
+      ["handshake", "https://app.joinhandshake.com/apply/1", true],
+      ["unknown", "https://app.joinhandshake.com/apply/1", false],
+      ["workday", "javascript:alert(1)//myworkdayjobs.com", false],
+      ["workday", "not a url", false]
+    ];
+    for (const [kind, url, owned] of cases) expect(atsKindOwnsUrl(kind, url), `${kind} ${url}`).toBe(owned);
+  });
+
+  it("holds a submit on a page not at its last step or with no form-owned submit control", () => {
+    expect(submitTargetHoldReason({ url: PHENOM_STEPS_URL, submitShown: true, stepButtons: { submit: false, next: "Next" } }))
+      .toMatch(/^The application at careers\.fixturelabs\.example still shows a "Next" button/);
+    expect(submitTargetHoldReason({ url: PHENOM_STEPS_URL, submitShown: false, stepButtons: null }))
+      .toMatch(/^No submit control of the application form itself/);
+    expect(submitTargetHoldReason({ url: PHENOM_STEPS_URL, submitShown: true, stepButtons: { submit: true, next: "Next" } })).toBeNull();
+    expect(submitTargetHoldReason({ url: PHENOM_STEPS_URL, submitShown: null, stepButtons: null })).toBeNull();
+  });
+
+  it("holds a policy submit whose page and recorded address are off the recognized kind's site", () => {
+    const offSite = "https://careers.fixturelabs.example/us/en/apply";
+    expect(claimedSiteHoldReason({ atsKind: "workday", pageUrl: offSite, runUrl: offSite })).toContain("is not on Workday's own site");
+    expect(claimedSiteHoldReason({ atsKind: "workday", pageUrl: "https://fixture.wd5.myworkdayjobs.com/en-US/careers", runUrl: offSite })).toBeNull();
+    expect(claimedSiteHoldReason({ atsKind: "workday", pageUrl: offSite, runUrl: "https://fixture.wd5.myworkdayjobs.com/en-US/careers" })).toBeNull();
+    expect(claimedSiteHoldReason({ atsKind: "unknown", pageUrl: offSite, runUrl: offSite })).toBeNull();
   });
 });

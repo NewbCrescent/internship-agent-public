@@ -38,6 +38,11 @@
  * (h) Rippling-style custom questions (fixtures/rippling-application.html) read
  *     as their question text, never the random name or "Unlabeled …", and the
  *     Pronouns list takes the one single-set option the saved pronouns start.
+ * Track 38 (2026-11-25), derived from a read-only capture of a live Phenom step 1 behind an Osano banner:
+ * (i) a Phenom-style step 1 that mentions Workday (fixtures/phenom-steps-application.html) reads as an
+ *     unknown site, never Workday; with the banner shown, dismissed (hidden, box kept), or absent, no
+ *     submit control is found, so the banner's typeless Accept and the step's explicit-submit "Next" are
+ *     never clicked as submit; the walk denies the banner, and the page is held as not at its last step.
  *
  * Usage: pnpm test:browser:unrecognized-forms
  */
@@ -49,6 +54,8 @@ import { chromium, type Page } from "playwright-core";
 
 import {
   applyDecisions,
+  atsFlowFor,
+  classifyAts,
   COVERING_DIALOG_REASON,
   classifyUploadRole,
   createApplicationPage,
@@ -58,6 +65,7 @@ import {
   planAutofill,
   UNLABELED_CONTROL_LABEL,
   recognizeCurrentForm,
+  submitTargetHoldReason,
   type FieldResolution,
   type PostSubmitEvidence
 } from "@internship-agent/browser";
@@ -71,6 +79,7 @@ const PICKER = "Contact_Information_phone-country-code-picker";
 const EIGHTFOLD_URL = "https://careers.fixtureaero.example/careers/apply?pid=2002";
 const PHENOM_URL = "https://careers.fixturelabs.example/us/en/apply?jobSeqNo=R200002&step=1&stepname=personalInformation";
 const RIPPLING_URL = "https://jobs.fixturehire.example/fixture/jobs/2/apply";
+const PHENOM_STEPS_URL = "https://careers.fixturelabs.example/us/en/apply?jobSeqNo=R300003&step=1&stepname=personalInformation";
 const US_PICKER = "🇺🇸 (+1) United States of America";
 /** Fictional saved answers for the live-shaped Eightfold form (Track 37); never a candidate's. */
 const EIGHTFOLD_EXPECTED: Record<string, string> = {
@@ -109,7 +118,9 @@ async function main(): Promise<void> {
       // Track 37: the live-shaped fixtures; a pid or jobSeqNo picks them on a path Track 35's fixtures share.
       "careers.fixtureaero.example/careers/apply?pid=2002": fixture("eightfold-application.html"),
       "careers.fixturelabs.example/us/en/apply?jobSeqNo=R200002": fixture("phenom-application.html"),
-      "jobs.fixturehire.example/fixture/jobs/2/apply": fixture("rippling-application.html")
+      "jobs.fixturehire.example/fixture/jobs/2/apply": fixture("rippling-application.html"),
+      // Track 38: picked by jobSeqNo, so the `&banner=0` variant routes here too.
+      "careers.fixturelabs.example/us/en/apply?jobSeqNo=R300003": fixture("phenom-steps-application.html")
     };
     const context = await browser.newContext();
     await context.route("**/*", async (route) => {
@@ -400,6 +411,49 @@ async function main(): Promise<void> {
       check(await listsOpen(tab) === 0, "(h) a list was left open after filling");
       await tab.close();
     }
+
+    // (i) Track 38: a Phenom-style step 1 that mentions Workday, behind an Osano-style banner.
+    {
+      type StepsState = { accepted: boolean; denied: boolean; next: boolean };
+      const stepsState = (tab: Page) => tab.evaluate(() => (window as unknown as { fixture: StepsState }).fixture);
+      const clickResult = (page: ReturnType<typeof createPlaywrightPage>) =>
+        page.clickSubmit().then(() => "clicked", (error: unknown) => (error instanceof Error ? error.message : String(error)));
+      const tab = await open(PHENOM_STEPS_URL);
+      // A click that waits on a hidden control fails fast instead of after 30 s.
+      tab.setDefaultTimeout(5_000);
+      const page = createPlaywrightPage(tab);
+      const classification = classifyAts(tab.url(), await tab.title(), await page.bodyText());
+      check(classification.kind === "unknown" && atsFlowFor(classification) === "generic",
+        `(i) classified as ${JSON.stringify({ kind: classification.kind, confidence: classification.confidence, flow: atsFlowFor(classification) })}`);
+      check(await page.submitControlShown?.() === false, "(i) a submit control was found with the banner shown");
+      const shownClick = await clickResult(page);
+      check(shownClick === "No submit control was found.", `(i) submit with the banner shown: ${shownClick}`);
+      let state = await stepsState(tab);
+      check(!state.accepted && !state.next, `(i) banner shown: ${JSON.stringify(state)}`);
+      const walk = await createApplicationPage(tab).advanceToApplicationForm();
+      state = await stepsState(tab);
+      check(walk.stop === "form" && walk.hops.some((hop) => hop.kind === "consent") && state.denied && !state.accepted,
+        `(i) walk: ${JSON.stringify({ stop: walk.stop, hops: walk.hops, state })}`);
+      check(await page.submitControlShown?.() === false, "(i) a submit control was found with the banner dismissed");
+      const hiddenClick = await clickResult(page);
+      check(hiddenClick === "No submit control was found.", `(i) submit with the banner dismissed: ${hiddenClick}`);
+      state = await stepsState(tab);
+      check(!state.accepted && !state.next, `(i) banner dismissed: ${JSON.stringify(state)}`);
+      const stepButtons = await createApplicationPage(tab).stepButtons();
+      check(stepButtons.submit === false && stepButtons.next === "Next", `(i) step buttons: ${JSON.stringify(stepButtons)}`);
+      const held = submitTargetHoldReason({ url: tab.url(), submitShown: false, stepButtons });
+      check(held?.startsWith("The application at careers.fixturelabs.example still shows") === true, `(i) hold reason: ${held}`);
+      await tab.close();
+
+      const bare = await open(`${PHENOM_STEPS_URL}&banner=0`);
+      bare.setDefaultTimeout(5_000);
+      const barePage = createPlaywrightPage(bare);
+      check(await barePage.submitControlShown?.() === false, "(i) a submit control was found with no banner");
+      const bareClick = await clickResult(barePage);
+      check(bareClick === "No submit control was found.", `(i) submit with no banner: ${bareClick}`);
+      check(!(await stepsState(bare)).next, "(i) the step's Next was clicked as submit with no banner");
+      await bare.close();
+    }
     await context.close();
   } finally {
     await browser.close();
@@ -409,7 +463,7 @@ async function main(): Promise<void> {
     console.error(`UNRECOGNIZED_FORMS_REPORT {"status":"failed","failures":${JSON.stringify(failures)}}`);
     process.exit(1);
   }
-  console.log(`UNRECOGNIZED_FORMS_REPORT {"status":"passed","scenarios":8}`);
+  console.log(`UNRECOGNIZED_FORMS_REPORT {"status":"passed","scenarios":9}`);
 }
 
 main().catch((error) => {

@@ -7,7 +7,8 @@ import { z } from "zod";
  * corrections are logged as events and never silently applied. Dover
  * (app.dover.io) and Rippling (ats.rippling.com) were added from read-only
  * captures of 2026-11-20, Paylocity (recruiting.paylocity.com) from one of
- * 2026-11-24.
+ * 2026-11-24. A kind is confirmed automatically, and submitted under the
+ * auto-submit policy, only on its own site (atsKindOwnsUrl, Track 38).
  */
 
 export const atsKindSchema = z.enum(["greenhouse", "lever", "workday", "handshake", "oracle", "smartrecruiters", "ashby", "jobvite", "icims", "dover", "rippling", "paylocity", "unknown"]);
@@ -95,4 +96,42 @@ export const ATS_KINDS_NEEDING_APPROVAL: ReadonlySet<string> = new Set(["oracle"
 
 export function atsKindNeedsApproval(kind: string | null | undefined): boolean {
   return typeof kind === "string" && ATS_KINDS_NEEDING_APPROVAL.has(kind);
+}
+
+/**
+ * The hosts each kind's own application pages are served from (Track 38): a kind is confirmed
+ * automatically, and submitted under the auto-submit policy, only on its own site. An employer page
+ * embedding Greenhouse (gh_jid) or Ashby (ashby_jid), or an Oracle Candidate Experience path, carries
+ * that ATS's own marker. MITRE's Phenom apply page mentions Workday and is not Workday.
+ */
+const ATS_OWN_HOSTS: Record<Exclude<AtsKind, "unknown">, RegExp> = {
+  greenhouse: /(?:^|\.)greenhouse\.io$/,
+  lever: /(?:^|\.)lever\.co$/,
+  workday: /(?:^|\.)(?:myworkdayjobs|myworkdaysite)\.com$/,
+  handshake: /(?:^|\.)joinhandshake\.com$/,
+  oracle: /(?:^|\.)oraclecloud\.com$/,
+  smartrecruiters: /(?:^|\.)smartrecruiters\.com$/,
+  ashby: /(?:^|\.)ashbyhq\.com$/,
+  jobvite: /(?:^|\.)jobvite\.com$/,
+  icims: /(?:^|\.)icims\.com$/,
+  dover: /^(?:app\.dover\.io|jobs\.dover\.com)$/,
+  rippling: /(?:^|\.)rippling\.com$/,
+  paylocity: /(?:^|\.)paylocity\.com$/
+};
+
+/** Whether `url` is on `kind`'s own site or carries its embed marker; false for unknown kinds and unparseable or non-http(s) URLs. Pure. */
+export function atsKindOwnsUrl(kind: string | null | undefined, url: string | null | undefined): boolean {
+  if (!kind || !url || !Object.prototype.hasOwnProperty.call(ATS_OWN_HOSTS, kind)) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+  if (ATS_OWN_HOSTS[kind as keyof typeof ATS_OWN_HOSTS].test(parsed.hostname.toLowerCase())) return true;
+  if (kind === "greenhouse") return parsed.searchParams.has("gh_jid");
+  if (kind === "ashby") return parsed.searchParams.has("ashby_jid");
+  if (kind === "oracle") return /\/hcmUI\/CandidateExperience\//i.test(parsed.pathname);
+  return false;
 }

@@ -438,7 +438,7 @@ export async function advancePipeline(options: {
       const submitted = await submitBrowserRun(run.id, {
         database, dataDir: options.dataDir, openPage: options.openPage, renderPdf: options.renderPdf, workdayAccounts: runtime,
         companyProfile: standing?.profile ?? null, submitWait: options.submitWait,
-        securityCodeMailbox: options.securityCodeMailbox, securityCodeWait: options.securityCodeWait
+        securityCodeMailbox: options.securityCodeMailbox, securityCodeWait: options.securityCodeWait, policyApproval: true
       });
       report.submitted.push({ jobId: run.jobId, confirmation: submitted.confirmationText ?? "" });
     } catch (error) {

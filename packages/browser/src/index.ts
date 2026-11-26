@@ -13,3 +13,4 @@ export * from "./application-page";
 export * from "./cookie-consent";
 export * from "./announcement-dialog";
 export * from "./site-navigation";
+export * from "./submit-gate";

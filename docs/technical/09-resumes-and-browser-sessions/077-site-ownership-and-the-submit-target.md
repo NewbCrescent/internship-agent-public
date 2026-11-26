@@ -1,0 +1,16 @@
+**Site ownership and the submit target (Track 38).**
+On run <run id> (2026-11-25) MITRE's Phenom apply step 1 was recognized as Workday at 0.75: its title says "Careers" (0.35) and its page says internal employees should "submit your application internally directly through Workday" (0.4).
+That was in the automatic band, so the kind was confirmed, the several-page stop was skipped, and the auto-submit policy approved the run.
+The generic submit click then resolved to Osano's cookie banner "Accept", a typeless button the last-resort rule read as a submit control; the banner had been denied and was hidden, so the click timed out and nothing was sent.
+A kind is now confirmed automatically only on its own site: `atsKindOwnsUrl` (`packages/domain/src/ats.ts`) holds each kind's host table, and an employer page counts as Greenhouse's or Ashby's only through its `gh_jid` or `ashby_jid` marker, as Oracle does through its Candidate Experience path.
+Elsewhere a kind is capped at 0.55 (`ATS_UNOWNED_CEILING`, `packages/browser/src/ats/classifier.ts`), below the automatic band, so the candidate confirms it, and Workday off its own host is not Workday at all.
+Workday's bare "workday" URL pattern and its "careers" title pattern are gone.
+A several-page kind (Workday) is never automatic in the generic path, so the several-page stop applies to it; Workday's own hosts still go to its adapter.
+`findSubmitIndex` (`packages/browser/src/handshake-executor.ts`) never counts a hidden control (a zero box or visibility:hidden), a cookie-consent control (inside a consent container, an osano-cm, onetrust, or cookie id or class, or accept-only wording), or a step control ("Next", "Continue", "Back"), and its last resort is a control with an explicit `type="submit"` attribute.
+Before every generic submit click the run is held, with the approval withdrawn and a "Submit button" safeguard pause, when the page shows a "Next" and no submit control, or when no submit control of the form's own is found (`submitTargetHoldReason`, `packages/browser/src/submit-gate.ts`).
+Under the auto-submit policy a run whose page and recorded address are both off the recognized kind's site is held before anything is typed (`claimedSiteHoldReason`).
+That check sits in `submitBrowserRun`, not `autoSubmitBlockers`, because the page's own address at submit is the ground truth and `autoSubmitBlockers` sees only the run row.
+A read-only scan of the real database found only runs <run id> and <run id> (both on MITRE's careers site, the second cancelled) recognized as a kind off its own site, and <run id> was the only automatic approval on such a site.
+Two points stay unverified: that Osano hides a dismissed banner with visibility:hidden while keeping its box (the fixture assumes it, matching the live hidden info dialog and the click's "element is not visible"), and the wording of Phenom's Review-step submit control, which was not captured.
+A real site whose only submit control is a typeless button saying neither submit nor apply is now held instead of clicked.
+Regressions: scenario (i) of `pnpm test:browser:unrecognized-forms` (`fixtures/phenom-steps-application.html`), the "site ownership" cases in `pnpm test:browser-worker:fast`, and the Track 38 cases in `pnpm test:browser-worker:local`.

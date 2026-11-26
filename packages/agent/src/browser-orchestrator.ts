@@ -38,6 +38,7 @@ import {
   capturePostSubmitEvidence,
   challengePause,
   choicesNotTaken,
+  claimedSiteHoldReason,
   classifyAts,
   classifyFieldRole,
   closedPostingNotice,
@@ -66,6 +67,8 @@ import {
   shouldRunHeadless,
   siteWallReason,
   submitAndConfirm,
+  submitTargetHoldReason,
+  submitTargetPause,
   SubmissionChallenged,
   SubmissionCodeNotFound,
   SubmissionHeld,
@@ -864,7 +867,8 @@ export async function startBrowserRun(
     const challenge = page.visibleChallenge ? await page.visibleChallenge() : null;
     const classification = classifyAts(form.url, form.title, await page.bodyText());
     const flow = atsFlowFor(classification);
-    // A form of several pages on a site with no adapter (unknown or approval-only kinds; iCIMS is its own flow):
+    // A form of several pages on a site with no adapter (unknown, approval-only, and several-page kinds (Workday off
+    // its adapter); iCIMS is its own flow):
     // filling only its first page would leave the run stuck at submit, so it stops with the reason.
     if (!challenge && !inDialog && flow !== "auto" && !onHandshakeHost(page.url()) && !icimsHostOf(page.url()) && hasStepButtons(page)) {
       const multi = multiStepStopReason(page.url(), await page.stepButtons());
@@ -1425,6 +1429,18 @@ function holdForChallengeBeforeClick(database: DatabaseSync, runId: string, run:
   return new SubmissionChallenged(`Before the submit click the site showed ${challenge.detail}. The agent never solves CAPTCHAs, so this application is held for you: finish it in your own browser. The run is not marked submitted.`);
 }
 
+/** A submit held before the click (Track 38): the approval is withdrawn and the run pauses with one safeguard; nothing is clicked. */
+function holdSubmitTarget(database: DatabaseSync, runId: string, run: BrowserRun, reason: string): SubmissionHeld {
+  const held = submitTargetPause(reason);
+  updateBrowserRun(database, runId, {
+    status: "paused-needs-input",
+    submissionApprovedAt: null,
+    decisions: [...run.decisions.filter((decision) => decision.fieldId !== held.decision.fieldId), held.decision],
+    pauses: [...run.pauses.filter((pause) => pause.fieldId !== held.pause.fieldId), held.pause]
+  });
+  return new SubmissionHeld(held.pause.question);
+}
+
 export async function submitBrowserRun(
   runId: string,
   options: {
@@ -1449,6 +1465,8 @@ export async function submitBrowserRun(
     standingConsent?: StandingConsentSettings;
     /** Oracle Cloud HCM's email and one-time-code step: the mailbox it reads and its address. Default from INTERNSHIP_AGENT_GMAIL_*; null never takes the step (the email-step stop stays). */
     oracleEmailStep?: OracleEmailStepSettings | null;
+    /** Set by the pipeline's auto-submit path: the page must be on the recorded ATS kind's own site (Track 38). */
+    policyApproval?: boolean;
   } = {}
 ): Promise<BrowserRun> {
   const database = options.database ?? getDatabase();
@@ -1514,6 +1532,11 @@ export async function submitBrowserRun(
     // Checked before "submitting" so a signed-out session, a missing Quick
     // apply dialog, or a changed attachment never fails the run.
     assertHandshakeSignedIn(database, page.url());
+    // Under the auto-submit policy, the claimed kind must be the site's own (Track 38: a Phenom page recognized as Workday).
+    if (options.policyApproval) {
+      const claimed = claimedSiteHoldReason({ atsKind: run.atsKind, pageUrl: page.url(), runUrl: run.applicationUrl });
+      if (claimed) throw holdSubmitTarget(database, runId, run, claimed);
+    }
     await enterHandshakeDialog(page, getJobPosting(database, run.jobId)?.source.applicationType);
     await assertKeptAttachment(page, run.decisions);
     // Jobvite's Data Consent step shown again: accepted under the standing setting, else the run keeps waiting for approval.
@@ -1603,6 +1626,14 @@ export async function submitBrowserRun(
     if (lateChallenge) {
       heldForInput = true;
       throw holdForChallengeBeforeClick(database, runId, run, lateChallenge);
+    }
+    // The click goes only to the form's own submit control, on its last step (Track 38).
+    const steps = hasStepButtons(page) ? await page.stepButtons() : null;
+    const submitShown = page.submitControlShown ? await page.submitControlShown().catch(() => false) : null;
+    const target = submitTargetHoldReason({ url: page.url(), submitShown, stepButtons: steps });
+    if (target) {
+      heldForInput = true;
+      throw holdSubmitTarget(database, runId, run, target);
     }
     // Greenhouse's emailed security-code step: the code is read from the candidate's mailbox (read only, in memory).
     const securityCode = greenhouseSecurityCodeLookup({

@@ -15,4 +15,5 @@ Rippling's custom questions carry nothing that names their control (no label, ar
 Rippling's dropdown custom questions (`div role="combobox"`) and Yes/No questions (`div role="radiogroup"` of `div role="radio"`) are not read as fields at all; that is left open.
 A saved protected self-identification answer is still used only on a single matching option, and a race question with no saved answer still pauses for the candidate.
 These runs still wait for the candidate's approval as an unrecognized or Rippling site, and nothing about automatic submission changes.
+That was not true for MITRE's Phenom form, which was taken for Workday and approved by the auto-submit policy; Track 38 (077-site-ownership-and-the-submit-target.md) fixed it.
 Regression: `pnpm test:browser:unrecognized-forms` (scenarios d to h), with fast cases for the phone-code label, the kept picker, the pronoun rule, and the announcement chooser in `pnpm test:browser-worker:fast`.

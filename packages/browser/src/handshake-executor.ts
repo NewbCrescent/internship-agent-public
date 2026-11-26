@@ -2316,12 +2316,17 @@ const FORM_CONTROLS = 'input:not([type="hidden"]), textarea, select';
  * even when disabled (Ashby disables it while loading; the click then waits
  * for it), and no other button on that page ever counts. Elsewhere a control
  * whose text (or an input's value) says submit wins over one that only says
- * apply, and the first submit-typed control is the last resort; a "Quick
- * apply" opener, a cancel control, and hidden or disabled controls never
- * count. A button's default type is never read as saying submit: a
- * `<button>` with no type attribute reports "submit", Ashby draws every
- * button that way, and before Track 27 every Ashby click went to the
- * autofill pane's "Upload file" button. Runs in the page.
+ * apply, and the first control with an explicit type="submit" attribute is
+ * the last resort; a "Quick apply" opener, a cancel control, disabled
+ * controls, hidden controls (a zero box or visibility:hidden), cookie-consent
+ * controls (inside a consent container, an osano-cm/onetrust/cookie id or
+ * class, or accept-only wording), and a step's own controls ("Next",
+ * "Continue", "Back") never count. A button's default type is never read as
+ * saying submit: a `<button>` with no type attribute reports "submit", Ashby
+ * draws every button that way, and before Track 27 every Ashby click went to
+ * the autofill pane's "Upload file" button. Track 38: on MITRE's Phenom form
+ * the last resort read Osano's typeless, hidden Accept as a submit. Runs in
+ * the page.
  */
 function findSubmitIndex(root: Element): number {
   const all = [...root.querySelectorAll('button, input[type="submit"]')];
@@ -2330,17 +2335,33 @@ function findSubmitIndex(root: Element): number {
     const shown = ashbySubmits.find((element) => element.getClientRects().length > 0);
     return shown ? all.indexOf(shown) : -1;
   }
+  // Track 38: never a cookie banner's control. Same list as cookie-consent.ts COOKIE_CONSENT_ROOTS, plus Osano's window.
+  const CONSENT_ROOTS = '#onetrust-consent-sdk, #onetrust-banner-sdk, #onetrust-pc-sdk, #ot-sdk-cookie-policy, .ot-sdk-container, #CybotCookiebotDialog, #truste-consent-track, #truste-consent-content, #consent_blackbar, #usercentrics-root, #didomi-host, .cc-window, #cookiescript_injected, #cmplz-cookiebanner-container, #cookie-law-info-bar, #cookie-banner, #cookie-consent, #cookieConsent, [role="dialog"][aria-label*="cookie" i], [role="alertdialog"][aria-label*="cookie" i], [role="region"][aria-label*="cookie" i], .osano-cm-window';
+  const CONSENT_MARK = /osano-cm-|onetrust|cookie/i;
+  const CONSENT_TEXT = /^(?:accept|accept all|accept all cookies|accept cookies|allow all|allow all cookies|allow cookies|got it)$/i;
+  // A step's own controls move between pages; they never submit.
+  const STEP = /^(?:next|next step|continue|save (?:and|&) continue|proceed|back|previous)$/i;
+  const shown = (element: HTMLElement): boolean => {
+    const box = element.getBoundingClientRect();
+    return box.width > 0 && box.height > 0 && getComputedStyle(element).visibility !== "hidden";
+  };
   const candidates = all.map((element, index) => {
     const value = element instanceof HTMLInputElement
       ? (element.value || ((element.type ?? "").toLowerCase() === "submit" ? "Submit" : ""))
       : ((element as HTMLButtonElement).value ?? "");
-    return { index, element: element as HTMLElement, text: `${element.textContent ?? ""} ${value}` };
+    const text = `${element.textContent ?? ""} ${value}`;
+    return { index, element: element as HTMLElement, text, label: text.replace(/\s+/g, " ").trim() };
   }).filter((candidate) => !/\b(quick apply|cancel)\b/i.test(candidate.text)
-    && candidate.element.getClientRects().length > 0
-    && !(candidate.element as HTMLButtonElement).disabled);
+    && shown(candidate.element)
+    && !(candidate.element as HTMLButtonElement).disabled
+    && !candidate.element.closest(CONSENT_ROOTS)
+    && !CONSENT_MARK.test(`${candidate.element.id ?? ""} ${typeof candidate.element.className === "string" ? candidate.element.className : ""}`)
+    && !STEP.test(candidate.label)
+    && !CONSENT_TEXT.test(candidate.label));
   const submit = candidates.find((candidate) => /\b(submit|send application|complete application)\b/i.test(candidate.text))
     ?? candidates.find((candidate) => /\bapply\b/i.test(candidate.text))
-    ?? candidates.find((candidate) => ((candidate.element as HTMLButtonElement | HTMLInputElement).type ?? "").toLowerCase() === "submit");
+    // Only an explicit type="submit": a <button> with no type reports "submit" by default (Osano's Accept did).
+    ?? candidates.find((candidate) => (candidate.element.getAttribute("type") ?? "").toLowerCase() === "submit");
   return submit ? submit.index : -1;
 }
 
