@@ -1,0 +1,3 @@
+The AI review of a pause batch (`packages/agent/src/pause-review.ts`, see `10-candidate-memory-policy/117-ai-review-of-a-pause-batch.md`) uses task `application.pause_review` at tier `cheap`, with `reasoning_effort: "low"`, a 6,000-token output budget, and a 90-second request timeout.
+It makes at most one call per batch of open questions and at most three per start, continue, or Workday walk, and records every call in `model_invocations`, failures included.
+It is on whenever the configured model is available and off with `INTERNSHIP_AGENT_PAUSE_REVIEW=0`; `pnpm run:answer` and `pnpm questions:recheck` never call it.

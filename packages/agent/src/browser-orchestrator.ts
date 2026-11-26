@@ -14,15 +14,19 @@ import {
   getCandidate,
   getCurrentFact,
   getCurrentPackage,
+  getCurrentQuestionAnswer,
   getDatabase,
   getJobPosting,
   getResumeVariantDocument,
   getResumeVariantMarkdown,
+  listBrowserRunIdsByStatus,
   listBrowserRuns,
   listResumeEntries,
   listResumeVariants,
   LOCAL_CANDIDATE_ID,
   logApplicationEvent,
+  questionAliasStoreAvailable,
+  recordQuestionAlias,
   saveBrowserRun,
   saveQuestionAnswer,
   setJobStatus,
@@ -87,6 +91,7 @@ import {
   type WorkdayWalkResult
 } from "@internship-agent/browser";
 import {
+  aiReviewMatchLabel,
   answerKindFor,
   applicationChannelFor,
   AUTO_SUBMIT_EVENT,
@@ -94,11 +99,14 @@ import {
   factDefinitions,
   isWorkdayErrorPauseId,
   manualOnly,
+  normalizeQuestionText,
   parseWorkdayUrl,
   planApplicationHistory,
   scopeKey,
   standingConsentSettings,
   workdaySiteKey,
+  type QuestionAliasTarget,
+  type QuestionResolution,
   type StandingConsentSettings
 } from "@internship-agent/domain";
 import type {
@@ -107,6 +115,7 @@ import type {
   ApplicationType,
   AtsKind,
   BaseResume,
+  BrowserField,
   BrowserRun,
   FillDecision,
   JobPosting,
@@ -130,6 +139,7 @@ import { greenhouseSecurityCodeLookup } from "./greenhouse-security-code";
 import { passOracleEmailStep, type OracleEmailStepSettings } from "./oracle-email-step";
 import { assertHandshakeSignedIn } from "./handshake-session-service";
 import { applyVoiceDrafts, createDefaultVoiceDrafter, draftSourcesFor, type VoiceDrafter } from "./voice-drafting";
+import { createDefaultPauseReviewer, type PauseReviewer } from "./pause-review";
 import { AutomaticRunStopped, IcimsAccountHeld, PostingClosed, WorkdayAccountHeld, WorkdayEntryStopped } from "./run-errors";
 import { postingLocationNames, postingQuestionContext, savedSelfIdentification } from "./saved-answers";
 import { saveCoveringDialogEvidenceQuietly, saveIcimsEvidenceQuietly, savePostSubmitEvidenceQuietly, saveWorkdayEvidenceQuietly } from "./submit-evidence";
@@ -145,6 +155,18 @@ import {
   usedOnce,
   type PauseAnswerOutcome
 } from "./question-answers";
+import {
+  aliasResolutionFor,
+  logAliasHits,
+  matchKindFor,
+  pauseReviewEligible,
+  savedAnswerEventDetail,
+  savedAnswerTargetText,
+  settleAliasHits,
+  stopEligible,
+  type AliasHit,
+  type SavedMatchKind
+} from "./pause-recheck";
 import { blockedPause, walkWorkday, WorkdaySignInRequired, type WorkdayRunContext } from "./workday-run";
 import { workdayAccountWait, type WorkdayAccountRuntime } from "./workday-account-service";
 import { getWorkdayAccount } from "./workday-account-store";
@@ -643,7 +665,8 @@ function hostOf(url: string): string {
 async function resolveFields(
   form: RecognizedForm,
   database: DatabaseSync,
-  context: QuestionContext
+  context: QuestionContext,
+  hits?: AliasHit[]
 ): Promise<Map<string, FieldResolution>> {
   const resolutions = new Map<string, FieldResolution>();
   const selfIdentification = savedSelfIdentification(database, LOCAL_CANDIDATE_ID);
@@ -675,9 +698,12 @@ async function resolveFields(
     } else if (resolution.status === "UNMAPPED") {
       // Catalog facts first; question memory only for questions the catalog does not map.
       const saved = rememberedAnswerFor(database, LOCAL_CANDIDATE_ID, field, context.companyName ?? null);
+      // Then a recorded wording of a saved answer (Track 45): never wider than the saved answer's own scope.
+      const aliased = saved ? null : aliasResolutionFor(database, LOCAL_CANDIDATE_ID, field, context);
+      if (aliased) hits?.push(aliased.hit);
       resolutions.set(field.id, saved
         ? { status: "REMEMBERED_ANSWER", answerId: saved.id, answer: saved.answer, answerKey: saved.answerKey, answerKind: saved.answerKind }
-        : { status: "UNAVAILABLE" });
+        : aliased?.resolution ?? { status: "UNAVAILABLE" });
     } else {
       // The catalog recognized the question, but nothing saved answers it (needs confirmation, ambiguous, no saved fact for the mapping).
       resolutions.set(field.id, { status: "UNAVAILABLE", held: true });
@@ -763,6 +789,8 @@ export async function startBrowserRun(
     automatic?: boolean;
     /** Drafts open-ended answers in the candidate's voice; null disables drafting. */
     voiceDrafter?: VoiceDrafter | null;
+    /** The AI review of the run's pause batch (pause-review.ts); undefined uses the configured model, null calls none. */
+    pauseReviewer?: PauseReviewer | null;
     /** Workday account automation; used by automatic runs only, which may create an account. */
     workdayAccounts?: WorkdayAccountRuntime | null;
     /** The graduation profile earlier applications to this company used (automatic runs only); the run keeps to it or is held. */
@@ -791,7 +819,7 @@ export async function startBrowserRun(
   const renderPdf = options.renderPdf ?? renderHtmlToPdf;
   if (parseWorkdayUrl(applicationUrl)) {
     const report = await startWorkdayRun(database, { jobId, candidateId, applicationUrl, posting, current, variantId: variant.id, automatic, lock }, {
-      dataDir, openPage: options.openPage, renderPdf, voiceDrafter: options.voiceDrafter,
+      dataDir, openPage: options.openPage, renderPdf, voiceDrafter: options.voiceDrafter, pauseReviewer: options.pauseReviewer,
       account: automatic && options.workdayAccounts ? { runtime: options.workdayAccounts, mode: "create" } : null, standing
     });
     noteMixedProfile(database, report.run, posting.companyName, candidateId, manualPin);
@@ -900,7 +928,8 @@ export async function startBrowserRun(
     }
     const profile: ApplicationProfile = channel ? "transcript" : "default";
     const uploaded = uploadedResumeFor(profile, database, candidateId);
-    const resolutions = await resolveFields(form, database, { ...questionContextFor(channel), ...postingQuestionContext(posting) });
+    const aliasHits: AliasHit[] = [];
+    const resolutions = await resolveFields(form, database, { ...questionContextFor(channel), ...postingQuestionContext(posting) }, aliasHits);
     const plan = planAutofill(form, plannerInputsFor(database, candidateId, candidate, {
       resolutions,
       packageAnswers: current.package.answers.map((answer) => ({ prompt: answer.prompt, text: answer.text })),
@@ -910,11 +939,11 @@ export async function startBrowserRun(
       standing,
       postingLocations: postingLocationNames(posting)
     }));
-    const decisions = withUploadedResume(channel
+    const decisions = settleAliasHits(withUploadedResume(channel
       ? plan.decisions.map((decision): FillDecision => decision.action === "upload" && decision.basis?.kind === "variant"
         ? { ...decision, reason: "Uploads your tailored resume printed with your 2029 graduation date." }
         : decision)
-      : plan.decisions, uploaded, profile);
+      : plan.decisions, uploaded, profile), aliasHits).decisions;
     const drafter = options.voiceDrafter === undefined
       ? createDefaultVoiceDrafter({ dataDir, database })
       : options.voiceDrafter;
@@ -929,6 +958,18 @@ export async function startBrowserRun(
     if (attached) {
       decisions.push(attached.decision);
       plan.pauses = [...plan.pauses, attached.pause];
+    }
+    const reviewer = options.pauseReviewer === undefined ? createDefaultPauseReviewer({ database, candidateId }) : options.pauseReviewer;
+    if (reviewer && !challenge) {
+      // One AI look at the questions still open; its guardrails decide, and a match drops its pause.
+      const reviewed = await reviewer({
+        jobId, atsKind: flow === "auto" ? classification.kind : "unknown",
+        posting: { companyName: posting.companyName, title: posting.title, locations: postingLocationNames(posting) },
+        context: { ...questionContextFor(channel), ...postingQuestionContext(posting) },
+        form, decisions, pauses: plan.pauses, sourceRunId: null
+      });
+      decisions.splice(0, decisions.length, ...reviewed.decisions);
+      plan.pauses = reviewed.pauses.filter((pause) => pause.status !== "answered");
     }
     if (challenge) {
       // A safeguard pause: never answered through, and safeguard runs are never submitted.
@@ -985,6 +1026,7 @@ export async function startBrowserRun(
     const settled = updateBrowserRun(database, run.id, {
       status: filled.pauses.length > 0 ? "paused-needs-input" : "awaiting-approval"
     });
+    logAliasHits(database, jobId, settleAliasHits(filled.decisions, aliasHits).used);
     noteMixedProfile(database, settled, posting.companyName, candidateId, manualPin);
     return { run: settled, form, applied };
   } catch (error) {
@@ -1009,7 +1051,7 @@ export async function startBrowserRun(
     detail: `The Apply button at ${hostOf(applicationUrl)} leads to the Workday posting ${handoff}; the run continues there.`.slice(0, 1_000)
   });
   const report = await startWorkdayRun(database, { jobId, candidateId, applicationUrl: handoff, posting, current, variantId: variant.id, automatic, lock }, {
-    dataDir, openPage: options.openPage, renderPdf, voiceDrafter: options.voiceDrafter,
+    dataDir, openPage: options.openPage, renderPdf, voiceDrafter: options.voiceDrafter, pauseReviewer: options.pauseReviewer,
     account: automatic && options.workdayAccounts ? { runtime: options.workdayAccounts, mode: "create" } : null, standing
   });
   noteMixedProfile(database, report.run, posting.companyName, candidateId, manualPin);
@@ -1104,7 +1146,7 @@ export async function answerRunPause(
   answer: string,
   remember: boolean,
   options: { database?: DatabaseSync } = {}
-): Promise<{ run: BrowserRun; remembered: boolean; outcome: PauseAnswerOutcome }> {
+): Promise<{ run: BrowserRun; remembered: boolean; outcome: PauseAnswerOutcome; rechecked: number }> {
   const database = options.database ?? getDatabase();
   const run = getBrowserRun(database, runId);
   if (!run) throw new Error("The browser run is unknown.");
@@ -1120,7 +1162,7 @@ export async function answerRunPause(
       throw new Error("Only a yes keeps the attached resume. Update your resume on Handshake, then start a new run.");
     }
     const confirmed = run.pauses.map((entry) => (entry.fieldId === fieldId ? { ...entry, status: "answered" as const, answer: "yes" } : entry));
-    return { run: updateBrowserRun(database, runId, { pauses: confirmed }), remembered: false, outcome: usedOnce("confirmation") };
+    return { run: updateBrowserRun(database, runId, { pauses: confirmed }), remembered: false, outcome: usedOnce("confirmation"), rechecked: 0 };
   }
   // Catalog questions go through candidate memory; generic ones the catalog
   // does not map go to question memory; never-save rules (sensitive, blocked,
@@ -1133,9 +1175,12 @@ export async function answerRunPause(
   const chosen = answerForPause(pause, answer);
   const plan = await planPauseMemory(pause, { companyName: posting?.companyName ?? null, context, answer: chosen.value });
   let outcome: PauseAnswerOutcome;
+  // What the saved answer is, for recording this exact wording against it.
+  let aliasTarget: QuestionAliasTarget | null = null;
   if (plan.path === "fact") {
     try {
-      const resolution = await answerCandidateQuestion({ question: pause.question, answer, remember, context }, { database });
+      const resolution: QuestionResolution = await answerCandidateQuestion({ question: pause.question, answer, remember, context }, { database });
+      aliasTarget = factAliasTarget(plan.key, resolution);
       if (resolution.status === "RESOLVED") outcome = remember ? { saved: true, store: "fact", factKey: plan.key } : usedOnce("not_requested");
       else if (resolution.status === "ANSWERED_ONCE") outcome = remember ? usedOnce("fact_rule", resolution.reason) : usedOnce("not_requested");
       else if (resolution.status === "NEEDS_INPUT") outcome = usedOnce("fact_rule", resolution.reason);
@@ -1160,6 +1205,7 @@ export async function answerRunPause(
         sourceRunId: run.id
       });
       outcome = { saved: true, store: "question", answerId: stored.answer.id, status: stored.status };
+      aliasTarget = { kind: "question", questionKey: stored.answer.questionKey };
     }
   } else {
     outcome = usedOnce(plan.reason);
@@ -1179,7 +1225,180 @@ export async function answerRunPause(
       outcome.saved && outcome.store === "fact" ? factDefinitions[outcome.factKey].label : undefined
     )
   });
-  return { run: updated, remembered: outcome.saved, outcome };
+  // Nothing saved (--once, a used-once rule): no wording is recorded and no other stop is re-checked.
+  if (!outcome.saved) return { run: updated, remembered: false, outcome, rechecked: 0 };
+  if (aliasTarget && questionAliasStoreAvailable(database) && normalizeQuestionText(pause.label) !== "") {
+    recordQuestionAlias(database, {
+      candidateId: LOCAL_CANDIDATE_ID, wording: pause.label, target: aliasTarget, atsKind: run.atsKind,
+      fieldKind: pause.fieldKind ?? null, options: pause.options ?? [], source: "candidate_answer", sourceRunId: run.id
+    });
+  }
+  // The new saved answer may answer stops held elsewhere (or later on this run): re-check them now.
+  let rechecked = 0;
+  try {
+    rechecked = (await recheckPausedRuns(database, { apply: true })).reduce((total, result) => total + result.matches.length, 0);
+  } catch {
+    // The answer is saved either way; `pnpm questions:recheck` repeats the re-check.
+  }
+  return { run: getBrowserRun(database, runId) ?? updated, remembered: true, outcome, rechecked };
+}
+
+/** The saved fact a resolved fact-path answer points at, by key and scope key; null when no fact was saved. */
+function factAliasTarget(key: string, resolution: QuestionResolution): QuestionAliasTarget | null {
+  if (resolution.status === "RESOLVED") return { kind: "fact", factKey: key, scopeKey: scopeKey(resolution.fact.scope) };
+  if (resolution.status === "REQUIRES_CONFIRMATION" && resolution.policy === "fact_policy" && resolution.fact) {
+    return { kind: "fact", factKey: key, scopeKey: scopeKey(resolution.fact.scope) };
+  }
+  return null;
+}
+
+export type RecheckRunResult = {
+  runId: string;
+  /** Open stops a saved answer answers now (Q<index + 1>). */
+  matches: Array<{ index: number; fieldId: string; label: string; kind: SavedMatchKind }>;
+  /** Open stops the re-check does not look at (safeguards, uploads, sensitive, page failures, faults, pauses without a field kind). */
+  skipped: number;
+  /** Open stops it looked at that no saved answer answers; `aiEligible` when the AI review may look at them. */
+  left: Array<{ index: number; label: string; aiEligible: boolean }>;
+  /** Set when the run could not be read or re-checked; nothing was written for it. */
+  error?: string;
+};
+
+/**
+ * The stop re-check (Track 45): each open question on a held run is planned
+ * again, one field at a time, with today's saved facts, standard answers,
+ * question memory, and recorded wordings, exactly as a new run would plan it.
+ * Only a fill, choice, or check that comes from a saved fact or a saved
+ * question-memory answer counts; a recorded wording the AI review made is
+ * left for continue. With `apply`, each match becomes an answered pause (the
+ * run stays held; continue fills it), the timeline names the saved answer used
+ * (never its value), and the stop's exact wording is recorded against it.
+ * Without `apply` nothing is written.
+ */
+export async function recheckRunPauses(
+  database: DatabaseSync,
+  runId: string,
+  options: { apply: boolean; candidateId?: string }
+): Promise<RecheckRunResult> {
+  const candidateId = options.candidateId ?? LOCAL_CANDIDATE_ID;
+  const result: RecheckRunResult = { runId, matches: [], skipped: 0, left: [] };
+  const run = getBrowserRun(database, runId);
+  if (!run || run.status !== "paused-needs-input") return result;
+  const posting = getJobPosting(database, run.jobId);
+  const channel = runChannel(posting?.source.applicationType, usesTranscript(run.decisions) || run.applicationProfile === "transcript");
+  const workday = parseWorkdayUrl(run.applicationUrl);
+  const base: QuestionContext = {
+    ...questionContextFor(channel),
+    ...postingQuestionContext(posting),
+    ...(workday ? { employerSite: workday.tenant } : {})
+  };
+  const candidate = getCandidate(database, candidateId);
+  const standing = standingConsentSettings(process.env);
+  type Match = { index: number; pause: PauseRecord; kind: SavedMatchKind; answer: string; basis: NonNullable<FillDecision["basis"]>; hit?: AliasHit; savedQuestion: { id: string; question: string; questionKey: string } | null };
+  const found: Match[] = [];
+  for (const [index, pause] of run.pauses.entries()) {
+    if (pause.status !== "open") continue;
+    if (!stopEligible(pause) || !pause.fieldKind) {
+      result.skipped += 1;
+      continue;
+    }
+    const field: BrowserField = {
+      id: pause.fieldId, label: pause.label, kind: pause.fieldKind, required: true,
+      ...(pause.options?.length ? { options: pause.options } : {})
+    };
+    if (isSensitiveRole(classifyFieldRole(field))) {
+      result.skipped += 1;
+      continue;
+    }
+    const form: RecognizedForm = { url: run.applicationUrl, title: "", fields: [field] };
+    const hits: AliasHit[] = [];
+    const resolutions = await resolveFields(form, database, { ...base, ...(pauseContext(pause.suggestedScope) ?? {}) }, hits);
+    const plan = planAutofill(form, plannerInputsFor(database, candidateId, candidate, {
+      resolutions,
+      packageAnswers: [],
+      variantId: run.variantId,
+      transcriptDocumentId: null,
+      profile: channel ? "transcript" : "default",
+      standing,
+      postingLocations: postingLocationNames(posting)
+    }));
+    const decision = plan.decisions.find((entry) => entry.fieldId === field.id);
+    const hit = hits.find((entry) => entry.fieldId === field.id);
+    const basis = decision?.basis;
+    const accepted = decision !== undefined && ["fill", "choose", "check"].includes(decision.action)
+      && (basis?.kind === "fact" || basis?.kind === "question_answer") && hit?.source !== "ai_review";
+    if (!accepted || !decision || !basis) {
+      result.left.push({ index, label: pause.label, aiEligible: pauseReviewEligible(pause, field) });
+      continue;
+    }
+    let savedQuestion: Match["savedQuestion"] = null;
+    if (basis.kind === "question_answer") {
+      const saved = getCurrentQuestionAnswer(database, candidateId, hit?.target.kind === "question" ? hit.target.questionKey : pause.label);
+      if (!saved || saved.id !== basis.answerId) {
+        result.left.push({ index, label: pause.label, aiEligible: pauseReviewEligible(pause, field) });
+        continue;
+      }
+      savedQuestion = { id: saved.id, question: saved.question, questionKey: saved.questionKey };
+    }
+    const kind = matchKindFor(decision, hit, savedQuestion?.question ?? null, pause.label);
+    const answer = decision.action === "check" ? "yes" : decision.value;
+    if (!kind || !answer) {
+      result.left.push({ index, label: pause.label, aiEligible: pauseReviewEligible(pause, field) });
+      continue;
+    }
+    found.push({ index, pause, kind, answer, basis, hit, savedQuestion });
+    result.matches.push({ index, fieldId: pause.fieldId, label: pause.label, kind });
+  }
+  if (!options.apply || found.length === 0) return result;
+
+  // The run must not have moved while it was planned (a continue, an answer, a cancel); otherwise nothing is written.
+  const now = getBrowserRun(database, runId);
+  if (!now || now.status !== "paused-needs-input" || now.updatedAt !== run.updatedAt) return { ...result, matches: [] };
+  const byField = new Map(found.map((match) => [match.pause.fieldId, match]));
+  updateBrowserRun(database, runId, {
+    pauses: run.pauses.map((pause) => {
+      const match = byField.get(pause.fieldId);
+      if (!match || pause.status !== "open") return pause;
+      return {
+        ...pause, status: "answered" as const, answer: match.answer,
+        ...(match.basis.kind === "fact" ? { suggestedKey: match.basis.key, suggestedScope: match.basis.scope } : {})
+      };
+    })
+  });
+  const status = posting?.status ?? "APPLYING";
+  const aliases = questionAliasStoreAvailable(database);
+  for (const match of found) {
+    const target: QuestionAliasTarget | null = match.basis.kind === "fact"
+      ? { kind: "fact", factKey: match.basis.key, scopeKey: match.basis.scope }
+      : match.savedQuestion ? { kind: "question", questionKey: match.savedQuestion.questionKey } : null;
+    const targetText = match.basis.kind === "fact"
+      ? savedAnswerTargetText({ kind: "fact", key: match.basis.key, scope: match.basis.scope })
+      : savedAnswerTargetText({ kind: "question", answerId: match.savedQuestion?.id ?? "", question: match.savedQuestion?.question ?? "" });
+    logApplicationEvent(database, {
+      jobId: run.jobId, fromStatus: status, toStatus: status,
+      detail: savedAnswerEventDetail(match.pause.label, match.kind, targetText)
+    });
+    if (target && aliases && normalizeQuestionText(match.pause.label) !== "") {
+      recordQuestionAlias(database, {
+        candidateId, wording: match.pause.label, target, atsKind: run.atsKind, fieldKind: match.pause.fieldKind ?? null,
+        options: match.pause.options ?? [], source: "saved_answer_match", sourceRunId: run.id
+      });
+    }
+  }
+  return result;
+}
+
+/** The stop re-check over every held run (paused for the candidate's input); a run that cannot be read is reported, not fatal. */
+export async function recheckPausedRuns(database: DatabaseSync, options: { apply: boolean; candidateId?: string }): Promise<RecheckRunResult[]> {
+  const results: RecheckRunResult[] = [];
+  for (const runId of listBrowserRunIdsByStatus(database, "paused-needs-input")) {
+    try {
+      results.push(await recheckRunPauses(database, runId, options));
+    } catch (error) {
+      results.push({ runId, matches: [], skipped: 0, left: [], error: error instanceof Error ? error.name : "Error" });
+    }
+  }
+  return results;
 }
 
 export function pauseContext(suggestedScope: string | null): QuestionContext | undefined {
@@ -1236,6 +1455,8 @@ export async function continueBrowserRun(
     renderPdf?: PdfRenderer;
     /** Workday only; undefined keeps the default drafter, null drafts nothing (pnpm run:answer). */
     voiceDrafter?: VoiceDrafter | null;
+    /** The AI review of the still-open questions; undefined uses the configured model, null calls none (pnpm run:answer). */
+    pauseReviewer?: PauseReviewer | null;
     /** The candidate's standing consent and attestation settings; default from the environment. */
     standingConsent?: StandingConsentSettings;
     /** Oracle Cloud HCM's email and one-time-code step: the mailbox it reads and its address. Default from INTERNSHIP_AGENT_GMAIL_*; null never takes the step (the email-step stop stays). */
@@ -1250,7 +1471,8 @@ export async function continueBrowserRun(
   const standing = options.standingConsent ?? standingConsentSettings(process.env);
   if (parseWorkdayUrl(run.applicationUrl)) {
     const { walk, url, title } = await continueWorkdayRun(database, run, {
-      dataDir, openPage: options.openPage, renderPdf: options.renderPdf ?? renderHtmlToPdf, voiceDrafter: options.voiceDrafter, mode: "fill", account: null, lock: null,
+      dataDir, openPage: options.openPage, renderPdf: options.renderPdf ?? renderHtmlToPdf, voiceDrafter: options.voiceDrafter,
+      pauseReviewer: options.pauseReviewer, mode: "fill", account: null, lock: null,
       standing
     });
     const { status, pauses } = workdayOutcome(walk, run.pauses);
@@ -1289,7 +1511,8 @@ export async function continueBrowserRun(
     });
     if (oracle.kind === "stopped") throw new Error(oracle.reason);
     if (oracle.kind === "passed") form = oracle.form;
-    const resolutions = await resolveFields(form, database, { ...questionContextFor(channel), ...postingQuestionContext(posting) });
+    const aliasHits: AliasHit[] = [];
+    const resolutions = await resolveFields(form, database, { ...questionContextFor(channel), ...postingQuestionContext(posting) }, aliasHits);
     const packageAnswers = runPackageAnswers(database, run);
     // Open pauses nothing answered are planned again with today's rules: a standing setting, a saved
     // self-identification answer, or a rule added since the run paused may answer them now.
@@ -1358,7 +1581,23 @@ export async function continueBrowserRun(
       }
       decisions.push(decision);
     }
-    const pauses = run.pauses.map((entry) => reopened.has(entry.fieldId) ? { ...entry, status: "open" as const, answer: null } : settled.get(entry.fieldId) ?? entry);
+    let pauses = run.pauses.map((entry) => reopened.has(entry.fieldId) ? { ...entry, status: "open" as const, answer: null } : settled.get(entry.fieldId) ?? entry);
+    // Only the fields that were paused take a recorded wording's answer now.
+    const wasPaused = new Set(run.decisions.filter((decision) => decision.action === "pause").map((decision) => decision.fieldId));
+    const aliased = settleAliasHits(decisions, aliasHits, wasPaused);
+    decisions.splice(0, decisions.length, ...aliased.decisions);
+    const reviewer = options.pauseReviewer === undefined ? createDefaultPauseReviewer({ database }) : options.pauseReviewer;
+    if (reviewer) {
+      // One AI look at the questions still open; a match marks its pause answered.
+      const reviewed = await reviewer({
+        jobId: run.jobId, atsKind: run.atsKind,
+        posting: { companyName: posting?.companyName ?? "", title: posting?.title ?? "", locations: postingLocationNames(posting) },
+        context: { ...questionContextFor(channel), ...postingQuestionContext(posting) },
+        form, decisions, pauses, sourceRunId: run.id
+      });
+      decisions.splice(0, decisions.length, ...reviewed.decisions);
+      pauses = reviewed.pauses;
+    }
     const uploadPathFor = await prepareUploads(
       database,
       dataDir,
@@ -1380,6 +1619,7 @@ export async function continueBrowserRun(
     });
     // Statements newly accepted under the standing settings, logged once with their exact text.
     logStandingAcceptances(database, run.jobId, filled.decisions, run.decisions);
+    logAliasHits(database, run.jobId, settleAliasHits(filled.decisions, aliased.used).used);
     return { run: updated, form, applied };
   } finally {
     await page.close();
@@ -1425,9 +1665,12 @@ export function approveRunSubmissionAutomatically(
   if (blockers.length > 0) throw new Error("Not submitted automatically: " + blockers.join(" "));
   const approved = updateBrowserRun(database, runId, { submissionApprovedAt: new Date().toISOString() });
   const status = getJobPosting(database, run.jobId)?.status ?? "APPLYING";
+  // The questions an AI review matched to saved answers, by label only (no key, value, or option).
+  const matched = [...new Set(run.decisions.map((decision) => aiReviewMatchLabel(decision.reason)).filter((label): label is string => label !== null))];
+  const aiMatches = matched.length ? ` AI review matched your saved answers for: ${matched.map((label) => `"${label}"`).join(", ")}.` : "";
   logApplicationEvent(database, {
     jobId: run.jobId, fromStatus: status, toStatus: status,
-    detail: (AUTO_SUBMIT_EVENT + (basis.length ? ": " + basis.join(" ") : ".")).slice(0, 1_000)
+    detail: (AUTO_SUBMIT_EVENT + (basis.length ? ": " + basis.join(" ") : ".") + aiMatches).slice(0, 1_000)
   });
   return approved;
 }
@@ -1754,7 +1997,8 @@ function workdayContext(
   account: WorkdayRunContext["account"],
   standing: StandingConsentSettings,
   transcript = false,
-  lock: ApplicationProfile | null = null
+  lock: ApplicationProfile | null = null,
+  reviewer: PauseReviewer | null = null
 ): WorkdayRunContext {
   const candidate = getCandidate(database, input.candidateId);
   const graduation = (scope: Parameters<typeof getCurrentFact>[3]) => {
@@ -1772,7 +2016,7 @@ function workdayContext(
   };
   return {
     database, candidateId: input.candidateId, posting: input.posting, candidate, jobId: input.jobId, account,
-    packageAnswers: input.packageAnswers, variantId: input.variantId, drafter, answers, transcript,
+    packageAnswers: input.packageAnswers, variantId: input.variantId, drafter, reviewer, answers, transcript,
     history: {
       standard: planApplicationHistory({ entries, candidate, graduationDate: standardGraduation }),
       // A company that already received the default profile never switches.
@@ -1785,11 +2029,11 @@ function workdayContext(
     standing: standingPlannerInputs(candidate, standing),
     transcriptDocumentId: () => currentCandidateDocument("transcript", database, input.candidateId)?.id ?? null,
     deps: {
-      resolveFields: (form, usesTranscript, employerSite) => resolveFields(form, database, {
+      resolveFields: (form, usesTranscript, employerSite, hits) => resolveFields(form, database, {
         ...questionContextFor(usesTranscript ? "handshake_internal" : null),
         ...postingQuestionContext(input.posting),
         ...(employerSite ? { employerSite } : {})
-      }),
+      }, hits),
       uploadsFor: (decisions, usesTranscript) => prepareUploads(database, dataDir, {
         jobId: input.jobId, variantId: input.variantId, channel: null,
         graduationDate: usesTranscript ? transcriptGraduation : null
@@ -1825,18 +2069,20 @@ async function startWorkdayRun(
     lock: ApplicationProfile | null;
   },
   options: {
-    dataDir: string; openPage?: PageFactory; renderPdf: PdfRenderer; voiceDrafter?: VoiceDrafter | null; account: WorkdayRunContext["account"];
+    dataDir: string; openPage?: PageFactory; renderPdf: PdfRenderer; voiceDrafter?: VoiceDrafter | null; pauseReviewer?: PauseReviewer | null;
+    account: WorkdayRunContext["account"];
     standing: StandingConsentSettings;
   }
 ): Promise<RunReport> {
   const openPage = options.openPage ?? ((url: string) => openProfilePage(url, options.dataDir, createWorkdayPage));
   const drafter = options.voiceDrafter === undefined ? createDefaultVoiceDrafter({ dataDir: options.dataDir, database }) : options.voiceDrafter;
+  const reviewer = options.pauseReviewer === undefined ? createDefaultPauseReviewer({ database, candidateId: input.candidateId }) : options.pauseReviewer;
   const page = asWorkdayPage(await openPage(input.applicationUrl));
   try {
     const context = workdayContext(database, {
       jobId: input.jobId, candidateId: input.candidateId, posting: input.posting, variantId: input.variantId,
       packageAnswers: input.current.package.answers.map((answer) => ({ prompt: answer.prompt, text: answer.text }))
-    }, options.dataDir, options.renderPdf, drafter, new Map(), options.account, options.standing, input.lock === "transcript", input.lock);
+    }, options.dataDir, options.renderPdf, drafter, new Map(), options.account, options.standing, input.lock === "transcript", input.lock, reviewer);
     const walk = await walkWorkdayWithEvidence(database, page, input.applicationUrl, context, "fill", {
       dataDir: options.dataDir, run: { id: null, jobId: input.jobId }, account: options.account
     });
@@ -1869,6 +2115,8 @@ async function continueWorkdayRun(
   run: BrowserRun,
   options: {
     dataDir: string; openPage?: PageFactory; renderPdf: PdfRenderer; voiceDrafter?: VoiceDrafter | null; mode: "fill" | "submit";
+    /** The AI review of a step's open questions; never on the submit walk, whose approval covered what the candidate saw. */
+    pauseReviewer?: PauseReviewer | null;
     account: WorkdayRunContext["account"];
     /** The company's pinned profile on the auto-submit path; null on candidate-started steps. */
     lock: ApplicationProfile | null;
@@ -1880,13 +2128,14 @@ async function continueWorkdayRun(
   if (!posting || !current) throw new Error("The posting or its package is missing.");
   const openPage = options.openPage ?? ((url: string) => openProfilePage(url, options.dataDir, createWorkdayPage));
   const drafter = options.voiceDrafter === undefined ? createDefaultVoiceDrafter({ dataDir: options.dataDir, database }) : options.voiceDrafter;
+  const reviewer = options.mode === "submit" ? null : options.pauseReviewer === undefined ? createDefaultPauseReviewer({ database }) : options.pauseReviewer;
   const answers = new Map(run.pauses.filter((pause) => pause.status === "answered" && pause.answer !== null).map((pause) => [pause.fieldId, pause.answer!]));
   const page = asWorkdayPage(await openPage(run.applicationUrl));
   const context = workdayContext(database, {
     jobId: run.jobId, candidateId: LOCAL_CANDIDATE_ID, posting, variantId: run.variantId,
     packageAnswers: current.package.answers.map((answer) => ({ prompt: answer.prompt, text: answer.text }))
   }, options.dataDir, options.renderPdf, drafter, answers, options.account, options.standing,
-  run.applicationProfile === "transcript" || usesTranscript(run.decisions), options.lock);
+  run.applicationProfile === "transcript" || usesTranscript(run.decisions), options.lock, reviewer);
   try {
     const target = { id: run.id, jobId: run.jobId };
     const walk = await walkWorkdayWithEvidence(database, page, run.applicationUrl, context, options.mode, {

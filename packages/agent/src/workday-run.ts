@@ -26,9 +26,12 @@ import {
 } from "@internship-agent/domain";
 
 import { yearHoldMessage } from "./company-policy";
+import { logAliasHits, settleAliasHits, type AliasHit } from "./pause-recheck";
 import { answeredPauseDecision } from "./question-answers";
 import { AutomaticRunStopped, PostingClosed, WorkdayAccountHeld, WorkdayEntryStopped, WorkdaySignInRequired } from "./run-errors";
 import { ensureWorkdayAccount, type WorkdayAccountRuntime } from "./workday-account-service";
+import type { PauseReviewer } from "./pause-review";
+import { postingLocationNames, postingQuestionContext } from "./saved-answers";
 import type { VoiceDrafter } from "./voice-drafting";
 import { applyVoiceDrafts, draftSourcesFor } from "./voice-drafting";
 
@@ -37,8 +40,9 @@ export type WorkdayRunDeps = {
   /**
    * `transcript`: the form asked for a transcript, so answers come from the alternate (2029) profile.
    * `employerSite`: the Workday tenant of the application address (the employer that runs the form), for previous-employment questions.
+   * `hits`: receives each field a recorded wording of a saved answer resolved (Track 45).
    */
-  resolveFields(form: RecognizedForm, transcript: boolean, employerSite: string | null): Promise<Map<string, FieldResolution>>;
+  resolveFields(form: RecognizedForm, transcript: boolean, employerSite: string | null, hits?: AliasHit[]): Promise<Map<string, FieldResolution>>;
   uploadsFor(decisions: FillDecision[], transcript: boolean): Promise<(decision: FillDecision) => string | null>;
   /** Points resume uploads at the candidate's uploaded resume for the profile, when the run sends one. */
   chooseResume(decisions: FillDecision[], transcript: boolean): FillDecision[];
@@ -52,6 +56,8 @@ export type WorkdayRunContext = {
   packageAnswers: Array<{ prompt: string; text: string }>;
   variantId: string | null;
   drafter: VoiceDrafter | null;
+  /** The AI review of a step's still-open questions (pause-review.ts); null calls none. */
+  reviewer?: PauseReviewer | null;
   /** Answers the candidate gave to earlier pauses, by step-prefixed field id. */
   answers: Map<string, string>;
   /** Work and education rows for My Experience, for the default and the transcript profile. */
@@ -152,6 +158,7 @@ async function planWorkdayStep(
   if (transcript && !transcriptDocumentId && hasTranscriptField(form.fields)) {
     throw new AutomaticRunStopped(`${context.posting.companyName}'s Workday application asks for your transcript. Upload it on the profile page, then start the run again.`);
   }
+  const aliasHits: AliasHit[] = [];
   const plan = planAutofill(form, {
     profile: {
       email: candidate?.email, phone: candidate?.phone, portfolioUrl: candidate?.portfolioUrl,
@@ -161,16 +168,27 @@ async function planWorkdayStep(
       addressRegion: candidate?.addressRegion, addressPostalCode: candidate?.addressPostalCode, addressCountry: candidate?.addressCountry,
       phoneType: candidate?.phoneType, fieldOfStudy: candidate?.fieldOfStudy, gpa: candidate?.gpa
     },
-    resolutions: await context.deps.resolveFields(form, transcript, employerSite),
+    resolutions: await context.deps.resolveFields(form, transcript, employerSite, aliasHits),
     packageAnswers: context.packageAnswers,
     variantId: context.variantId,
     transcriptDocumentId,
     standing: context.standing
   });
   let { decisions, pauses } = applyAnswers(step, form, plan.decisions, plan.pauses, context.answers);
+  const aliased = settleAliasHits(decisions, aliasHits);
+  decisions = aliased.decisions;
+  logAliasHits(context.database, context.jobId, aliased.used);
   if (context.drafter) {
     ({ decisions, pauses } = await applyVoiceDrafts({ decisions, pauses }, form, {
       drafter: context.drafter, posting: context.posting, sources: draftSourcesFor(context.database, context.candidateId)
+    }));
+  }
+  if (context.reviewer) {
+    ({ decisions, pauses } = await context.reviewer({
+      jobId: context.jobId, atsKind: "workday",
+      posting: { companyName: context.posting.companyName, title: context.posting.title, locations: postingLocationNames(context.posting) },
+      context: { ...(transcript ? { applicationChannel: "handshake_internal" as const } : {}), ...postingQuestionContext(context.posting), ...(employerSite ? { employerSite } : {}) },
+      form, decisions, pauses, sourceRunId: null
     }));
   }
   decisions = context.deps.chooseResume(decisions, transcript);

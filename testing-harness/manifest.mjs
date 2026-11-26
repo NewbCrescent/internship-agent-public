@@ -275,7 +275,7 @@ export const suiteManifest = [
     mutation: "local-temporary",
     timeoutMs: 45_000,
     reportPrefixes: [],
-    description: "Migration, profile database isolation, seed, preferences, posting projection, fact revision, revocation, base resumes, transcripts, browser sessions, GPA, resume entry revisions, approval, ordering, and archival, and application intent storage against disposable SQLite; the 0030 candidate_facts rebuild keeps rows, the supersede chain, indexes, and AI-fit triggers; candidate coursework (migration 0031) replace, no-op, rollback, and AI-fit context bumps; migration 0034 bumps the AI-fit context only for FIT_CONTEXT_FACT_KEYS facts (graduation_date), keeps other fit triggers, and does not bump on apply."
+    description: "Migration, profile database isolation, seed, preferences, posting projection, fact revision, revocation, base resumes, transcripts, browser sessions, GPA, resume entry revisions, approval, ordering, and archival, and application intent storage against disposable SQLite; the 0030 candidate_facts rebuild keeps rows, the supersede chain, indexes, and AI-fit triggers; candidate coursework (migration 0031) replace, no-op, rollback, and AI-fit context bumps; migration 0034 bumps the AI-fit context only for FIT_CONTEXT_FACT_KEYS facts (graduation_date), keeps other fit triggers, and does not bump on apply; recorded question wordings (migration 0036) recorded, seen again, found exact then normalized, revoked, the target CHECK, and a database without the table read as empty."
   },
   {
     id: "memory-resolution",
@@ -324,6 +324,42 @@ export const suiteManifest = [
     timeoutMs: 60_000,
     reportPrefixes: [],
     description: "Question memory against a disposable workspace: generic answers saved from held runs (options by normalized text, free text verbatim, supersede and unchanged), never saved for company-named, why/interest, BLOCKED, ambiguous, sensitive, or --once answers (each recorded once with its reason on the timeline, never the answer), reuse on a later run after catalog facts, refusal to reuse on a question naming the posting's company, answered select pauses chosen on continue, the corrected remembered flag, pnpm run:questions numbering identical to the Discord notice's Q<n>, pnpm run:answer saving, continuing under the pipeline lock (refused while a pass holds it) with no voice drafter and no model call, and pnpm profile:answers listing and revoking, and --digest item mapping."
+  },
+  {
+    id: "question-aliases",
+    features: ["browser", "profile", "remember", "database"],
+    tier: "local",
+    script: "test:agent:aliases:local",
+    requires: ["node", "pnpm", "node-sqlite"],
+    network: "none",
+    mutation: "local-temporary",
+    timeoutMs: 60_000,
+    reportPrefixes: [],
+    description: "Track 45 against a disposable workspace: after a saved answer every held run's open stops are re-checked by re-planning each one with today's saved facts, standard answers, question memory, and recorded wordings (a question differing only in capitalization and punctuation is answered on another held run, the run stays held, the timeline names the saved answer without its value, and continue fills it); each exact question wording is recorded against its saved answer with the ATS kind and options (seen again bumps its count); --once stores nothing and answers no other run; sensitive stops are never answered and a protected fact's wording is listed as saved, never by value; a stop the planner itself holds (a saved own-expense relocation no on the combined list) and page failures stay open; a dry run writes nothing; a recorded wording never widens a fact's country or company scope; pnpm profile:answers lists wordings and revokes one with --revoke-alias; pnpm questions:recheck prints per-kind counts (dry run read-only, --apply under the pipeline lock, refused in manual checklist mode). Fake pages; no browser, no network, no model."
+  },
+  {
+    id: "pause-review",
+    features: ["browser", "profile", "remember"],
+    tier: "local",
+    script: "test:agent:pause-review:local",
+    requires: ["node", "pnpm", "node-sqlite"],
+    network: "none",
+    mutation: "local-temporary",
+    timeoutMs: 60_000,
+    reportPrefixes: [],
+    description: "The AI review of a pause batch with a fake model provider (fetch stubbed to throw; no network): a saved-answer match is applied only when every deterministic check passes (mapper unmapped, no statement of fact, standard-sensitivity fact, exact option, scope) and is marked as an AI review match (auto-submit allowed, the approval event names the question by label, recorded wording with source ai_review); a wrong option or a sensitive or statement-of-fact match is rejected with the check named and the stop left open; sensitive values are sent only as \"saved\" and nothing about protected self-identification categories is sent; invalid model output falls back to today's pause with one failed cost row and one timeline line; a suggested draft is shown, never filled or stored, and blocks auto-submit until the candidate answers it; one model call per batch; no reviewer, no call."
+  },
+  {
+    id: "questions-recheck-cli",
+    features: ["profile"],
+    tier: "benchmark",
+    script: "questions:recheck",
+    requires: ["node", "pnpm", "node-sqlite"],
+    network: "none",
+    mutation: "local-profile-database",
+    timeoutMs: 60_000,
+    reportPrefixes: [],
+    description: "Explicit operational command, never selected by a gate: re-checks every held run's open questions in the chosen workspace (default real) against the saved answers and prints per-kind counts and question labels, never answers; the default dry run opens the database read-only and writes nothing; --apply marks matched questions answered under the pipeline lock and is refused in manual checklist mode."
   },
   {
     id: "run-answer-cli",
@@ -383,7 +419,7 @@ export const suiteManifest = [
     mutation: "local-profile-database",
     timeoutMs: 60_000,
     reportPrefixes: [],
-    description: "Explicit operational command, never selected by a gate: lists the saved question-memory answers in the chosen workspace (default real) and revokes one with --revoke."
+    description: "Explicit operational command, never selected by a gate: lists the saved question-memory answers in the chosen workspace (default real), each with its recorded question wordings, and the saved facts with recorded wordings (protected values shown only as saved); revokes one answer with --revoke or one recorded wording with --revoke-alias."
   },
   {
     id: "profile-coursework-command",

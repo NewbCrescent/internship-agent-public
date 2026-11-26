@@ -68,15 +68,18 @@ type RunForAutoSubmit = {
   atsConfirmed: boolean;
   /** The kind the classifier suggested when the run was not confirmed automatically. */
   suggestedAtsKind?: string | null;
-  pauses: ReadonlyArray<{ safeguard: boolean; status?: string }>;
+  pauses: ReadonlyArray<{ safeguard: boolean; status?: string; draft?: { source?: string } | null }>;
   decisions: ReadonlyArray<{ action: string; basis: { kind: string } | null; reason?: string }>;
 };
 
 /**
  * Why a filled run may not be submitted without the candidate. An unanswered
  * pause, a safeguard, a site type the classifier did not recognize on its own,
- * an answer drafted in the candidate's voice, or an attachment the site already
- * held keeps the run for the candidate. A value a form field already showed
+ * an answer drafted in the candidate's voice, a draft the AI review suggested
+ * for a question still unanswered, or an attachment the site already held
+ * keeps the run for the candidate. An answer the AI review matched to a saved
+ * answer after every deterministic guardrail passed does not hold the run (the
+ * candidate's decision, 2026-11-26). A value a form field already showed
  * with nothing saved against it does not hold the run; a shown value on a
  * question only the candidate's saved answers may answer does.
  */
@@ -97,6 +100,9 @@ export function autoSubmitBlockers(run: RunForAutoSubmit): string[] {
     }
   }
   if (run.decisions.some((decision) => decision.basis?.kind === "voice_draft")) blockers.push("An answer was drafted in your voice; you review those.");
+  // The AI review of a pause batch (pause-review.ts): a suggested draft holds the run while its question is unanswered;
+  // once the candidate answers it (with the draft or their own text) it is the candidate's answer, as with voice drafts.
+  if (run.pauses.some((pause) => pause.draft?.source === "pause_review" && pause.status === "open")) blockers.push("AI review suggested a draft; you review those.");
   const kept = run.decisions.filter((decision) => decision.action === "keep");
   const unconfirmed = (reason: string | undefined) => reason === UNCONFIRMED_SITE_VALUE_REASON || reason === LEGACY_SITE_VALUE_REASON;
   if (kept.some((decision) => unconfirmed(decision.reason))) blockers.push("The site already shows an answer that none of your saved answers confirms; you review those.");

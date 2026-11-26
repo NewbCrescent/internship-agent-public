@@ -30,6 +30,8 @@
     "test:profile-facts": "vitest --root ../.. run testing-harness/agent/profile-facts.integration.test.ts",
     "test:answers": "vitest --root ../.. run testing-harness/agent/question-answers.test.ts",
     "test:answers:local": "vitest --root ../.. run testing-harness/agent/question-answers.integration.test.ts",
+    "test:aliases:local": "vitest --root ../.. run testing-harness/agent/question-aliases.integration.test.ts",
+    "test:pause-review:local": "vitest --root ../.. run testing-harness/agent/pause-review.integration.test.ts",
     "test:profile-coursework": "vitest --root ../.. run testing-harness/agent/profile-coursework.integration.test.ts",
     "test:profile-resume": "vitest --root ../.. run testing-harness/agent/profile-resume.integration.test.ts",
     "test:workday-account": "vitest --root ../.. run testing-harness/agent/workday-account.test.ts",

@@ -144,6 +144,14 @@ export function listBrowserRuns(database: DatabaseSync, jobId: string): BrowserR
   return rows.map(parseRow);
 }
 
+/** Ids of every run in this status, oldest update first. */
+export function listBrowserRunIdsByStatus(database: DatabaseSync, status: BrowserRun["status"]): string[] {
+  const rows = database.prepare(`
+    SELECT id FROM browser_runs WHERE status = ? ORDER BY updated_at, id
+  `).all(status) as Array<{ id: string }>;
+  return rows.map((row) => row.id);
+}
+
 /** Run ids starting with this prefix (8 to 36 hex characters or dashes), newest first; at most three. */
 export function findBrowserRunIds(database: DatabaseSync, prefix: string): string[] {
   if (!/^[0-9a-f-]{8,36}$/i.test(prefix)) return [];

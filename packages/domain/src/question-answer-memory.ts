@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-import type { BrowserFieldKind } from "./browser";
+import { browserFieldKindSchema, type BrowserFieldKind } from "./browser";
+import { scopeKey } from "./candidate-facts";
 import { mentionsCompany } from "./company-name";
 import { isDraftableQuestion } from "./voice";
 
@@ -209,3 +210,91 @@ export const savedQuestionAnswerSchema = z.object({
 });
 
 export type SavedQuestionAnswer = z.infer<typeof savedQuestionAnswerSchema>;
+
+/**
+ * Recorded question wordings (migration 0036): each exact wording a stop
+ * asked, recorded against the saved answer it matched (a candidate fact by key
+ * and scope key, or a question-memory answer by its question key). An alias
+ * stores no answer value and never widens a fact's scope.
+ */
+export const questionAliasSourceSchema = z.enum(["candidate_answer", "saved_answer_match", "ai_review"]);
+export type QuestionAliasSource = z.infer<typeof questionAliasSourceSchema>;
+
+export const questionAliasTargetSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("fact"), factKey: z.string().min(1).max(80), scopeKey: z.string().min(1).max(200) }),
+  z.object({ kind: z.literal("question"), questionKey: z.string().min(1).max(1000) })
+]);
+export type QuestionAliasTarget = z.infer<typeof questionAliasTargetSchema>;
+
+export const questionAliasSchema = z.object({
+  id: z.string().uuid(),
+  candidateId: z.string().min(1),
+  wording: z.string().min(1).max(300),
+  wordingKey: z.string().min(1).max(1000),
+  target: questionAliasTargetSchema,
+  atsKind: z.string().min(1).max(40),
+  fieldKind: browserFieldKindSchema.nullable().optional(),
+  options: z.array(z.string().max(200)).max(500),
+  source: questionAliasSourceSchema,
+  sourceRunId: z.string().min(1).max(200).nullable(),
+  createdAt: z.iso.datetime(),
+  lastSeenAt: z.iso.datetime(),
+  seenCount: z.number().int().min(1),
+  revokedAt: z.iso.datetime().nullable()
+});
+export type QuestionAlias = z.infer<typeof questionAliasSchema>;
+
+/** The start of the decision reason of an answer the AI review matched to a saved answer (aiReviewMatchReason). */
+export const AI_REVIEW_MATCH_PREFIX = "AI review matched ";
+const AI_REVIEW_MATCH_SUFFIX = " to your saved answer.";
+
+/**
+ * The decision reason of an answer the AI review matched to a saved answer,
+ * naming the question by its label (whitespace collapsed, clipped to 150
+ * characters) so the auto-submit approval can name it. Such a match passed
+ * every deterministic guardrail, so it does not hold the run (the candidate's
+ * decision, 2026-11-26).
+ */
+export function aiReviewMatchReason(label: string): string {
+  const flat = label.replace(/\s+/g, " ").trim().replaceAll('"', "'");
+  const clipped = flat.length > 150 ? `${flat.slice(0, 149)}…` : flat;
+  return `${AI_REVIEW_MATCH_PREFIX}"${clipped}"${AI_REVIEW_MATCH_SUFFIX}`.slice(0, 500);
+}
+
+/** Whether a decision reason marks an answer the AI review matched to a saved answer. */
+export function isAiReviewMatchReason(reason: string | undefined | null): boolean {
+  return aiReviewMatchLabel(reason) !== null;
+}
+
+/** The question label an AI-review match reason names, or null when the reason is not one. */
+export function aiReviewMatchLabel(reason: string | undefined | null): string | null {
+  if (!reason || !reason.startsWith(AI_REVIEW_MATCH_PREFIX) || !reason.endsWith(AI_REVIEW_MATCH_SUFFIX)) return null;
+  const quoted = reason.slice(AI_REVIEW_MATCH_PREFIX.length, reason.length - AI_REVIEW_MATCH_SUFFIX.length);
+  return quoted.length >= 2 && quoted.startsWith('"') && quoted.endsWith('"') ? quoted.slice(1, -1) : null;
+}
+
+/**
+ * Whether a fact alias's scope applies to this question: a global fact always;
+ * a country fact only on a posting in that country; a company fact only for
+ * that company. Location and channel scopes never travel through an alias.
+ */
+export function aliasScopeAllowed(
+  key: string,
+  context: { companyName?: string | null; postingCountryCode?: string; countryCode?: string }
+): boolean {
+  if (key === "global") return true;
+  if (key.startsWith("country:")) {
+    const country = (context.postingCountryCode ?? context.countryCode)?.toUpperCase();
+    return country !== undefined && `country:${country}` === key;
+  }
+  if (key.startsWith("company:")) {
+    const name = context.companyName?.trim();
+    if (!name) return false;
+    try {
+      return scopeKey({ kind: "company", name }) === key;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}

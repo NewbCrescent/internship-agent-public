@@ -69,7 +69,9 @@ export const voiceDraftSchema = z.object({
   text: z.string().max(4_000),
   gate: voiceGateSummarySchema.nullable(),
   /** Why the draft did not fill the field (gate failure, unsupported claim, …). */
-  reason: z.string().max(500).nullable()
+  reason: z.string().max(500).nullable(),
+  /** Who wrote it: the voice drafter (absent on older runs) or the AI review of a pause batch, whose suggestion is never filled. */
+  source: z.enum(["voice", "pause_review"]).optional()
 });
 
 export const decisionBasisSchema = z.discriminatedUnion("kind", [

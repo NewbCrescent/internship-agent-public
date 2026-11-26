@@ -647,7 +647,11 @@ describe("pnpm profile:answers", () => {
 
     expect(await runProfileAnswersCommand(["--profile", "demo"], deps)).toBe(0);
     const id = answerRows(ws.database)[0]!.id;
-    expect(output).toEqual([`${id.slice(0, 8)} "${PYTHON_QUESTION}" -> Yes [option, saved ${new Date().toISOString().slice(0, 10)}]`]);
+    // Track 45: each saved answer is followed by its recorded wordings (never a value).
+    expect(output).toEqual([
+      `${id.slice(0, 8)} "${PYTHON_QUESTION}" -> Yes [option, saved ${new Date().toISOString().slice(0, 10)}]`,
+      expect.stringMatching(/^ {4}wording "Do you use Python\?" \(handshake, 2 options, your answer, seen 1x, last \d{4}-\d{2}-\d{2}\) \[alias [0-9a-f]{8}\]$/)
+    ]);
 
     output.length = 0;
     expect(await runProfileAnswersCommand(["--profile", "demo", "--revoke", "ffffffff"], deps)).toBe(1);

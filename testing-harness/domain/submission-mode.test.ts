@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { autoSubmitBlockers, autoSubmitSettings, manualOnly, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
+import { aiReviewMatchLabel, aiReviewMatchReason, autoSubmitBlockers, isAiReviewMatchReason, autoSubmitSettings, manualOnly, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
 
 describe("manual checklist mode", () => {
   it("leaves AI submission visible unless explicitly enabled", () => {
@@ -57,6 +57,30 @@ describe("auto-submit policy", () => {
     expect(autoSubmitBlockers({ ...clean, atsConfirmed: false })).toEqual(["The application site type was not recognized automatically."]);
     expect(autoSubmitBlockers({ ...clean, decisions: [{ action: "fill", basis: { kind: "voice_draft" } }] })).toHaveLength(1);
     expect(autoSubmitBlockers({ ...clean, decisions: [{ action: "keep", basis: null }] })).toHaveLength(1);
+  });
+
+  it("lets a guard-checked AI review match auto-submit and holds a suggested draft only while unanswered (Track 45)", () => {
+    const clean = { status: "awaiting-approval", atsConfirmed: true, pauses: [], decisions: [{ action: "fill", basis: { kind: "fact" } }] };
+    // The candidate's decision (2026-11-26): an answer the AI review matched after every guardrail passed does not hold the run.
+    expect(autoSubmitBlockers({ ...clean, decisions: [{ action: "choose", basis: { kind: "fact" }, reason: aiReviewMatchReason("Studying full time?") }] })).toEqual([]);
+    expect(autoSubmitBlockers({ ...clean, pauses: [{ safeguard: false, status: "open", draft: { source: "pause_review" } }] })).toContain(
+      "AI review suggested a draft; you review those."
+    );
+    // Answered by the candidate (with the draft or their own text), it is the candidate's answer.
+    expect(autoSubmitBlockers({ ...clean, pauses: [{ safeguard: false, status: "answered", draft: { source: "pause_review" } }] })).toEqual([]);
+    // A voice draft and older drafts without a source do not count as AI review suggestions.
+    expect(autoSubmitBlockers({ ...clean, pauses: [{ safeguard: false, status: "answered", draft: { source: "voice" } }] })).toEqual([]);
+    expect(autoSubmitBlockers({ ...clean, pauses: [{ safeguard: false, status: "answered", draft: {} }, { safeguard: false, status: "answered", draft: null }] })).toEqual([]);
+  });
+
+  it("names the question in an AI review match reason, and reads it back", () => {
+    const reason = aiReviewMatchReason("  Studying   on a \"full\" schedule?\n");
+    expect(reason).toBe(`AI review matched "Studying on a 'full' schedule?" to your saved answer.`);
+    expect(isAiReviewMatchReason(reason)).toBe(true);
+    expect(aiReviewMatchLabel(reason)).toBe("Studying on a 'full' schedule?");
+    expect(aiReviewMatchLabel(aiReviewMatchReason("x".repeat(400)))).toHaveLength(150);
+    expect(isAiReviewMatchReason("The site already shows this value.")).toBe(false);
+    expect(isAiReviewMatchReason(undefined)).toBe(false);
   });
 
   it("holds only kept attachments and unconfirmed shown answers", () => {

@@ -21,5 +21,6 @@ export * from "./company-history-repository";
 export * from "./application-intent-repository";
 export * from "./mail-match-repository";
 export * from "./question-answer-repository";
+export * from "./question-alias-repository";
 export * from "./coursework-repository";
 export * from "./application-hold-repository";

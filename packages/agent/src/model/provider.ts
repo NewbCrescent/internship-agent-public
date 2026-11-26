@@ -12,7 +12,8 @@ export type ModelTask =
   | "job.requirement_classification"
   | "job.constraint_reading"
   | "application.answer_draft"
-  | "application.voice_revision";
+  | "application.voice_revision"
+  | "application.pause_review";
 
 export type StructuredRequest<T> = {
   task: ModelTask;
