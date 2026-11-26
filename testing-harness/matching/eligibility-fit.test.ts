@@ -6,7 +6,7 @@ import {
   type CandidatePreference,
   type JobPosting
 } from "@internship-agent/domain";
-import { evaluateJobMatch } from "@internship-agent/matching";
+import { acceptsBachelorLevel, evaluateJobMatch, graduateOnlyRequirement, titleNamesGraduateStudy } from "@internship-agent/matching";
 
 const BASE_POSTING = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -338,6 +338,88 @@ describe("deterministic eligibility", () => {
     expect(evaluateJobMatch(posting({ requirements: [{ ...defaulted, text: verb, span: span(verb) }] }), enabled).verdict).toBe("QUALIFIED");
     const proseMention = posting({ snapshot: { ...BASE_POSTING.snapshot, normalizedText: "A team mentor has a PhD." } });
     expect(evaluateJobMatch(proseMention, enabled).verdict).toBe("QUALIFIED");
+  });
+
+  it("reads state and team codes in a title as places, not a Master's level (Track 56)", () => {
+    // Regression: Lutron "Summer 2027 - Software Engineering Intern - Boston, MA" (2026-11-26)
+    // failed the exclusion because MASTER_LEVEL read the state code "MA" as a Master of Arts.
+    const enabled = {
+      ...BASE_INPUTS, candidateDegree: "B.S. Computer Science",
+      preferences: { ...PREFERENCES, excludeGraduateOnlyInternships: true }
+    };
+    const location = (raw: string, city: string, region: string) => ({
+      jobId: BASE_POSTING.id, raw, city, region, countryCode: "US", workMode: "UNSPECIFIED", span: span(raw)
+    });
+    const boston = location("Boston, MA", "Boston", "MA");
+    const jackson = location("Jackson, MS", "Jackson", "MS");
+    const santaClara = location("Santa Clara, CA", "Santa Clara", "CA");
+    const verdict = (title: string, overrides: Record<string, unknown> = {}) =>
+      evaluateJobMatch(posting({ title, ...overrides }), enabled).verdict;
+    const withText = (normalizedText: string) => ({ snapshot: { ...BASE_POSTING.snapshot, normalizedText } });
+
+    for (const title of [
+      "Software Engineer Intern - Boston, MA",
+      "Software Engineer Intern (Boston, MA)",
+      "Software Engineer Intern - Boston (MA)",
+      "MA - Boston - Software Engineer Intern",
+      "US-MA-Boston Software Engineer Intern",
+      "Software Engineer Intern - Boston, MA 02110"
+    ]) {
+      expect(verdict(title), title).toBe("QUALIFIED");
+    }
+    expect(verdict("Summer 2027 - Software Engineering Intern - Boston, MA", { locations: [boston] })).toBe("QUALIFIED");
+
+    // "MS" is Mississippi or a team only with that context; otherwise it stays a degree.
+    expect(verdict("Intern, MS - Summer 2027", { locations: [jackson] })).toBe("QUALIFIED");
+    expect(verdict("Intern, MS - Summer 2027", withText("Join our Mission Systems (MS) sector."))).toBe("QUALIFIED");
+    expect(verdict("Intern, MS - Summer 2027")).toBe("NOT_QUALIFIED");
+    expect(verdict("AI Infrastructure Engineer Intern, MS - Summer 2027", { locations: [santaClara] })).toBe("NOT_QUALIFIED");
+    expect(verdict("Intern, MS - Summer 2027", withText("Open to Master Science (MS) students."))).toBe("NOT_QUALIFIED");
+
+    // Real degree mentions are still graduate study.
+    expect(verdict("Research Intern (MS/PhD)")).toBe("NOT_QUALIFIED");
+    expect(verdict("Research Intern (MS/PhD)", { locations: [jackson] })).toBe("NOT_QUALIFIED");
+    expect(verdict("MBA Intern")).toBe("NOT_QUALIFIED");
+    expect(verdict("Master's Software Intern - Boston, MA")).toBe("NOT_QUALIFIED");
+    expect(verdict("M.S. student intern")).toBe("NOT_QUALIFIED");
+    expect(verdict("Software Intern, MS students only - Jackson, MS", { locations: [jackson] })).toBe("NOT_QUALIFIED");
+    expect(verdict("MS Intern - Jackson, MS", { locations: [jackson] })).toBe("NOT_QUALIFIED");
+    expect(verdict("Data Science Intern (MS-PhD)")).toBe("NOT_QUALIFIED");
+
+    expect(titleNamesGraduateStudy("Software Engineer Intern - Boston, MA")).toBe(false);
+    expect(titleNamesGraduateStudy("Research Intern (MS/PhD)")).toBe(true);
+  });
+
+  it("reads undergraduate class standing in a list of levels as a bachelor's level (Track 56)", () => {
+    // Regression: Lutron's hard line (2026-11-26) read as graduate-only because class standing was not a level.
+    const enabled = {
+      ...BASE_INPUTS, candidateDegree: "B.S. Computer Science",
+      preferences: { ...PREFERENCES, excludeGraduateOnlyInternships: true }
+    };
+    const line = (text: string) => ({
+      id: "77777777-7777-4777-8777-777777777777",
+      jobId: BASE_POSTING.id,
+      text,
+      category: "HARD" as const,
+      subject: "DEGREE" as const,
+      extraction: "DETERMINISTIC" as const,
+      assertion: "STATED" as const,
+      confidence: 0.9,
+      span: span(text)
+    });
+    for (const text of [
+      "You are a rising junior, rising senior, or master's student at the start of the internship",
+      "Rising or Current Senior or master's student at the time of application."
+    ]) {
+      expect(graduateOnlyRequirement({ text, subject: "DEGREE" }), text).toBe(false);
+      expect(acceptsBachelorLevel(text), text).toBe(true);
+      const report = evaluateJobMatch(posting({ requirements: [line(text)] }), enabled);
+      expect(report.verdict, text).not.toBe("NOT_QUALIFIED");
+      expect(report.findings.some((finding) => finding.reason.includes("saved preference")), text).toBe(false);
+    }
+    for (const text of ["Must be a master's student working with senior engineers.", "Current master's students; juniors are not eligible."]) {
+      expect(graduateOnlyRequirement({ text, subject: "DEGREE" }), text).toBe(true);
+    }
   });
 
   it("checks graduate programs like an MBA from the requirement text, whatever subject the model gave it", () => {

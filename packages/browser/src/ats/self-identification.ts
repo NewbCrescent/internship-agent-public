@@ -18,6 +18,10 @@ import type { BrowserField, SelfIdentificationAnswers, SelfIdentificationKey } f
  *    is not an open prompt.
  * 3. Exactly one offered option matches the saved answer; two matches are
  *    ambiguous and none is no answer.
+ * 4. The candidate's race-only rule (2026-11-26): on a race-only question (the
+ *    label names race or racial and no ethnicity, Hispanic, or Latino wording)
+ *    where no offered option matches the saved race or ethnicity answer and the
+ *    list offers exactly one decline option, that decline option is chosen.
  *
  * The saved values never leave this module except as the chosen option text.
  */
@@ -39,6 +43,15 @@ const DECLINE = /\bdecline[sd]?\b|\b(?:do not|don't|does not) (?:wish|want|care)
 const NOT_SELF_ID = /\b(?:pronouns?|lgbt\w*|assigned at birth|accommodat\w*|why|describe|explain|tell us)\b/;
 // A checkbox group is a self-identification list only when it says so (Greenhouse's "mark all that apply").
 const ALL_THAT_APPLY = /\b(?:mark|select|check|choose) all that apply\b/;
+// A race question on its own (2026-11-26): it names race and no ethnicity; Hispanic or Latino is an ethnicity.
+const RACE_ONLY = /\b(?:race|racial)\b/;
+const ETHNICITY_WORDING = /\b(?:ethnic\w*|hispanic|latin\w*)/;
+
+/** Why an option other than the saved answer's own was chosen: the candidate's race-only rule (2026-11-26). */
+export type SelfIdentificationRule = "race_only_decline";
+
+/** The decision reason for the race-only rule; it never names the saved answer. */
+export const RACE_ONLY_DECLINE_REASON = "Answered a race-only self-identification question with its decline option (the candidate's rule, 2026-11-26).";
 
 function normalize(text: string): string {
   return text
@@ -187,12 +200,14 @@ const RACE_VALUES = new Set([
 /**
  * The offered option that the candidate's saved answer selects, or null when
  * the field is not a voluntary EEO question, no answer is saved, or not
- * exactly one option matches.
+ * exactly one option matches. On a race-only question with no matching option
+ * and exactly one decline option, that option is chosen with
+ * `rule: "race_only_decline"` (the candidate's rule, 2026-11-26).
  */
 export function matchSelfIdentificationOption(
   field: BrowserField,
   answers: SelfIdentificationAnswers
-): { key: SelfIdentificationKey; option: string } | null {
+): { key: SelfIdentificationKey; option: string; rule?: SelfIdentificationRule } | null {
   const category = selfIdentificationCategory(field);
   if (!category) return null;
   const key = KEY[category];
@@ -207,6 +222,14 @@ export function matchSelfIdentificationOption(
     const hits = candidates.filter(({ normalized }) => tier(normalized));
     if (hits.length === 1) return { key, option: hits[0]!.option };
     if (hits.length > 1) return null;
+  }
+  // No offered option matches (one match returned above, several are ambiguous). The candidate's
+  // rule (2026-11-26): a race-only list (not a combined race-or-ethnicity or Hispanic/Latino
+  // question) takes its one decline option.
+  const label = normalize(field.label);
+  if (category === "race" && RACE_ONLY.test(label) && !ETHNICITY_WORDING.test(label)) {
+    const declines = (field.options ?? []).filter((option) => DECLINE.test(normalize(option)));
+    if (declines.length === 1) return { key, option: declines[0]!, rule: "race_only_decline" };
   }
   return null;
 }

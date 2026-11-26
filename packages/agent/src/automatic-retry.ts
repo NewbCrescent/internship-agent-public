@@ -525,8 +525,8 @@ export function requeueVerifiedHold(
   });
 }
 
-/** Evidence outcomes saved before any submit click (account steps, Workday entry or step errors, iCIMS stops, a dialog over the form while it filled); any other outcome is post-submit. */
-const PRE_SUBMIT_OUTCOMES: ReadonlySet<string> = new Set(["workday-account", "workday-errors", "workday-entry", "icims-account", "icims-application", "covering-dialog"]);
+/** Evidence outcomes saved before any submit click (account steps, Workday entry or step errors, iCIMS stops, a dialog over the form while it filled, a Track 42 stop capture); any other outcome is post-submit. */
+const PRE_SUBMIT_OUTCOMES: ReadonlySet<string> = new Set(["workday-account", "workday-errors", "workday-entry", "icims-account", "icims-application", "covering-dialog", "stop"]);
 /** Timeline notes that show a submit was approved, attempted, reopened, or recorded for the job. */
 const SUBMIT_ATTEMPT_NOTES = [AUTO_SUBMIT_EVENT, APPROVAL_EVENT_PREFIX, "Automatic submission failed: ", REOPENED_UNSUBMITTED_PREFIX];
 

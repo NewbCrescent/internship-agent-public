@@ -150,6 +150,7 @@ describe("AI review of a pause batch", () => {
     const details = eventDetails(ws);
     expect(details).toContain(`AI review matched '${FULL_TIME_LABEL}' to saved answer enrolled_full_time (global).`);
     expect(details).toContain("AI review looked at 1 open question(s): 1 matched saved answers, 0 wait for you, 0 suggested drafts (7 ms, 120 input and 40 output tokens).");
+    expect(details).toContain(`AI review of "${FULL_TIME_LABEL}" (q1): verdict saved_answer, key enrolled_full_time; matched.`);
     expect(ws.database.prepare("SELECT wording, target_kind, fact_key, fact_scope_key, source FROM candidate_question_aliases").all()).toEqual([
       { wording: FULL_TIME_LABEL, target_kind: "fact", fact_key: "enrolled_full_time", fact_scope_key: "global", source: "ai_review" }
     ]);
@@ -213,6 +214,66 @@ describe("AI review of a pause batch", () => {
       expect(run.decisions.find((decision) => decision.fieldId === fieldId)?.action, fieldId).toBe("pause");
     }
     expect(run.decisions.some((decision) => isAiReviewMatchReason(decision.reason))).toBe(false);
+    expect((ws.database.prepare("SELECT COUNT(*) AS n FROM candidate_question_aliases").get() as { n: number }).n).toBe(0);
+    ws.database.close();
+  });
+
+  it("logs one verdict line per reviewed question with labels, keys, and checks only, and keeps a mapped question refused (Track 54)", async () => {
+    const ws = workspace();
+    const movesLabel = "Okay with frequent moves between offices?";
+    const relocateLabel = "Are you willing to relocate?";
+    const officeLabel = "Which office do you prefer?";
+    const teamLabel = "Preferred team size?";
+    const paceLabel = "Preferred project pace?";
+    for (const label of [FULL_TIME_LABEL, movesLabel, officeLabel, teamLabel, paceLabel]) await unmapped(label, ws);
+    expect(await new DeterministicQuestionMapper().map(relocateLabel, { companyName: ws.company, postingCountryCode: "US", fieldKind: "select" }))
+      .toMatchObject({ status: "MAPPED", key: "willing_to_relocate", scope: { kind: "country", code: "US" } });
+    saveFact(ws.database, { key: "enrolled_full_time", scope: { kind: "global" }, value: true });
+    saveFact(ws.database, { key: "willing_to_relocate", scope: { kind: "global" }, value: true });
+    const model = fakeModel((input) => [
+      ...reviewFor(input, FULL_TIME_LABEL, { verdict: "saved_answer", key: "enrolled_full_time", option: "No", reason: "Saved.", draft: null }),
+      ...reviewFor(input, movesLabel, { verdict: "saved_answer", key: "authorized_to_work", option: "Yes", reason: "Saved.", draft: null }),
+      ...reviewFor(input, relocateLabel, { verdict: "saved_answer", key: "willing_to_relocate", option: "Yes", reason: "Saved.", draft: null }),
+      ...reviewFor(input, officeLabel, { verdict: "saved_answer", key: "made_up_key_do_not_echo", option: "North", reason: "Saved.", draft: null }),
+      ...reviewFor(input, teamLabel, { verdict: "needs_candidate", key: null, option: null, reason: "REASON-TEXT-NOT-LOGGED", draft: null })
+    ]);
+    const controls = [
+      select("fulltime", FULL_TIME_LABEL), select("moves", movesLabel), select("relocate", relocateLabel),
+      select("office", officeLabel, ["North", "South"]), select("team", teamLabel, ["Small", "Large"]), select("pace", paceLabel, ["Steady", "Fast"]),
+      submitButton
+    ];
+    const { run, page } = await start(ws, controls, createPauseReviewer({ provider: model.provider, database: ws.database }));
+
+    expect(model.requests).toHaveLength(1);
+    const ids = new Map((JSON.parse(model.requests[0]!.input) as { questions: Array<{ id: string; label: string }> }).questions.map((entry) => [entry.label, entry.id]));
+    expect(ids.size).toBe(6);
+    const details = eventDetails(ws);
+    const lines = details.filter((detail) => detail.startsWith("AI review of "));
+    expect(lines).toEqual([
+      `AI review of "${FULL_TIME_LABEL}" (${ids.get(FULL_TIME_LABEL)}): verdict saved_answer, key enrolled_full_time; refused by the "option disagrees" check.`,
+      `AI review of "${movesLabel}" (${ids.get(movesLabel)}): verdict saved_answer, key authorized_to_work; refused by the "sensitive answer" check.`,
+      `AI review of "${relocateLabel}" (${ids.get(relocateLabel)}): verdict saved_answer, key willing_to_relocate; refused by the "mapped question" check (mapper: MAPPED willing_to_relocate).`,
+      `AI review of "${officeLabel}" (${ids.get(officeLabel)}): verdict saved_answer, no usable key; refused by the "unknown key" check.`,
+      `AI review of "${teamLabel}" (${ids.get(teamLabel)}): verdict needs_candidate; waits for you.`,
+      `AI review of "${paceLabel}" (${ids.get(paceLabel)}): no review returned; waits for you.`
+    ]);
+    // No values: no answer, saved value, offered option, model key the review did not send, or model reason.
+    const joined = lines.join("\n");
+    expect(joined).not.toMatch(/\bYes\b/);
+    expect(joined).not.toMatch(/\bNo\b/);
+    expect(joined).not.toMatch(/\b(North|South|Small|Large|Steady|Fast|true|false)\b/);
+    expect(joined).not.toContain("made_up_key_do_not_echo");
+    expect(joined).not.toContain("REASON-TEXT-NOT-LOGGED");
+    expect(details).toContain("AI review looked at 6 open question(s): 0 matched saved answers, 6 wait for you, 0 suggested drafts (7 ms, 120 input and 40 output tokens).");
+
+    // Every guardrail still holds: nothing is filled, every pause stays open, and no wording is recorded.
+    expect(run.status).toBe("paused-needs-input");
+    for (const fieldId of ["fulltime", "moves", "relocate", "office", "team", "pace"]) {
+      expect(run.pauses.find((pause) => pause.fieldId === fieldId)?.status, fieldId).toBe("open");
+      expect(page.filled.has(fieldId), fieldId).toBe(false);
+      expect(run.decisions.find((decision) => decision.fieldId === fieldId)?.action, fieldId).toBe("pause");
+    }
+    expect(run.pauses.find((pause) => pause.fieldId === "relocate")?.question).toContain("did not pass the checks (mapped question)");
     expect((ws.database.prepare("SELECT COUNT(*) AS n FROM candidate_question_aliases").get() as { n: number }).n).toBe(0);
     ws.database.close();
   });
@@ -341,4 +402,3 @@ describe("AI review of a pause batch", () => {
     fresh.database.close();
   });
 });
-

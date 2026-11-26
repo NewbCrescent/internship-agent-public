@@ -21,4 +21,6 @@ within 8 s is clicked once more. Regression: the `?sections=aria`
 `testing-harness/browser/fixture-run.ts` (`pnpm test:browser:fixture`).
 Still needed: a live Compassion run after this fix to confirm the cause,
 and Workday evidence (a screenshot and the section markup) saved for
-history-row pauses, which today save none.
+history-row pauses, which today save none. History-row pauses now save a
+`history-row` stop capture with the section markup (Track 42), so the
+next real Compassion run will show the cause; the bug stays open.

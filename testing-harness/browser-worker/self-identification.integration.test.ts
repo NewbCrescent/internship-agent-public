@@ -17,7 +17,7 @@ import {
   startBrowserRun,
   type VoiceDrafter
 } from "@internship-agent/agent";
-import type { BrowserPage, RawControl } from "@internship-agent/browser";
+import { RACE_ONLY_DECLINE_REASON, type BrowserPage, type RawControl } from "@internship-agent/browser";
 import {
   createDatabase,
   getBrowserRun,
@@ -440,6 +440,53 @@ describe("saved voluntary self-identification answers in browser runs", () => {
       expect(entry.reason).not.toContain("Female");
       expect(entry.reason).not.toContain("They/Them/Theirs");
     }
+    database.close();
+  });
+});
+
+describe("race-only self-identification lists in browser runs (the candidate's rule, 2026-11-26)", () => {
+  // A synthetic copy of a Rippling race-only list; the saved answers are test values.
+  const RACE_ONLY: RawControl = {
+    tag: "select", id: "race-only", label: "Please identify your race", required: false,
+    options: ["American Indian or Alaskan Native", "Asian", "Black or African American", "Middle Eastern or North African", "White",
+      "Native Hawaiian or other Pacific Islander", "Two or more races", "Choose not to disclose"]
+  };
+
+  it("chooses the decline option for an answer the list does not offer, and nothing names the saved answer", async () => {
+    const logged: string[] = [];
+    for (const method of ["log", "info", "warn", "error"] as const) {
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => { logged.push(args.map(String).join(" ")); });
+    }
+    const database = disposableDatabase();
+    const jobId = approvedJobId(database, (db) => saveFact(db, "eeo_race_ethnicity", { kind: "global" }, "hispanic_or_latino"));
+    const { run, page } = await runWith(database, jobId, [RACE_ONLY, START, SUBMIT]);
+
+    expect(run.status).toBe("awaiting-approval");
+    expect(run.pauses).toEqual([]);
+    expect(page.filled.get("race-only")).toBe("Choose not to disclose");
+    expect(decision(run, "race-only")).toMatchObject({
+      action: "choose", value: "Choose not to disclose", reason: RACE_ONLY_DECLINE_REASON,
+      basis: { kind: "fact", key: "eeo_race_ethnicity", scope: "global" }
+    });
+    expect(autoSubmitBlockers(run)).toEqual([]);
+    const events = (database.prepare("SELECT detail FROM application_events WHERE job_id = ?").all(jobId) as Array<{ detail: string | null }>)
+      .map((row) => row.detail ?? "");
+    for (const text of [...events, ...logged, JSON.stringify(run.decisions), JSON.stringify(run.pauses)]) {
+      expect(text).not.toMatch(/hispanic|latin/i);
+    }
+    for (const text of events) expect(text).not.toContain("eeo_");
+    database.close();
+  });
+
+  it("chooses the saved answer's own option when the list offers it", async () => {
+    const database = disposableDatabase();
+    const jobId = approvedJobId(database, (db) => saveFact(db, "eeo_race_ethnicity", { kind: "global" }, "white"));
+    const { run, page } = await runWith(database, jobId, [RACE_ONLY, START, SUBMIT]);
+
+    expect(run.pauses).toEqual([]);
+    expect(page.filled.get("race-only")).toBe("White");
+    expect(decision(run, "race-only")).toMatchObject({ action: "choose", value: "White", basis: { kind: "fact", key: "eeo_race_ethnicity" } });
+    expect(decision(run, "race-only")!.reason).not.toBe(RACE_ONLY_DECLINE_REASON);
     database.close();
   });
 });

@@ -170,6 +170,18 @@ export const suiteManifest = [
     description: "Daily Discord digest with a fake clock, an injected Discord fetch (the global fetch throws), and a disposable workspace: sent at or after 09:00 local time once per day and again the next day, nothing sent when there is nothing to report, plain words per hold (questions, CAPTCHA, file, ready to send, drafted answer) with no internal status names, at most two questions per item then +N more, at most eight items, internal holds omitted from real candidate delivery, original Q numbers for manual field corrections, pass/digest deduplication, the digest mapping saved and retained through summary-only messages, sends and company replies since the last digest, the token never in the message, log, or state, and a failed send or read logged and retried an hour later without failing the watcher tick; a run waiting at the submit step on a site the candidate approves each run on (Oracle, SmartRecruiters) reads ready, and old CAPTCHA-token pauses are neither a CAPTCHA nor a question."
   },
   {
+    id: "pipeline-scoreboard",
+    features: ["scoreboard", "outcomes"],
+    tier: "local",
+    script: "test:agent:scoreboard",
+    requires: ["node", "pnpm", "node-sqlite"],
+    network: "none",
+    mutation: "local-temporary",
+    timeoutMs: 60_000,
+    reportPrefixes: [],
+    description: "Application scoreboard against a disposable workspace and a fixed clock (the global fetch throws): funnel counts once per job on its first UTC day (discovery-trace listings, stored, qualified, ruled out by reason, started, at the submit step, confirmed, failed or held), a status flip or the closed-dialog relabel never counted as submitted while a recognized confirmation or a checked receipt is, blockers grouped across wordings and company names of one question, the three categories (needs the candidate, needs a fix, site safeguard) with ranking, protected and saved values absent from the text and JSON, candidate-entered values (Workday history entries, profile and resume values, sensitive questions) never printed in the text, JSON, snapshots, changes, or claims, digits kept in question labels, the database left unchanged, owner-only snapshots with changes since the last run and 30-day pruning, blocker claims (claim, renew, one per track, release with a reason, done, stale after 24 hours and taken over), stable blocker ids, and argument errors."
+  },
+  {
     id: "application-record",
     features: ["browser", "applications"],
     tier: "local",
@@ -251,7 +263,7 @@ export const suiteManifest = [
     mutation: "none",
     timeoutMs: 30_000,
     reportPrefixes: [],
-    description: "Hard eligibility ordering (stated vs inferred vs silent), Handshake-only graduation dates, explainable keyword scoring, and grounded AI competitiveness response validation; relocation willingness read for the location's country. The needs-review pursuit allowlist (review-pursuit.ts): only unverified skill, experience, degree-wording, and B.S./B.A. findings pass; graduate study, missing facts, statements of fact, failures, and other reasons do not. A graduate-study title that also names a bachelor's level (\"BS/MS/PhD\") is not graduate-only."
+    description: "Hard eligibility ordering (stated vs inferred vs silent), Handshake-only graduation dates, explainable keyword scoring, and grounded AI competitiveness response validation; relocation willingness read for the location's country. The needs-review pursuit allowlist (review-pursuit.ts): only unverified skill, experience, degree-wording, and B.S./B.A. findings pass; graduate study, missing facts, statements of fact, failures, and other reasons do not. A graduate-study title that also names a bachelor's level (\"BS/MS/PhD\") is not graduate-only. A bare MA or MS in a title that is a state (a stored location in that state, a city of it before or after, a ZIP, or US-MA) or a spelled-out team code (\"Mission Systems (MS)\") is not a Master's level, while MS/PhD, BS/MS, M.S., \"MS students\", Master's, and MBA still are; undergraduate class standing in a list of levels (\"a rising junior, rising senior, or master's student\") accepts bachelor's study (Track 56)."
   },
   {
     id: "job-normalization-contracts",
@@ -347,7 +359,7 @@ export const suiteManifest = [
     mutation: "local-temporary",
     timeoutMs: 60_000,
     reportPrefixes: [],
-    description: "The AI review of a pause batch with a fake model provider (fetch stubbed to throw; no network): a saved-answer match is applied only when every deterministic check passes (mapper unmapped, no statement of fact, standard-sensitivity fact, exact option, scope) and is marked as an AI review match (auto-submit allowed, the approval event names the question by label, recorded wording with source ai_review); a wrong option or a sensitive or statement-of-fact match is rejected with the check named and the stop left open; sensitive values are sent only as \"saved\" and nothing about protected self-identification categories is sent; invalid model output falls back to today's pause with one failed cost row and one timeline line; a suggested draft is shown, never filled or stored, and blocks auto-submit until the candidate answers it; one model call per batch; no reviewer, no call."
+    description: "The AI review of a pause batch with a fake model provider (fetch stubbed to throw; no network): a saved-answer match is applied only when every deterministic check passes (mapper unmapped, no statement of fact, standard-sensitivity fact, exact option, scope) and is marked as an AI review match (auto-submit allowed, the approval event names the question by label, recorded wording with source ai_review); a wrong option or a sensitive or statement-of-fact match is rejected with the check named and the stop left open; sensitive values are sent only as \"saved\" and nothing about protected self-identification categories is sent; invalid model output falls back to today's pause with one failed cost row and one timeline line; a suggested draft is shown, never filled or stored, and blocks auto-submit until the candidate answers it; one model call per batch; no reviewer, no call; every reviewed question gets one timeline line with its verdict, the fact key, and the refusing check (with the mapper's result for a mapped question), never a value, and a mapped-but-unresolved question stays refused."
   },
   {
     id: "questions-recheck-cli",
@@ -408,6 +420,18 @@ export const suiteManifest = [
     timeoutMs: 30_000,
     reportPrefixes: [],
     description: "Explicit read-only command, never selected by a gate: summarizes the workspace's discovery traces (counts by decision and reason, dropped hosts per pass) and finds a listing by company, title, or link."
+  },
+  {
+    id: "pipeline-scoreboard-cli",
+    features: ["scoreboard"],
+    tier: "benchmark",
+    script: "pipeline:scoreboard",
+    requires: ["node", "pnpm", "node-sqlite"],
+    network: "none",
+    mutation: "local-profile-files",
+    timeoutMs: 60_000,
+    reportPrefixes: [],
+    description: "Explicit read-only command, never selected by a gate: prints the application funnel (confirmed submissions only) and the ranked blocker board for the chosen workspace (default real), saves a local snapshot for the next run's changes unless --no-save, and records blocker claims with --claim, --release --reason, and --done."
   },
   {
     id: "board-import-cli",
@@ -528,6 +552,18 @@ export const suiteManifest = [
     timeoutMs: 45_000,
     reportPrefixes: [],
     description: "Match reports, state transitions, full-posting competitiveness with zero extracted requirements, grounded citations, candidate intent, level, and selectivity context in the fit prompt (no student ID), prompt-revision and intent staleness, legacy cache/failure invalidation, cache reuse/invalidation, in-flight changes, and unchanged approval boundaries against disposable SQLite; course evidence items with in-progress labels and coursework staleness. A stored constraint text longer than the schema allows (rows from before the extraction window) is clipped on read, so the analysis still runs; the fit prompt reads only FIT_CONTEXT_FACT_KEYS facts, and saving other facts leaves a fit current."
+  },
+  {
+    id: "match-reevaluation",
+    features: ["matching", "database"],
+    tier: "local",
+    script: "test:matching:reevaluate",
+    requires: ["node", "pnpm", "node-sqlite"],
+    network: "none",
+    mutation: "local-temporary",
+    timeoutMs: 45_000,
+    reportPrefixes: [],
+    description: "pnpm matches:reevaluate (Track 56) against disposable SQLite: a dry run on a read-only handle changes no job, match, or event row while listing the stale \"Boston, MA\" verdict it would change; --apply takes the pipeline lock (refused while another live run holds it, with nothing written), saves only changed verdicts of postings still in analysis whose status matches their stored verdict and that were never prepared or run, logs the transition on the timeline, and a second --apply changes nothing; submitted, approved, candidate-skipped, label-held, applying-with-a-run, prepared, and hand-closed postings are never written; --job limits it to one posting; the output names company, title, and verdicts only, never a job id."
   },
   {
     id: "job-ingestion-persistence",
@@ -744,6 +780,18 @@ export const suiteManifest = [
     timeoutMs: 120_000,
     reportPrefixes: ["SITE_NAVIGATION_REPORT"],
     description: "Real Chromium against routed synthetic pages (no network): a OneTrust-shaped banner rejected, never accepted, by the shared reject-first helper on its own and on the posting's Apply-entry path, an accept-only banner left unclicked, and its preference-center toggles, vendor search, copy-link box, and a honeypot never controls; an unrecognized site walked consent, Apply, and Apply as guest to its one-page form (never Sign in, Create account, or Apply with LinkedIn) and its identity fields and resume filled while the honeypot is no field; a several-page form's first page read as Next without a submit; Paylocity's reconstructions (from a read-only capture): no field on the posting, its accept-only banner closed and Apply followed, the application classified paylocity (confirm), First Name, Last Name, Email Address, and Mobile Number filled, the resume uploaded to its input only, County paused, and Next Step without a submit; SmartRecruiters' WeChat share box no application field and I'm interested reaching DataDome (a challenge); Oracle Cloud HCM's posting with no field and Apply Now reaching the email step (a wall); a careers page embedding a Greenhouse application (its iframe, or only the embed script plus gh_jid) opened at the embed's address by followApplyEntry and the walker (an embed hop); an Oracle Apply Now drawn 2.5 s after load still followed to the email step; an Eightfold-style Apply Now opening the employer's Workday posting in a new tab followed there with the tab closed, and the walker stopping as adapter."
+  },
+  {
+    id: "stop-evidence-and-run-traces",
+    features: ["browser"],
+    tier: "browser",
+    script: "test:browser:stop-evidence",
+    requires: ["node", "pnpm", "playwright-chromium"],
+    network: "none",
+    mutation: "local-temporary",
+    timeoutMs: 300_000,
+    reportPrefixes: ["STOP_EVIDENCE_REPORT", "RUN_TRACE_REPORT"],
+    description: "Real Chromium against pages a 127.0.0.1 server owned by the script serves, with a temporary data directory (Track 42): (A) the stop-region reader keeps a field's form-field container, a labelled Work Experience group, and a page's main region with its iframes and Apply-like controls query-stripped, never a typed or default input value, a hidden token, textarea or contenteditable text, an email, or a long digit run, marks a lingering hidden step ia-hidden, cuts a 3,000-row page at 12,000 characters, and reads without a click, focus, input, change, focus move, or DOM mutation; (B) a run trace with the default options (the candidate's 2026-11-26 choice: the film strip and the actions, no DOM, aria, or per-action screen snapshots) of a page whose server and script set cookies, send an Authorization header, and receive a token holds none of them and no network record, passes the fail-closed check, keeps the film strip but no per-action screenshot, and is saved mode 600 in a mode 700 folder; (B2) the same flow in snapshot mode (INTERNSHIP_AGENT_TRACE_SNAPSHOTS=1) records the per-action screenshots, still holds none of those values and no network record, and passes the fail-closed check; (C) the same flow traced with DOM snapshots holds them and the check reports network-found; (D) a password typed inside a wrapped account method is in neither saved part, while unwrapped it is recorded; (E) nothing is recorded after a wrapped security-code step; (F) a saved value in the trace drops it, unknown saved values drop it, and a clean end keeps nothing; (G) pruning of old and over-cap traces, old parts folders, and old intermediate files by their own time, and the zip reader on stored, deflated, and truncated zips; (H) informational overhead of untraced, default-mode, and snapshot-mode runs (medians of 3) on the Handshake fixture fill and the Workday fixture's first walk (time, overhead, and bytes per mode in RUN_TRACE_REPORT); (I) git ignores run traces and stop captures under the real profile; (J) traceSnapshotsWanted reads INTERNSHIP_AGENT_TRACE_SNAPSHOTS (exactly 1) and the optional exact-host list INTERNSHIP_AGENT_TRACE_SNAPSHOT_HOSTS."
   },
   {
     id: "oracle-verification-code",

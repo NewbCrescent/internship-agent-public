@@ -66,6 +66,7 @@ import {
   type SecurityCodeLookup,
   type SecurityCodeLookupResult
 } from "./submission-outcome";
+import { readStopRegionIn, type StopRegion, type StopRegionRequest } from "./stop-evidence";
 import {
   clickStandingDialogButton,
   readStandingDialogsIn,
@@ -126,6 +127,8 @@ export type BrowserPage = {
   standingDialogs?(): Promise<StandingDialogCandidate[]>;
   /** Clicks a dialog button standingDialogs tagged, after checking its name (Track 40). */
   clickDialogButton?(tag: string, name: string): Promise<"hidden" | "still-shown" | "failed">;
+  /** Track 42: a bounded, sanitized excerpt of the page region a stop concerns (stop-evidence.ts readStopRegionIn), read without clicking, focusing, or typing; input values are never read. */
+  stopRegion?(request: StopRegionRequest): Promise<StopRegion>;
   /** Visible error or alert text, read after a submit that showed no confirmation. */
   alertText?(): Promise<string>;
   /**
@@ -1077,6 +1080,10 @@ export function createPlaywrightPage(page: Page): BrowserPage {
       }
     },
     clickDialogButton: (tag, name) => clickStandingDialogButton(page, tag, name),
+    stopRegion: async (request) => {
+      await ensureNameShim(page);
+      return page.evaluate(readStopRegionIn, request);
+    },
     alertText: async () => {
       try {
         await ensureNameShim(page);

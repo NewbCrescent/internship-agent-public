@@ -8,7 +8,14 @@ import {
 } from "@internship-agent/domain";
 import type { EligibilityFinding } from "@internship-agent/domain";
 
-import { acceptsBachelorLevel, bachelorKindMismatch, readBachelorDegreeRequirement, type DegreeContext } from "./degree-reading";
+import {
+  acceptsBachelorLevel,
+  bachelorKindMismatch,
+  readBachelorDegreeRequirement,
+  withoutPlaceAndTeamCodes,
+  type DegreeContext,
+  type TitleContext
+} from "./degree-reading";
 import { checkSchoolRestriction } from "./school-restriction";
 import { displaySkillKey, mentionedAs } from "./skill-keys";
 
@@ -427,9 +434,14 @@ function hasExplicitAlternative(text: string, requiredLevel: RegExp, alternative
   return !/[.;\n]/.test(connector) && /\bor\b|\//i.test(connector);
 }
 
-/** Whether a posting title targets only Master's or PhD candidates; a title that also names a bachelor's level ("BS/MS/PhD") does not. */
-export function titleNamesGraduateStudy(title: string): boolean {
-  return (DOCTORATE_LEVEL.test(title) || MASTER_LEVEL.test(title)) && !BACHELOR_LEVEL.test(title);
+/**
+ * Whether a posting title targets only Master's or PhD candidates; a title
+ * that also names a bachelor's level ("BS/MS/PhD") does not, and a state code
+ * or team code ("Boston, MA", "Mission Systems (MS)") is not a degree (Track 56).
+ */
+export function titleNamesGraduateStudy(title: string, context: TitleContext = {}): boolean {
+  const read = withoutPlaceAndTeamCodes(title, context);
+  return (DOCTORATE_LEVEL.test(read) || MASTER_LEVEL.test(read)) && !BACHELOR_LEVEL.test(read);
 }
 
 /** Whether a requirement names graduate study without accepting a bachelor's or stating a bachelor's alternative. */
@@ -447,7 +459,7 @@ function checkGraduateInternshipPreference(
   if (!preferences?.excludeGraduateOnlyInternships ||
       (posting.employmentType !== "INTERNSHIP" && posting.employmentType !== "CO_OP")) return null;
 
-  if (titleNamesGraduateStudy(posting.title)) {
+  if (titleNamesGraduateStudy(posting.title, { locations: posting.locations, text: posting.snapshot.normalizedText })) {
     return {
       subject: "DEGREE",
       requirementId: null,

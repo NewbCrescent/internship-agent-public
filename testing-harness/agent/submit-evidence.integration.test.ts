@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -10,27 +10,41 @@ import {
   applicationHoldTrace, createDatabase, listApplicationEvents, logApplicationEvent, persistNormalizedPosting, saveApplicationPackage,
   saveBrowserRun, saveVerificationReport, setJobStatus, updateBrowserRun
 } from "@internship-agent/db";
-import type { BrowserRun } from "@internship-agent/domain";
+import type { BrowserRun, PauseRecord, RecognizedForm } from "@internship-agent/domain";
 import {
+  COVERING_DIALOG_REASON,
   createAshbyDiagnosticsRecorder,
   createAshbyNetworkRecorder,
+  runTracesRoot,
   scrubValuesFrom,
+  stopEvidenceRoot,
   submitEvidenceRoot,
   type BrowserPage,
-  type PostSubmitEvidence
+  type PostSubmitEvidence,
+  type StopRegion,
+  type StopRegionRequest,
+  type WorkdayWalkResult
 } from "@internship-agent/browser";
 import {
   describeAshbyDiagnostics,
   describeAshbyNetwork,
   describeCoveringDialogs,
+  failureStop,
+  fillStops,
+  logRunTraceQuietly,
   readJobEvidence,
+  readStopEvidence,
   readSubmitEvidence,
   redactEvidenceText,
   runEvidenceCommand,
   saveCoveringDialogEvidenceQuietly,
   savePostSubmitEvidence,
   savePostSubmitEvidenceQuietly,
-  submitEvidenceFileSchema
+  saveStopEvidenceQuietly,
+  STOP_CAPTURES_PER_RUN,
+  submitEvidenceFileSchema,
+  workdayStops,
+  type StopRequest
 } from "@internship-agent/agent";
 import { refreshApplicationHolds } from "../../packages/agent/src/application-holds";
 import { answerRunPause, continueBrowserRun } from "../../packages/agent/src/browser-orchestrator";
@@ -1004,5 +1018,365 @@ describe("a dialog that covers the form (Track 39)", () => {
     expect(describeCoveringDialogs(null)).toEqual([]);
     expect(describeCoveringDialogs([])).toEqual(["Covering dialogs: none was still shown when the capture was read"]);
     database.close();
+  });
+});
+
+/**
+ * Track 42: a stop capture the first time each kind of pause or stop happens
+ * in a run (saveStopEvidenceQuietly), and the kept run traces `pnpm
+ * run:evidence` lists. Fake pages, fictional values; the redaction cases are
+ * the agent-side redaction tests (the in-page reader's are scenario (A) of
+ * `pnpm test:browser:stop-evidence`).
+ */
+describe("stop evidence (Track 42)", () => {
+  const SECRET = "S3cret-Pass";
+  const REGION: StopRegion = {
+    anchor: "id",
+    html: `<div data-automation-id="formField-email"><label for="email">Email</label><span>jordan@example.test</span><a href="https://x.example/b?q=1">help</a><span>${SECRET}</span></div>`,
+    truncated: false,
+    frames: [{ src: "https://careers.example.test/frame", title: "Application for jordan@example.test", name: "apply", width: 800.4, height: 600, visible: true }],
+    applyControls: [{ tag: "a", text: "Apply now", href: "https://careers.example.test/start", role: null, ariaLabel: "Apply as jordan@example.test", disabled: false, visible: true }]
+  };
+
+  function stopPage(options: { region?: StopRegion | null; failing?: boolean } = {}): BrowserPage & { shots: string[]; reads: StopRegionRequest[] } {
+    const shots: string[] = [];
+    const reads: StopRegionRequest[] = [];
+    const fail = async (): Promise<never> => { throw new Error("Target page, context or browser has been closed"); };
+    return {
+      shots,
+      reads,
+      url: () => {
+        if (options.failing) throw new Error("closed");
+        return "https://careers.example.test/apply?token=T1#step";
+      },
+      title: async () => "Apply",
+      collectControls: async () => [],
+      bodyText: options.failing ? fail : async () => `Apply\nEmail jordan@example.test\nLink https://x.example/a?token=T1\nPhone 5551234567\nPassword ${SECRET}`,
+      fillField: async () => { throw new Error("must not type"); },
+      chooseOption: async () => { throw new Error("must not choose"); },
+      setChecked: async () => { throw new Error("must not check"); },
+      uploadFile: async () => { throw new Error("must not upload"); },
+      clickSubmit: async () => { throw new Error("must not click"); },
+      alertText: options.failing ? fail : async () => "Contact jordan@example.test",
+      stopRegion: options.failing ? fail : async (request) => {
+        reads.push(request);
+        if (options.region === null) throw new Error("no region");
+        return options.region ?? REGION;
+      },
+      screenshot: async (path) => {
+        shots.push(path);
+        if (options.failing) throw new Error("Target page, context or browser has been closed");
+        writeFileSync(path, PNG_BYTES);
+      },
+      close: async () => {}
+    };
+  }
+
+  const stop = (kind: StopRequest["kind"], overrides: Partial<StopRequest> = {}): StopRequest => ({
+    kind, reason: `the ${kind} reason`, fieldLabel: null, region: { kind: "page" }, ...overrides
+  });
+  const clock = (start = "2026-11-25T12:00:00.000Z") => {
+    let tick = 0;
+    return () => new Date(Date.parse(start) + 1_000 * tick++);
+  };
+  const io = (database: DatabaseSync, dataDir: string, lines: string[]) => ({
+    open: () => database, close: () => undefined, dataDir: () => dataDir, log: (line: string) => { lines.push(line); }
+  });
+  const events = (database: DatabaseSync, jobId: string) => listApplicationEvents(database, jobId).map((event) => event.detail);
+
+  it("saves a private, redacted capture of a field that would not take its value, and logs only a relative path", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-stop-data-");
+    const run = syntheticRun(database);
+    const page = stopPage();
+    await saveStopEvidenceQuietly({
+      database, dataDir, run, page, secrets: [SECRET], now: () => new Date("2026-11-25T12:00:00.000Z"),
+      stops: [stop("unfillable-field", { reason: 'no suggestion matched "Typed Value 77"', fieldLabel: "Email jordan@example.test", region: { kind: "field", fieldId: "email", label: "Email" } })]
+    });
+    const folder = `2026-11-25T12-00-00-000Z-${run.id}-unfillable-field`;
+    const root = stopEvidenceRoot(dataDir, run.jobId);
+    const dir = join(root, folder);
+    expect(readdirSync(root)).toEqual([folder]);
+    expect(mode(root)).toBe(0o700);
+    expect(mode(dir)).toBe(0o700);
+    expect(mode(join(dir, "evidence.json"))).toBe(0o600);
+    expect(mode(join(dir, "screenshot.png"))).toBe(0o600);
+    expect(page.reads).toEqual([{ kind: "field", fieldId: "email", label: "Email" }]);
+    expect(events(database, run.jobId)).toEqual([
+      `Stop evidence saved (unfillable-field): applications/${run.jobId}/stop-evidence/${folder}; view it with pnpm run:evidence --run ${run.id.slice(0, 8)}.`
+    ]);
+    const raw = readFileSync(join(dir, "evidence.json"), "utf8");
+    for (const value of ["jordan@example.test", "token=T1", "q=1", "5551234567", SECRET, "Typed Value 77", "#step"]) expect(raw).not.toContain(value);
+    const [stored] = readStopEvidence(dataDir, run.jobId);
+    expect(stored).toMatchObject({
+      runId: run.id, jobId: run.jobId, outcome: "stop", kind: "unfillable-field", reason: 'no suggestion matched "[value]"',
+      fieldLabel: "Email [email]", url: "https://careers.example.test/apply", alertText: "Contact [email]", screenshot: "screenshot.png"
+    });
+    expect(stored!.text).toBe("Apply\nEmail [email]\nLink https://x.example/a\nPhone [number]\nPassword [redacted]");
+    expect(stored!.region!.html).toContain('<div data-automation-id="formField-email">');
+    expect(stored!.region!.html).toContain("[email]");
+    expect(stored!.region!.html).toContain('href="https://x.example/b"');
+    expect(stored!.region!.frames).toEqual([{ src: "https://careers.example.test/frame", title: "Application for [email]", name: "apply", width: 800, height: 600, visible: true }]);
+    expect(stored!.region!.applyControls[0]).toMatchObject({ tag: "a", text: "Apply now", ariaLabel: "Apply as [email]" });
+    database.close();
+  });
+
+  it("keeps the first capture of each kind, at most five per run, counting the run's stored captures", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-stop-data-");
+    const run = syntheticRun(database);
+    const kinds = ["history-row", "unfillable-field", "unanswerable-question", "no-form", "run-failed", "step-transition"] as const;
+    const now = clock();
+    await saveStopEvidenceQuietly({ database, dataDir, run, page: stopPage(), now, stops: [...kinds.map((kind) => stop(kind)), stop("history-row")] });
+    expect(STOP_CAPTURES_PER_RUN).toBe(5);
+    expect(readStopEvidence(dataDir, run.jobId).map((entry) => entry.kind).sort()).toEqual([...kinds.slice(0, 5)].sort());
+    await saveStopEvidenceQuietly({ database, dataDir, run, page: stopPage(), now, stops: kinds.map((kind) => stop(kind)) });
+    expect(readStopEvidence(dataDir, run.jobId)).toHaveLength(5);
+
+    // Another run of the job with four stored captures takes one more, of a new kind only.
+    const other = { id: randomUUID(), jobId: run.jobId };
+    await saveStopEvidenceQuietly({ database, dataDir, run: other, page: stopPage(), now, stops: kinds.slice(0, 4).map((kind) => stop(kind)) });
+    const page = stopPage();
+    await saveStopEvidenceQuietly({ database, dataDir, run: other, page, now, stops: [stop("history-row"), stop("run-failed"), stop("step-transition")] });
+    const ofOther = readStopEvidence(dataDir, run.jobId).filter((entry) => entry.runId === other.id);
+    expect(ofOther.map((entry) => entry.kind).sort()).toEqual(["history-row", "no-form", "run-failed", "unanswerable-question", "unfillable-field"]);
+    expect(page.shots).toHaveLength(1);
+    database.close();
+  });
+
+  it("saves a job-level capture before any run was saved, and run:evidence --job prints it", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-stop-data-");
+    const run = syntheticRun(database);
+    const job = { id: null, jobId: run.jobId };
+    await saveStopEvidenceQuietly({
+      database, dataDir, run: job, page: stopPage(), secrets: [SECRET], now: () => new Date("2026-11-25T12:30:00.000Z"),
+      stops: [stop("no-form", { reason: "No application form was found at https://careers.example.test/jobs/10478?icims=1. It may sit behind an Apply button." })]
+    });
+    const folder = `2026-11-25T12-30-00-000Z-job-no-form`;
+    expect(readdirSync(stopEvidenceRoot(dataDir, run.jobId))).toEqual([folder]);
+    expect(events(database, run.jobId)).toEqual([
+      `Stop evidence saved (no-form): applications/${run.jobId}/stop-evidence/${folder}; view it with pnpm run:evidence --job ${run.jobId.slice(0, 8)}.`
+    ]);
+    const lines: string[] = [];
+    expect(await runEvidenceCommand(["--job", run.jobId.slice(0, 8)], io(database, dataDir, lines))).toBe(0);
+    expect(lines).toEqual([
+      `Job ${run.jobId.slice(0, 8)}: Fixture Robotics — Software Engineering Intern (APPLYING)`,
+      "Evidence 1 of 1, captured 2026-11-25T12:30:00.000Z: stop (no application form was found)",
+      "Run: none (the run stopped before it was saved)",
+      "URL: https://careers.example.test/apply",
+      // The notices' redaction drops the query up to the next space.
+      "Stop: no-form — No application form was found at https://careers.example.test/jobs/10478 It may sit behind an Apply button.",
+      "Site error text: Contact [email]",
+      `Region (id, ${readStopEvidence(dataDir, run.jobId)[0]!.region!.html.length} characters):`,
+      readStopEvidence(dataDir, run.jobId)[0]!.region!.html,
+      "Frames: 1",
+      '  - frame https://careers.example.test/frame title "Application for [email]" name "apply" 800x600 visible',
+      "Apply-like controls: 1",
+      '  - a "Apply now" (href https://careers.example.test/start, aria-label "Apply as [email]")',
+      `Screenshot: ${join(stopEvidenceRoot(dataDir, run.jobId), folder, "screenshot.png")}`,
+      "Visible text (redacted):",
+      "Apply\nEmail [email]\nLink https://x.example/a\nPhone [number]\nPassword [redacted]"
+    ]);
+    database.close();
+  });
+
+  it("--run shows the run's post-submit and stop evidence together, newest first, with the field line", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-stop-data-");
+    const run = syntheticRun(database);
+    await savePostSubmitEvidence({ database, dataDir, run, page: stubPage(), evidence: evidence(), now: new Date("2026-11-25T11:00:00.000Z") });
+    await saveStopEvidenceQuietly({
+      database, dataDir, run, page: stopPage(), now: () => new Date("2026-11-25T12:00:00.000Z"),
+      stops: [stop("unfillable-field", { reason: "the field did not respond in time", fieldLabel: "City", region: { kind: "field", fieldId: "city", label: "City" } })]
+    });
+    // Another run's capture is not this run's.
+    await saveStopEvidenceQuietly({ database, dataDir, run: { id: randomUUID(), jobId: run.jobId }, page: stopPage(), now: () => new Date("2026-11-25T13:00:00.000Z"), stops: [stop("run-failed")] });
+    const latest: string[] = [];
+    expect(await runEvidenceCommand(["--run", run.id.slice(0, 8)], io(database, dataDir, latest))).toBe(0);
+    expect(latest.slice(0, 5)).toEqual([
+      `Run ${run.id.slice(0, 8)}: Fixture Robotics — Software Engineering Intern (failed)`,
+      "Evidence 1 of 2, captured 2026-11-25T12:00:00.000Z: stop (a field would not take its value)",
+      "URL: https://careers.example.test/apply",
+      "Stop: unfillable-field — the field did not respond in time",
+      "Field: City"
+    ]);
+    const all: string[] = [];
+    expect(await runEvidenceCommand(["--run", run.id, "--all"], io(database, dataDir, all))).toBe(0);
+    expect(all.filter((line) => line.startsWith("Evidence "))).toEqual([
+      "Evidence 1 of 2, captured 2026-11-25T12:00:00.000Z: stop (a field would not take its value)",
+      "Evidence 2 of 2, captured 2026-11-25T11:00:00.000Z: field-errors (the site marked fields invalid)"
+    ]);
+    expect(all.join("\n")).not.toContain("jordan@example.test");
+    // Stop captures are not post-submit evidence: the submit readers never see them.
+    expect(readSubmitEvidence(dataDir, run).map((entry) => entry.outcome)).toEqual(["field-errors"]);
+    expect(readJobEvidence(dataDir, run.jobId).map((entry) => entry.outcome)).toEqual(["field-errors"]);
+    database.close();
+  });
+
+  it("keeps the newest 20 captures of a job", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-stop-data-");
+    const run = syntheticRun(database);
+    const now = clock("2026-11-25T08:00:00.000Z");
+    for (let index = 0; index < 22; index += 1) {
+      await saveStopEvidenceQuietly({ database, dataDir, run: { id: null, jobId: run.jobId }, page: stopPage(), now, stops: [stop("run-failed")] });
+    }
+    const folders = readdirSync(stopEvidenceRoot(dataDir, run.jobId)).sort();
+    expect(folders).toHaveLength(20);
+    expect(folders[0]).toBe("2026-11-25T08-00-02-000Z-job-run-failed");
+    expect(folders.at(-1)).toBe("2026-11-25T08-00-21-000Z-job-run-failed");
+    database.close();
+  });
+
+  it("never throws: a page whose every read fails still leaves a capture, and an unwritable folder logs a plain event", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-stop-data-");
+    const run = syntheticRun(database);
+    await expect(saveStopEvidenceQuietly({ database, dataDir, run, page: stopPage({ failing: true }), stops: [stop("run-failed")] })).resolves.toBeUndefined();
+    const [stored] = readStopEvidence(dataDir, run.jobId);
+    expect(stored).toMatchObject({ kind: "run-failed", url: "", text: "", alertText: "", screenshot: null, region: null });
+    expect(readdirSync(stored!.dir)).toEqual(["evidence.json"]);
+
+    const blocked = disposableDirectory("internship-agent-stop-data-");
+    writeFileSync(join(blocked, "applications"), "not a folder");
+    await expect(saveStopEvidenceQuietly({ database, dataDir: blocked, run, page: stopPage(), stops: [stop("no-form")] })).resolves.toBeUndefined();
+    expect(events(database, run.jobId).at(-1)).toBe("Stop evidence not saved.");
+    database.close();
+  });
+
+  it("lists kept run traces with the command that opens them, the run's only for --run", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-stop-data-");
+    const run = syntheticRun(database);
+    const otherRun = randomUUID();
+    const root = runTracesRoot(dataDir, run.jobId);
+    mkdirSync(root, { recursive: true });
+    const mine = join(root, `trace-${run.id}-2026-11-25T12-00-00-000Z.zip`);
+    const other = join(root, `trace-${otherRun}-2026-11-25T13-00-00-000Z.zip`);
+    const jobTrace = join(root, "trace-job-2026-11-25T11-00-00-000Z.zip");
+    writeFileSync(mine, Buffer.alloc(1_572_864));
+    writeFileSync(other, "x");
+    writeFileSync(jobTrace, "x");
+    writeFileSync(join(root, "notes.txt"), "not a trace");
+    utimesSync(mine, new Date("2026-11-25T12:05:00.000Z"), new Date("2026-11-25T12:05:00.000Z"));
+
+    const byRun: string[] = [];
+    expect(await runEvidenceCommand(["--run", run.id.slice(0, 8)], io(database, dataDir, byRun))).toBe(0);
+    expect(byRun).toEqual([
+      `Run ${run.id.slice(0, 8)}: Fixture Robotics — Software Engineering Intern (failed)`,
+      "No post-submit evidence is stored for this run.",
+      "Run traces: 1",
+      `  - ${mine} (1.5 MB, saved 2026-11-25T12:05:00.000Z)`,
+      `    open it with: pnpm exec playwright show-trace ${mine}`
+    ]);
+    const byJob: string[] = [];
+    expect(await runEvidenceCommand(["--job", run.jobId.slice(0, 8)], io(database, dataDir, byJob))).toBe(0);
+    expect(byJob[1]).toBe("No evidence is stored for this job.");
+    expect(byJob[2]).toBe("Run traces: 3");
+    expect(byJob.filter((line) => line.startsWith("    open it with: "))).toEqual([other, mine, jobTrace].map((path) => `    open it with: pnpm exec playwright show-trace ${path}`));
+
+    // With evidence, the traces follow it.
+    await saveStopEvidenceQuietly({ database, dataDir, run, page: stopPage(), stops: [stop("run-failed")] });
+    const withEvidence: string[] = [];
+    expect(await runEvidenceCommand(["--run", run.id], io(database, dataDir, withEvidence))).toBe(0);
+    expect(withEvidence.slice(-3)).toEqual(["Run traces: 1", `  - ${mine} (1.5 MB, saved 2026-11-25T12:05:00.000Z)`, `    open it with: pnpm exec playwright show-trace ${mine}`]);
+    database.close();
+  });
+
+  it("logs where a kept trace is, or why it was not kept, and nothing for a discarded one", () => {
+    const database = disposableDatabase();
+    const run = syntheticRun(database);
+    const root = runTracesRoot("/data", run.jobId);
+    logRunTraceQuietly(database, run.jobId, run.id, { saved: [join(root, "trace-a-1.zip"), join(root, "trace-a-2.zip")], dropped: null });
+    logRunTraceQuietly(database, run.jobId, null, { saved: [join(root, "trace-job-1.zip")], dropped: null });
+    for (const dropped of ["secret-found", "network-found", "unreadable", "trace-error", "secrets-unknown"] as const) {
+      logRunTraceQuietly(database, run.jobId, run.id, { saved: [], dropped });
+    }
+    logRunTraceQuietly(database, run.jobId, run.id, { saved: [], dropped: null });
+    expect(events(database, run.jobId)).toEqual([
+      `Run trace saved: applications/${run.jobId}/run-traces/trace-a-1.zip, applications/${run.jobId}/run-traces/trace-a-2.zip; view it with pnpm run:evidence --run ${run.id.slice(0, 8)}.`,
+      `Run trace saved: applications/${run.jobId}/run-traces/trace-job-1.zip; view it with pnpm run:evidence --job ${run.jobId.slice(0, 8)}.`,
+      "Run trace not kept: it held a value the agent never stores.",
+      "Run trace not kept: it held network records.",
+      "Run trace not kept: it could not be checked.",
+      "Run trace not kept: tracing failed.",
+      "Run trace not kept: the saved account values could not be read to check it."
+    ]);
+    database.close();
+  });
+
+  describe("which stops a run leaves", () => {
+    const form: RecognizedForm = {
+      url: "https://careers.example.test/apply", title: "Apply",
+      fields: [
+        { id: "city", label: "City", kind: "text", required: true },
+        { id: "pronouns", label: "Pronouns", kind: "select", required: false, options: ["she/her", "he/him"] },
+        { id: "essay", label: "Why us?", kind: "textarea", required: true },
+        { id: "resume", label: "Resume", kind: "file", required: true },
+        { id: "captcha", label: "Verify", kind: "unknown", required: false },
+        { id: "clearance", label: "Do you hold a clearance?", kind: "text", required: true }
+      ]
+    };
+    const pause = (fieldId: string, overrides: Partial<PauseRecord> = {}): PauseRecord => ({
+      fieldId, label: fieldId, question: `How should ${fieldId} be answered?`, suggestedKey: null, suggestedScope: null, safeguard: false,
+      sensitive: false, upload: false, status: "open", answer: null, draft: null, ...overrides
+    });
+
+    it("fillStops: unfillable fields (never a covering dialog), and unanswered questions only on a site with no adapter", () => {
+      const unfilled = [{ fieldId: "city", reason: "the field did not respond in time" }, { fieldId: "pronouns", reason: COVERING_DIALOG_REASON }, { fieldId: "gone", reason: "x" }];
+      const pauses = [
+        pause("city"), pause("pronouns"),
+        pause("essay", { draft: { text: "A draft.", gate: null, reason: "The draft did not pass the voice gate." } }),
+        pause("resume", { upload: true }), pause("captcha", { safeguard: true }), pause("clearance"),
+        pause("clearance-answered", { status: "answered", answer: "No" }), pause("not-on-form")
+      ];
+      expect(fillStops(form, unfilled, pauses, false)).toEqual([
+        { kind: "unfillable-field", reason: "the field did not respond in time", fieldLabel: "City", region: { kind: "field", fieldId: "city", label: "City" } }
+      ]);
+      expect(fillStops(form, unfilled, pauses, true).map((entry) => [entry.kind, entry.fieldLabel])).toEqual([
+        ["unfillable-field", "City"], ["unanswerable-question", "Do you hold a clearance?"]
+      ]);
+    });
+
+    const walk = (overrides: Partial<WorkdayWalkResult>): WorkdayWalkResult => ({
+      outcome: "paused", transcript: false, steps: [{ index: 3, total: 6, name: "My Experience" }], decisions: [], pauses: [], errors: [],
+      confirmation: null, fieldLabels: {}, workdayErrors: [], ...overrides
+    });
+
+    it("workdayStops: history rows without the row's name, unfillable fields, and a blocked step with no Workday errors", () => {
+      const company = "Fictional Widgets Cooperative";
+      const stops = workdayStops(walk({
+        pauses: [
+          pause(`My Experience::history:work:${company}:row`, { label: "work history", question: `Workday did not add a Work Experience row for ${company}; add it yourself.` }),
+          pause(`My Experience::history:education:${company}:school`, { label: `history:education:${company}:school`, question: "Workday's School control on this row did not respond; enter it yourself." }),
+          pause("My Information::formField-city", { label: "City", question: 'The agent could not fill "City": the field did not respond in time. Answer it here, or fill it in the browser.' }),
+          pause("My Information::formField-cut", { label: "Long", question: 'The agent could not fill "Long": the page did not acc' }),
+          pause("My Information::formField-dialog", { label: "Dialog", question: `The agent could not fill "Dialog": ${COVERING_DIALOG_REASON}, and the agent does not click through or close such a dialog.` }),
+          pause("My Information::formField-done", { status: "answered", answer: "x", question: 'The agent could not fill "Done": x. Answer it here, or fill it in the browser.' })
+        ]
+      }));
+      expect(stops).toEqual([
+        { kind: "history-row", reason: "Workday did not add a Work Experience row.", fieldLabel: "Work Experience", region: { kind: "section", label: "Work Experience" } },
+        { kind: "history-row", reason: "Workday's School control on an Education row did not respond.", fieldLabel: "Education", region: { kind: "section", label: "Education" } },
+        { kind: "unfillable-field", reason: "the field did not respond in time", fieldLabel: "City", region: { kind: "field", fieldId: "formField-city", label: "City" } },
+        { kind: "unfillable-field", reason: "the field would not take its value", fieldLabel: "Long", region: { kind: "field", fieldId: "formField-cut", label: "Long" } }
+      ]);
+      expect(JSON.stringify(stops)).not.toContain(company);
+      expect(workdayStops(walk({ outcome: "blocked", errors: ["Workday did not move to the next step within 20 seconds."] }))).toEqual([
+        { kind: "step-transition", reason: "Workday did not move to the next step within 20 seconds.", fieldLabel: "My Experience", region: { kind: "page" } }
+      ]);
+      expect(workdayStops(walk({ outcome: "blocked", errors: ["x"], workdayErrors: [{ fieldId: null, label: null, text: "Required", source: "banner" }] }))).toEqual([]);
+    });
+
+    it("failureStop: no-form texts, a Playwright error's first line only, nothing else", () => {
+      expect(failureStop(new Error("No application form was found at https://careers.example.test/jobs/1. It may sit behind an Apply button."))?.kind).toBe("no-form");
+      expect(failureStop(new Error("No application form was reached at https://careers.example.test/jobs/1: the page shows no question."))?.kind).toBe("no-form");
+      const timeout = Object.assign(new Error("\u001b[2mlocator.fill: Timeout 30000ms exceeded.\u001b[22m\nCall log:\n  - waiting for locator\n  - fill(\"secret-typed\")"), { name: "TimeoutError" });
+      expect(failureStop(timeout)).toEqual({ kind: "run-failed", reason: "TimeoutError: locator.fill: Timeout 30000ms exceeded.", fieldLabel: null, region: { kind: "page" } });
+      expect(failureStop(new Error("page.goto: net::ERR_NAME_NOT_RESOLVED at https://x.test Call log: navigating"))?.reason).toBe("Error: page.goto: net::ERR_NAME_NOT_RESOLVED at https://x.test");
+      expect(failureStop(new Error("The posting looks closed."))).toBeNull();
+      expect(failureStop("not an error")).toBeNull();
+    });
   });
 });

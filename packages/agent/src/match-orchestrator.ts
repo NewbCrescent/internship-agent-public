@@ -57,13 +57,14 @@ export function resumeSkillsFor(database: DatabaseSync, candidateId: string): st
 }
 
 /**
- * The Milestone 4 orchestration seam: the dashboard action calls here. Only
- * ALLOWED + CURRENT claims back skill matching, so questioned or stale
- * evidence never inflates a score.
+ * The evaluation evaluateAndPersistMatch saves, without writing anything;
+ * `pnpm matches:reevaluate` reads through it (Track 56). Only ALLOWED +
+ * CURRENT claims back skill matching, so questioned or stale evidence never
+ * inflates a score.
  */
-export function evaluateAndPersistMatch(
+export function evaluateMatch(
   jobId: string,
-  options: { database?: DatabaseSync; candidateId?: string; fitOnly?: boolean } = {}
+  options: { database?: DatabaseSync; candidateId?: string } = {}
 ): MatchEvaluation {
   const database = options.database ?? getDatabase();
   const candidateId = options.candidateId ?? DEFAULT_CANDIDATE_ID;
@@ -103,9 +104,22 @@ export function evaluateAndPersistMatch(
     posting,
     { facts, preferences, candidateDegree, candidateField, candidateSchool, evidencedTechnologies, resumeSkills, allowedClaimCount }
   );
-  if (options.fitOnly) replaceJobFit(database, report);
-  else saveJobMatch(database, report);
   return { report, evidencedTechnologies, resumeSkills, allowedClaimCount };
+}
+
+/**
+ * The Milestone 4 orchestration seam: the dashboard action calls here. It
+ * saves evaluateMatch's report (only the fit with fitOnly).
+ */
+export function evaluateAndPersistMatch(
+  jobId: string,
+  options: { database?: DatabaseSync; candidateId?: string; fitOnly?: boolean } = {}
+): MatchEvaluation {
+  const database = options.database ?? getDatabase();
+  const evaluation = evaluateMatch(jobId, { database, candidateId: options.candidateId });
+  if (options.fitOnly) replaceJobFit(database, evaluation.report);
+  else saveJobMatch(database, evaluation.report);
+  return evaluation;
 }
 
 export function getMatchReport(

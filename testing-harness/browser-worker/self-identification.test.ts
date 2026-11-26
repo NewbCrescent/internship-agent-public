@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   matchSelfIdentificationOption,
   planAutofill,
+  RACE_ONLY_DECLINE_REASON,
   selfIdentificationCategory,
   type FieldResolution
 } from "@internship-agent/browser";
@@ -255,5 +256,83 @@ describe("sexual orientation and transgender identity (2026-11-24)", () => {
     expect(result.pauses).toEqual([]);
     expect(result.decisions[0]).toMatchObject({ action: "choose", value: "Queer", basis: { kind: "fact", key: "eeo_sexual_orientation", scope: "global" } });
     expect(result.decisions[0]!.reason).not.toMatch(/queer/i);
+  });
+});
+
+describe("race-only lists take their decline option (the candidate's rule, 2026-11-26)", () => {
+  // A synthetic copy of a race-only list seen on a Rippling form; the saved values are test values.
+  const RACE_ONLY_OPTIONS = ["American Indian or Alaskan Native", "Asian", "Black or African American", "Middle Eastern or North African", "White",
+    "Native Hawaiian or other Pacific Islander", "Two or more races", "Choose not to disclose"];
+  const raceOnly = field("Please identify your race", RACE_ONLY_OPTIONS);
+  const hispanic: SelfIdentificationAnswers = { eeo_race_ethnicity: "hispanic_or_latino" };
+  const resolve = (target: BrowserField, answers: SelfIdentificationAnswers): FieldResolution => {
+    const saved = matchSelfIdentificationOption(target, answers);
+    return saved ? { status: "SELF_IDENTIFIED", ...saved } : { status: "UNAVAILABLE" };
+  };
+  const expectSensitivePause = (target: BrowserField, answers: SelfIdentificationAnswers) => {
+    const result = plan([target], [[target.id, resolve(target, answers)]]);
+    expect(result.decisions[0], target.label).toMatchObject({ action: "pause" });
+    expect(result.pauses[0], target.label).toMatchObject({ sensitive: true });
+  };
+
+  it("chooses the decline option for a saved answer the race-only list does not offer", () => {
+    expect(selfIdentificationCategory(raceOnly)).toBe("race");
+    expect(matchSelfIdentificationOption(raceOnly, hispanic)).toEqual({ key: "eeo_race_ethnicity", option: "Choose not to disclose", rule: "race_only_decline" });
+    for (const decline of ["I don't wish to answer", "Decline to self-identify", "Prefer not to say"]) {
+      const target = field("Please identify your race", [...RACE_ONLY_OPTIONS.slice(0, -1), decline]);
+      expect(pick(target, hispanic), decline).toBe(decline);
+    }
+    expect(pick(field("Please identify your race", RACE_ONLY_OPTIONS, "radio"), hispanic)).toBe("Choose not to disclose");
+    expect(pick(field("What is your racial category?", RACE_ONLY_OPTIONS), hispanic)).toBe("Choose not to disclose");
+  });
+
+  it("chooses the saved answer's own option when the race-only list offers it", () => {
+    expect(matchSelfIdentificationOption(raceOnly, { eeo_race_ethnicity: "white" })).toEqual({ key: "eeo_race_ethnicity", option: "White" });
+    expect(pick(raceOnly, { eeo_race_ethnicity: "two_or_more_races" })).toBe("Two or more races");
+  });
+
+  it("keeps the existing match on combined race and ethnicity lists", () => {
+    expect(pick(leverRace, hispanic)).toBe("Hispanic or Latino");
+    expect(pick(greenhouseRace, hispanic)).toBe("Hispanic or Latino");
+    for (const label of ["Race/Ethnicity", "What is your race or ethnicity?", "Ethnicity", "Race (Hispanic or Latino origin)"]) {
+      expect(pick(field(label, RACE_ONLY_OPTIONS), hispanic), label).toBeNull();
+    }
+    expect(pick(greenhouseHispanic, hispanic)).toBe("Yes");
+  });
+
+  it("pauses a race-only list without exactly one decline option", () => {
+    const noDecline = field("Please identify your race", RACE_ONLY_OPTIONS.slice(0, -1));
+    expect(matchSelfIdentificationOption(noDecline, hispanic)).toBeNull();
+    expectSensitivePause(noDecline, hispanic);
+    const twoDeclines = field("Please identify your race", [...RACE_ONLY_OPTIONS, "I don't wish to answer"]);
+    expect(matchSelfIdentificationOption(twoDeclines, hispanic)).toBeNull();
+    expectSensitivePause(twoDeclines, hispanic);
+  });
+
+  it("pauses with nothing saved, an unknown saved value, or several matching options", () => {
+    const ambiguous = field("Please identify your race", ["Asian Indian", "Asian American", "White", "Choose not to disclose"]);
+    const cases: Array<[BrowserField, SelfIdentificationAnswers]> = [
+      [raceOnly, {}],
+      [raceOnly, { eeo_gender: "female" }],
+      [raceOnly, { eeo_race_ethnicity: "unknown_value" }],
+      [ambiguous, { eeo_race_ethnicity: "asian" }]
+    ];
+    for (const [target, answers] of cases) {
+      expect(matchSelfIdentificationOption(target, answers), JSON.stringify(answers)).toBeNull();
+      expectSensitivePause(target, answers);
+    }
+  });
+
+  it("never names the saved answer in the decision reason or the plan", () => {
+    const result = plan([raceOnly], [[raceOnly.id, resolve(raceOnly, hispanic)]]);
+    expect(result.pauses).toEqual([]);
+    expect(result.decisions[0]).toMatchObject({
+      action: "choose", value: "Choose not to disclose", basis: { kind: "fact", key: "eeo_race_ethnicity", scope: "global" }, reason: RACE_ONLY_DECLINE_REASON
+    });
+    expect(JSON.stringify(result)).not.toMatch(/hispanic|latin/i);
+    const matched = plan([raceOnly], [[raceOnly.id, resolve(raceOnly, { eeo_race_ethnicity: "white" })]]);
+    expect(matched.decisions[0]).toMatchObject({
+      action: "choose", value: "White", reason: "Your saved voluntary self-identification answer matches one of the offered options."
+    });
   });
 });

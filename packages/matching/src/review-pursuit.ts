@@ -29,13 +29,13 @@ function clip(value: string, length: number): string {
  */
 export function reviewPursuit(
   report: Pick<JobMatchReport, "verdict" | "eligible" | "findings">,
-  posting: Pick<JobPosting, "title" | "requirements">
+  posting: Pick<JobPosting, "title" | "requirements"> & Partial<Pick<JobPosting, "locations" | "snapshot">>
 ): ReviewPursuit {
   if (report.verdict !== "NEEDS_REVIEW" || !report.eligible) {
     return { pursue: false, reason: "Only an eligible needs-review posting is pursued on its AI fit." };
   }
   if (report.findings.some((finding) => finding.outcome === "FAIL")) return { pursue: false, reason: "A requirement failed." };
-  if (titleNamesGraduateStudy(posting.title)) return { pursue: false, reason: "The title targets graduate study." };
+  if (titleNamesGraduateStudy(posting.title, { locations: posting.locations, text: posting.snapshot?.normalizedText })) return { pursue: false, reason: "The title targets graduate study." };
   if (posting.requirements.some((requirement) => graduateOnlyRequirement(requirement))) {
     return { pursue: false, reason: "The posting requires or prefers graduate study." };
   }

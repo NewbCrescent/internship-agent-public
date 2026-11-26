@@ -24,3 +24,4 @@ export * from "./question-answer-repository";
 export * from "./question-alias-repository";
 export * from "./coursework-repository";
 export * from "./application-hold-repository";
+export * from "./scoreboard-repository";

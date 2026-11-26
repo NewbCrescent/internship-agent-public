@@ -23,6 +23,11 @@ type MatchRow = {
   scoring_version: number;
 };
 
+/** The job status a saved verdict moves its posting to: QUALIFIED, NOT_QUALIFIED, or ANALYZING for NEEDS_REVIEW. */
+export function statusForVerdict(verdict: MatchVerdict): JobPostingStatus {
+  return verdict === "QUALIFIED" ? "QUALIFIED" : verdict === "NOT_QUALIFIED" ? "NOT_QUALIFIED" : "ANALYZING";
+}
+
 /**
  * Match reports are replaced on every evaluation, in the same transaction
  * that moves the job into QUALIFIED, NOT_QUALIFIED, or ANALYZING. A
@@ -34,12 +39,7 @@ export function saveJobMatch(
   report: JobMatchReport
 ): JobMatchReport {
   const parsed = jobMatchReportSchema.parse(report);
-  const status: JobPostingStatus =
-    parsed.verdict === "QUALIFIED"
-      ? "QUALIFIED"
-      : parsed.verdict === "NOT_QUALIFIED"
-        ? "NOT_QUALIFIED"
-        : "ANALYZING";
+  const status = statusForVerdict(parsed.verdict);
 
   database.exec("BEGIN IMMEDIATE;");
   try {

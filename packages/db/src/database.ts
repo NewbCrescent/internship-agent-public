@@ -105,3 +105,8 @@ export function closeProfileDatabase(profile: WorkspaceProfile): void {
   else delete databaseGlobal[realDatabaseSymbol];
   if (cached?.isOpen) cached.close();
 }
+
+/** A read-only handle on the workspace's database for commands that only report: no migration, no write. */
+export function openProfileDatabaseReadOnly(profile: WorkspaceProfile): DatabaseSync {
+  return new DatabaseSync(resolveProfileDatabasePath(profile), { readOnly: true });
+}

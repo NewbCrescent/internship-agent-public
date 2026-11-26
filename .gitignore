@@ -32,6 +32,11 @@ test-results/
 browser-profile/
 pipeline-logs/
 mail-logs/
+# Track 42: stop captures, Playwright run traces, and their intermediate files.
+run-traces/
+stop-evidence/
+trace-artifacts/
+trace-*.zip
 
 # Claude Code worktrees and local settings.
 .claude/

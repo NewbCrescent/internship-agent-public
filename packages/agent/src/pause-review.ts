@@ -51,7 +51,9 @@ import { answeredPauseDecision } from "./question-answers";
  * auto-submit approval names the question by label); anything
  * else waits for the candidate with the model's reason added; a suggested
  * draft for an open-ended question is shown, never filled or stored. Any
- * model failure leaves the pauses exactly as they were.
+ * model failure leaves the pauses exactly as they were. Each reviewed
+ * question also gets a timeline line with its verdict, the fact key, and the
+ * refusing check (and the mapper's result for a mapped question), never a value.
  *
  * What is sent: the posting's company, title, and places; each question's
  * label, kind, and options; and the saved candidate facts the review may
@@ -103,6 +105,26 @@ export const pauseReviewOutputSchema = z.object({
 });
 export type PauseReviewOutput = z.infer<typeof pauseReviewOutputSchema>;
 export type PauseReview = PauseReviewOutput["reviews"][number];
+
+/** The deterministic check that refused a saved-answer match (shown on the pause as "did not pass the checks (<check>)"). */
+export type PauseReviewCheck =
+  | "unknown key" | "sensitive answer" | "standard answer" | "mapped question" | "statement of fact"
+  | "never reused" | "scope" | "no options" | "no matching option" | "option disagrees" | "field kind"
+  | "no wording store" | "field fit";
+
+/** What became of one reviewed question: labels, fact keys, and check names only; never an answer, saved value, option, reason, or draft. */
+export type PauseReviewDiagnostic = {
+  id: string;
+  label: string;
+  verdict: PauseReview["verdict"] | "none";
+  /** The model's key, only when it is one of the saved-answer keys sent (so never protected, and never the model's raw text). */
+  key: CandidateFactKey | null;
+  /** The check that refused a saved_answer verdict. */
+  check: PauseReviewCheck | null;
+  /** For a "mapped question" refusal: the mapper's status with its key (MAPPED) or policy (BLOCKED). */
+  mapper: string | null;
+  outcome: "matched" | "refused" | "waits" | "draft kept" | "no review";
+};
 
 export type SavedAnswerForReview = { key: CandidateFactKey; description: string; scope?: string; value: string };
 
@@ -181,7 +203,25 @@ export type PauseReviewDeps = {
   mapper: SemanticQuestionMapper;
 };
 
-type Applied = { decisions: FillDecision[]; pauses: PauseRecord[]; matched: number; drafts: number };
+type Applied = { decisions: FillDecision[]; pauses: PauseRecord[]; matched: number; drafts: number; diagnostics: PauseReviewDiagnostic[] };
+
+/** The model's key when it is one of the keys sent; otherwise null (the model's own text is never logged). */
+function sentKey(key: string | null, sent: readonly SavedAnswerForReview[]): CandidateFactKey | null {
+  const parsed = candidateFactKeySchema.safeParse(key);
+  return parsed.success && sent.some((answer) => answer.key === parsed.data) ? parsed.data : null;
+}
+
+/** One timeline line for one reviewed question; labels, keys, and check names only. */
+export function pauseReviewDiagnosticDetail(diagnostic: PauseReviewDiagnostic): string {
+  const verdict = diagnostic.verdict === "none"
+    ? "no review returned"
+    : `verdict ${diagnostic.verdict}${diagnostic.verdict === "saved_answer" ? `, ${diagnostic.key ? `key ${diagnostic.key}` : "no usable key"}` : ""}`;
+  const outcome = diagnostic.outcome === "matched" ? "matched"
+    : diagnostic.outcome === "refused" ? `refused by the "${diagnostic.check ?? "unknown"}" check${diagnostic.mapper ? ` (mapper: ${diagnostic.mapper})` : ""}`
+    : diagnostic.outcome === "draft kept" ? "draft kept, not sent"
+    : "waits for you";
+  return `AI review of "${clip(diagnostic.label, 150)}" (${diagnostic.id}): ${verdict}; ${outcome}.`.slice(0, 1000);
+}
 
 /** The first current fact of this key whose scope applies here: the company's, then the posting country's, then the global one. */
 function applicableFact(database: DatabaseSync, candidateId: string, key: CandidateFactKey, context: QuestionContext): { fact: CandidateFact; scope: FactScope } | null {
@@ -200,7 +240,7 @@ function applicableFact(database: DatabaseSync, candidateId: string, key: Candid
 const OPTION_KINDS = new Set(["select", "radio"]);
 
 /** The answer text this fact gives this field, or the name of the check it fails. */
-function fieldAnswer(field: BrowserField, value: boolean | string, valueType: string, modelOption: string | null): { text: string } | { failed: string } {
+function fieldAnswer(field: BrowserField, value: boolean | string, valueType: string, modelOption: string | null): { text: string } | { failed: PauseReviewCheck } {
   const shown = formatFactValue(value);
   const listed = OPTION_KINDS.has(field.kind) || field.widget === "autocomplete" || (field.kind === "checkbox" && (field.options?.length ?? 0) >= 2);
   if (listed) {
@@ -234,6 +274,14 @@ export async function applyPauseReview(
   let drafts = 0;
   const byId = new Map(eligible.map((entry) => [entry.id, entry]));
   const done = new Set<string>();
+  const diagnostics = new Map<string, PauseReviewDiagnostic>(eligible.map((entry) => [
+    entry.id,
+    { id: entry.id, label: entry.field.label, verdict: "none", key: null, check: null, mapper: null, outcome: "no review" }
+  ]));
+  const mark = (id: string, patch: Partial<PauseReviewDiagnostic>) => {
+    const current = diagnostics.get(id);
+    if (current) diagnostics.set(id, { ...current, ...patch });
+  };
   const status = getJobPosting(deps.database, request.jobId)?.status ?? "APPLYING";
   const log = (detail: string) => logApplicationEvent(deps.database, { jobId: request.jobId, fromStatus: status, toStatus: status, detail: detail.slice(0, 1000) });
   const replacePause = (fieldId: string, next: PauseRecord) => {
@@ -248,19 +296,23 @@ export async function applyPauseReview(
     const entry = byId.get(review.id);
     if (!entry || done.has(review.id)) continue;
     done.add(review.id);
+    mark(review.id, { verdict: review.verdict, key: review.verdict === "saved_answer" ? sentKey(review.key, sent) : null });
     const { pause, field } = entry;
     if (review.verdict === "saved_answer") {
       const failed = await savedAnswerCheck(review, entry, request, sent, deps);
       if ("failed" in failed) {
+        mark(review.id, { outcome: "refused", check: failed.failed, mapper: failed.mapper ?? null });
         note(entry, `AI review suggested a saved answer, but it did not pass the checks (${failed.failed}); answer it yourself.`);
         continue;
       }
       const { key, scope, text } = failed;
       const decision = answeredPauseDecision(field, text, { kind: "fact", key, scope: scopeKey(scope) });
       if (!decision) {
+        mark(review.id, { outcome: "refused", check: "field fit" });
         note(entry, "AI review suggested a saved answer, but it did not pass the checks (field fit); answer it yourself.");
         continue;
       }
+      mark(review.id, { outcome: "matched" });
       decisions = decisions.map((current) => (current.fieldId === field.id ? { ...decision, reason: aiReviewMatchReason(field.label) } : current));
       replacePause(field.id, { ...pause, status: "answered", answer: text, suggestedKey: key, suggestedScope: scopeKey(scope) });
       matched += 1;
@@ -276,12 +328,14 @@ export async function applyPauseReview(
       if (text && !pause.draft && (field.kind === "textarea" || isDraftableQuestion({ label: field.label, kind: field.kind }))) {
         replacePause(field.id, { ...pause, draft: { text: text.slice(0, 4000), gate: null, reason: DRAFT_REASON, source: "pause_review" } });
         drafts += 1;
+        mark(review.id, { outcome: "draft kept" });
         continue;
       }
     }
+    mark(review.id, { outcome: "waits" });
     if (review.reason.trim()) note(entry, review.reason);
   }
-  return { decisions, pauses, matched, drafts };
+  return { decisions, pauses, matched, drafts, diagnostics: eligible.flatMap((entry) => diagnostics.get(entry.id) ?? []) };
 }
 
 async function savedAnswerCheck(
@@ -290,7 +344,7 @@ async function savedAnswerCheck(
   request: PauseReviewRequest,
   sent: readonly SavedAnswerForReview[],
   deps: PauseReviewDeps
-): Promise<{ key: CandidateFactKey; scope: FactScope; text: string } | { failed: string }> {
+): Promise<{ key: CandidateFactKey; scope: FactScope; text: string } | { failed: PauseReviewCheck; mapper?: string }> {
   const { field } = entry;
   const parsed = candidateFactKeySchema.safeParse(review.key);
   if (!parsed.success || !sent.some((answer) => answer.key === parsed.data)) return { failed: "unknown key" };
@@ -298,7 +352,10 @@ async function savedAnswerCheck(
   const definition = factDefinitions[key];
   if (definition.sensitivity !== "standard") return { failed: "sensitive answer" };
   if (key === COURSEWORK_FACT_KEY || STANDARD_ANSWER_KEYS.has(key)) return { failed: "standard answer" };
-  if ((await deps.mapper.map(field.label, { ...request.context, fieldKind: field.kind })).status !== "UNMAPPED") return { failed: "mapped question" };
+  const mapping = await deps.mapper.map(field.label, { ...request.context, fieldKind: field.kind });
+  if (mapping.status !== "UNMAPPED") {
+    return { failed: "mapped question", mapper: mapping.status === "MAPPED" ? `MAPPED ${mapping.key}` : mapping.status === "BLOCKED" ? `BLOCKED ${mapping.policy}` : mapping.status };
+  }
   if (factGroupsOf(field.label).length > 0) return { failed: "statement of fact" };
   if (questionSaveBlocker({ label: field.label, fieldId: field.id, fieldKind: field.kind, companyName: request.context.companyName ?? null })) return { failed: "never reused" };
   const found = applicableFact(deps.database, deps.candidateId, key, request.context);
@@ -369,6 +426,9 @@ export function createPauseReviewer(deps: {
       jobId: request.jobId, fromStatus: status, toStatus: status,
       detail: `AI review looked at ${eligible.length} open question(s): ${applied.matched} matched saved answers, ${eligible.length - applied.matched} wait for you, ${applied.drafts} suggested drafts (${Math.round(usage.durationMs)} ms, ${Math.round(usage.inputTokens)} input and ${Math.round(usage.outputTokens)} output tokens).`
     });
+    for (const diagnostic of applied.diagnostics) {
+      logApplicationEvent(deps.database, { jobId: request.jobId, fromStatus: status, toStatus: status, detail: pauseReviewDiagnosticDetail(diagnostic) });
+    }
     return { decisions: applied.decisions, pauses: applied.pauses };
   };
 }

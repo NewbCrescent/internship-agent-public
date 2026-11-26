@@ -25,6 +25,21 @@ export function submitEvidenceRoot(dataDir: string, jobId: string): string {
   return resolve(join(dataDir, "applications", jobId, "submit-evidence"));
 }
 
+/** Where a job's stop captures live (Track 42; mode 700, files 600); never sent anywhere. */
+export function stopEvidenceRoot(dataDir: string, jobId: string): string {
+  return resolve(join(dataDir, "applications", jobId, "stop-evidence"));
+}
+
+/** Where a job's kept Playwright run traces live (Track 42; mode 700, files 600); never sent anywhere. */
+export function runTracesRoot(dataDir: string, jobId: string): string {
+  return resolve(join(dataDir, "applications", jobId, "run-traces"));
+}
+
+/** Playwright's intermediate trace files for the profile's browser (launchPersistentContext tracesDir; mode 700). */
+export function traceArtifactsDir(dataDir: string): string {
+  return resolve(join(dataDir, "trace-artifacts"));
+}
+
 export function baseResumeFilePath(dataDir: string, fileName: string): string {
   return resolve(join(dataDir, "resumes", fileName));
 }

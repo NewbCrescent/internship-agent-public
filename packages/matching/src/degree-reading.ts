@@ -23,6 +23,11 @@ const LEVEL_WORDS: Record<string, Level> = {
 /** Words that may sit between levels of one list ("a Bachelor's, Master's, or PhD degree"). */
 const LIST_CONNECTORS = new Set(["or", "and", "degree", "degrees", "program", "programs", "a", "an", "level"]);
 
+/** Undergraduate class standing, a bachelor's level only where acceptsBachelorLevel reads a list of levels ("a rising junior, rising senior, or master's student"). */
+const CLASS_STANDING = new Set(["freshman", "freshmen", "sophomore", "sophomores", "junior", "juniors", "senior", "seniors"]);
+/** Words that may stand before a class standing inside such a list. */
+const STANDING_CONNECTORS = new Set(["rising", "current", "incoming", "entering"]);
+
 /** Enrollment wording that states nothing the profile degree does not already establish. */
 const ENROLLMENT_WORDS = new Set([
   "currently", "current", "enrolled", "enrollment", "pursuing", "pursue", "pursuit", "working", "towards", "toward",
@@ -99,6 +104,86 @@ export function degreeWords(text: string): string[] {
   return normalized.replace(/'s\b/g, "s").replace(/'/g, "").split(/[^a-z0-9+#]+/).filter(Boolean);
 }
 
+/** Where a posting is and what it says, read only to tell a place or team code in its title from a degree. */
+export type TitleContext = {
+  locations?: ReadonlyArray<{ raw: string; region: string | null }>;
+  /** The posting's text, read only for a spelled-out code ("Mission Systems (MS)"). */
+  text?: string;
+};
+
+type DegreeCode = "MA" | "MS";
+const CODE_STATES: Record<DegreeCode, string> = { MA: "massachusetts", MS: "mississippi" };
+/** Cities named before or after a state code in titles ("Boston, MA", "Jackson (MS)", "MA - Boston"). */
+const CODE_CITIES: Record<DegreeCode, string[]> = {
+  MA: ["boston", "cambridge", "waltham", "burlington", "lexington", "bedford", "woburn", "andover", "north andover", "marlborough", "framingham", "worcester", "lowell", "somerville", "newton", "needham", "natick", "quincy", "watertown", "westford", "chelmsford", "billerica", "wilmington", "springfield", "maynard", "canton", "norwood", "boxborough", "foxborough", "plymouth"],
+  MS: ["jackson", "starkville", "oxford", "hattiesburg", "gulfport", "biloxi", "tupelo", "pascagoula", "ridgeland", "vicksburg", "meridian", "southaven", "flowood", "madison", "columbus", "olive branch", "stennis space center"]
+};
+/** A bare upper-case MA or MS: not inside a word, not dotted, not paired by a slash or a tight hyphen ("BS/MS", "MS/PhD", "MS-PhD"). */
+const BARE_CODE = /(?<![A-Za-z0-9.&'’\/-])(MA|MS)(?![A-Za-z0-9&'’]|\.[A-Za-z]|\s*\/|-[A-Za-z0-9])/g;
+/** Words after the code that make it the candidate's degree ("MS students only"). */
+const DEGREE_FOLLOWER = /^\s+(?:students?|candidates?|degrees?|programs?|only|in|level|track)\b/i;
+const PLACE_BEFORE = /(?:,|\(|[-–—|])\s*$/;
+const PLACE_AFTER = /^\s*(?:$|[-–—|)])/;
+const ZIP_AFTER = /^\s+\d{5}(?:-\d{4})?\b/;
+const COUNTRY_JOINED = /\b(USA?)(\s*[-–—,]\s*)(MA|MS)\b/g;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Whether a stored location of the posting is in the code's state. */
+function locatedIn(code: DegreeCode, locations: NonNullable<TitleContext["locations"]>): boolean {
+  const state = CODE_STATES[code];
+  const raw = new RegExp(`(?:^|,\\s*)${code}\\b`);
+  return locations.some((location) => {
+    const region = location.region?.trim().toLocaleLowerCase("en-US");
+    return region === code.toLocaleLowerCase("en-US") || region === state ||
+      raw.test(location.raw) || location.raw.toLocaleLowerCase("en-US").includes(state);
+  });
+}
+
+function cityPattern(code: DegreeCode): string {
+  return CODE_CITIES[code].map(escapeRegExp).join("|");
+}
+
+/** Whether a city of the code's state stands right before it ("Boston, MA", "Jackson (MS)"). */
+function cityBefore(code: DegreeCode, before: string): boolean {
+  return new RegExp(`(?:^|[^A-Za-z])(?:${cityPattern(code)})\\s*(?:,|\\()\\s*$`, "i").test(before);
+}
+
+/** Whether a city of the code's state stands right after it ("MA - Boston", "US-MA-Boston"). */
+function cityAfter(code: DegreeCode, after: string): boolean {
+  return new RegExp(`^\\s*[-–—,]\\s*(?:${cityPattern(code)})\\b`, "i").test(after);
+}
+
+/** Whether the text spells the code out as two capitalized words that are not "Master ..." ("Mission Systems (MS)"). */
+function definedAsCode(code: DegreeCode, text: string): boolean {
+  const [first, second] = code;
+  const words = `(${first}[a-z]+)\\s+(?:(?:and|&)\\s+)?${second}[a-z]+`;
+  const patterns = [
+    new RegExp(`\\b${words}\\s*\\(\\s*${code}\\s*\\)`, "g"),
+    new RegExp(`\\b${code}\\s*\\(\\s*${words}\\s*\\)`, "g")
+  ];
+  return patterns.some((pattern) => [...text.matchAll(pattern)].some((match) => !/^master/i.test(match[1] ?? "")));
+}
+
+/** The title with each MA or MS that is a state or a team code blanked, so only degree mentions remain (Track 56). */
+export function withoutPlaceAndTeamCodes(title: string, context: TitleContext = {}): string {
+  const joined = title.replace(COUNTRY_JOINED, (_all, country: string, separator: string) => `${country}${separator}  `);
+  const teamText = `${joined}\n${context.text ?? ""}`;
+  return joined.replace(BARE_CODE, (code: string, _group: string, offset: number) => {
+    const key = code as DegreeCode;
+    const before = joined.slice(0, offset);
+    const after = joined.slice(offset + code.length);
+    if (DEGREE_FOLLOWER.test(after)) return code;
+    if (definedAsCode(key, teamText)) return "  ";
+    const placePosition = PLACE_BEFORE.test(before) || PLACE_AFTER.test(after);
+    if (placePosition && locatedIn(key, context.locations ?? [])) return "  ";
+    if (cityBefore(key, before) || cityAfter(key, after) || ZIP_AFTER.test(after)) return "  ";
+    return code;
+  });
+}
+
 /** Bachelor's degrees of a named kind; "bachelor's" and "undergraduate" name no kind. */
 const BACHELOR_KINDS: Record<string, string> = { bs: "B.S.", bsc: "B.S.", bse: "B.S.", ba: "B.A.", bfa: "B.F.A.", beng: "B.Eng." };
 const ANY_BACHELOR = new Set(["bachelor", "bachelors", "undergraduate", "undergrad"]);
@@ -123,16 +208,20 @@ export function isBachelorKindMismatchReason(reason: string): boolean {
   return /^The posting names a .+, and your degree is a [^;]+; they are different degrees, so this needs your review\.$/.test(reason);
 }
 
-/** Runs of degree levels joined only by list words; each run is one set of alternatives. */
-function levelLists(words: string[]): Level[][] {
+/**
+ * Runs of degree levels joined only by list words; each run is one set of
+ * alternatives. With classStanding, undergraduate class standing ("rising
+ * junior") counts as a bachelor's level.
+ */
+function levelLists(words: string[], classStanding = false): Level[][] {
   const lists: Level[][] = [];
   let current: Level[] | null = null;
   for (const word of words) {
-    const level = LEVEL_WORDS[word];
+    const level = LEVEL_WORDS[word] ?? (classStanding && CLASS_STANDING.has(word) ? "BACHELOR" : undefined);
     if (level) {
       if (current) current.push(level);
       else lists.push(current = [level]);
-    } else if (!current || !LIST_CONNECTORS.has(word)) {
+    } else if (!current || !(LIST_CONNECTORS.has(word) || (classStanding && STANDING_CONNECTORS.has(word)))) {
       current = null;
     }
   }
@@ -143,9 +232,11 @@ function levelLists(words: string[]): Level[][] {
  * Whether the line accepts bachelor's-level study: it names a bachelor's, and
  * every graduate level it names sits in a list with a bachelor's alternative
  * ("BS, MS, or PhD", "Bachelor's or Advanced degree", "B.S. or higher").
+ * Undergraduate class standing inside such a list is a bachelor's level ("a
+ * rising junior, rising senior, or master's student"; Track 56).
  */
 export function acceptsBachelorLevel(text: string): boolean {
-  const lists = levelLists(degreeWords(text));
+  const lists = levelLists(degreeWords(text), true);
   return lists.some((list) => list.includes("BACHELOR")) &&
     lists.every((list) => !list.includes("GRADUATE") || list.includes("BACHELOR"));
 }

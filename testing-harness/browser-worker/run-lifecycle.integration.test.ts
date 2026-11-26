@@ -28,6 +28,7 @@ import {
 } from "@internship-agent/db";
 import { AUTO_SUBMIT_EVENT, type BrowserField } from "@internship-agent/domain";
 import {
+  attachRunTrace,
   COVERING_DIALOG_REASON,
   FieldUnfillable,
   FORM_CHANGED_FIELD,
@@ -43,7 +44,10 @@ import {
   type BrowserPage,
   type CoveringDialog,
   type InvalidField,
+  type RunTrace,
   type StandingDialogCandidate,
+  type StopRegion,
+  type StopRegionRequest,
   type WorkdayAccountOutcome,
   type WorkdayCredentials,
   type WorkdayPageError
@@ -78,6 +82,7 @@ import {
   getResumeVariantUsage,
   prepareApplication,
   printResumeVariant,
+  readStopEvidence,
   runEvidenceCommand,
   standingDialogEventText,
   startBrowserRun,
@@ -3030,6 +3035,80 @@ describe("retrying a browser run", () => {
         database.close();
       });
     });
+    describe("stop evidence (Track 42)", () => {
+      const stopsOf = (dataDir: string, jobId: string) => readStopEvidence(dataDir, jobId).map((entry) => [entry.kind, entry.runId]);
+      const withRegion = <T extends BrowserPage>(page: T) => {
+        const regionReads: StopRegionRequest[] = [];
+        return Object.assign(page, { regionReads, stopRegion: async (request: StopRegionRequest) => { regionReads.push(request); return { anchor: "role=group", html: "<div role=\"group\"></div>", truncated: false, frames: [], applyControls: [] }; } });
+      };
+
+      it("captures a history row Workday did not add (history-row) with its section, never the row's name", async () => {
+        const database = disposableDatabase();
+        const dataDir = disposableDataDir();
+        const jobId = workdayJob(database);
+        approveApplication(jobId, { database });
+        const company = "Fictional Widgets Cooperative";
+        const steps: Step[] = [{ name: "My Experience", controls: [{ tag: "input", type: "text", id: "formField-skills", label: "Skills", required: false }] }, { name: "Review", controls: [] }];
+        const base = fakeWorkday({ steps });
+        const page = withRegion({
+          ...base,
+          fillHistory: async () => ({
+            decisions: [],
+            pauses: [{
+              fieldId: `history:work:${company}:row`, label: "work history", question: `Workday did not add a Work Experience row for ${company}; add it yourself.`,
+              suggestedKey: null, suggestedScope: null, safeguard: false, sensitive: false, upload: false, status: "open" as const, answer: null, draft: null
+            }]
+          })
+        });
+        const started = await startBrowserRun(jobId, siteUrl, { database, dataDir, voiceDrafter: null, openPage: async () => page });
+        expect(started.run.status).toBe("paused-needs-input");
+        expect(stopsOf(dataDir, jobId)).toEqual([["history-row", started.run.id]]);
+        expect(page.regionReads).toEqual([{ kind: "section", label: "Work Experience" }]);
+        const [stored] = readStopEvidence(dataDir, jobId);
+        expect(stored).toMatchObject({ reason: "Workday did not add a Work Experience row.", fieldLabel: "Work Experience" });
+        expect(readFileSync(join(stored!.dir, "evidence.json"), "utf8")).not.toContain(company);
+        database.close();
+      });
+
+      it("captures a Workday step that did not move on (step-transition) beside the existing workday-errors evidence", async () => {
+        const database = disposableDatabase();
+        const dataDir = disposableDataDir();
+        const jobId = workdayJob(database);
+        approveApplication(jobId, { database });
+        const steps: Step[] = [{ name: "My Information", controls: [{ tag: "input", type: "email", id: "formField-emailAddress", label: "Email", required: true }] }, { name: "Review", controls: [] }];
+        const page = withRegion({ ...fakeWorkday({ steps }), nextStep: async () => ({ moved: false, errors: ["Workday did not move to the next step within 20 seconds."] }) });
+        const started = await startBrowserRun(jobId, siteUrl, { database, dataDir, voiceDrafter: null, openPage: async () => page });
+        expect(started.run.status).toBe("paused-needs-input");
+        const [stored] = readStopEvidence(dataDir, jobId);
+        expect(stored).toMatchObject({ kind: "step-transition", runId: started.run.id, reason: "My Information: Workday did not move to the next step within 20 seconds.", fieldLabel: "My Information" });
+        expect(page.regionReads).toEqual([{ kind: "page" }]);
+        const workdayEvidence = readdirSync(submitEvidenceRoot(dataDir, jobId)).map((folder) => JSON.parse(readFileSync(join(submitEvidenceRoot(dataDir, jobId), folder, "evidence.json"), "utf8")).outcome);
+        expect(workdayEvidence).toEqual(["workday-errors"]);
+        database.close();
+      });
+
+      it("captures a Playwright failure in a Workday walk before the run is saved (run-failed, the ZOLL shape), never in submit mode", async () => {
+        const database = disposableDatabase();
+        const dataDir = disposableDataDir();
+        const jobId = workdayJob(database);
+        approveApplication(jobId, { database });
+        const steps: Step[] = [{ name: "My Information", controls: [{ tag: "input", type: "email", id: "formField-emailAddress", label: "Email", required: true }] }, { name: "Review", controls: [] }];
+        const timeout = () => Object.assign(new Error("locator.focus: Timeout 30000ms exceeded.\nCall log:\n  - waiting for getByRole('spinbutton')"), { name: "TimeoutError" });
+        const crashing = () => withRegion({ ...fakeWorkday({ steps }), nextStep: async (): Promise<{ moved: boolean; errors: string[] }> => { throw timeout(); } });
+        await expect(startBrowserRun(jobId, siteUrl, { database, dataDir, voiceDrafter: null, openPage: async () => crashing() })).rejects.toThrow("locator.focus: Timeout 30000ms exceeded.");
+        expect(getBrowserRuns(jobId, database)).toEqual([]);
+        expect(readStopEvidence(dataDir, jobId).map((entry) => [entry.kind, entry.runId, entry.reason])).toEqual([["run-failed", null, "TimeoutError: locator.focus: Timeout 30000ms exceeded."]]);
+
+        // Submit mode may be after a click: the same failure saves no capture.
+        const submitDir = disposableDataDir();
+        const started = await startBrowserRun(jobId, siteUrl, { database, dataDir: submitDir, voiceDrafter: null, openPage: async () => fakeWorkday({ steps }) });
+        expect(started.run.status).toBe("awaiting-approval");
+        approveRunSubmission(started.run.id, undefined, { database });
+        await expect(submitBrowserRun(started.run.id, { database, dataDir: submitDir, applicationRecord: null, openPage: async () => crashing() })).rejects.toThrow("locator.focus");
+        expect(readStopEvidence(submitDir, jobId)).toEqual([]);
+        database.close();
+      });
+    });
   });
 
   describe("resume refresh", () => {
@@ -3930,5 +4009,189 @@ describe("post-submit outcomes", () => {
       expectCodeNowhere(database, dataDir, report, noticeLookup(database), calls);
       database.close();
     });
+  });
+});
+
+/**
+ * Track 42: the orchestrator saves one stop capture the first time each kind
+ * of stop happens in a run, while the page is still open, and tells the run
+ * trace (packages/browser/src/run-trace.ts) the run's id and whether it ended
+ * cleanly. Fake pages; the capture's in-page reader is proven in real Chromium
+ * by `pnpm test:browser:stop-evidence`.
+ */
+describe("stop evidence and run traces (Track 42)", () => {
+  const EXTERNAL_URL = "https://careers.fixturerobotics.example/apply/1001";
+  const REGION: StopRegion = {
+    anchor: "main", html: '<main><a href="https://careers.fixturerobotics.example/start">Apply now</a><iframe src="https://fixture.icims.com/jobs/1"></iframe></main>', truncated: false,
+    frames: [{ src: "https://fixture.icims.com/jobs/1", title: "Job application", name: "icims_content_iframe", width: 900, height: 700, visible: true }],
+    applyControls: [{ tag: "a", text: "Apply now", href: "https://careers.fixturerobotics.example/start", role: null, ariaLabel: "", disabled: false, visible: true }]
+  };
+  /** A page that answers stop-region reads (and counts them) and never types into them. */
+  function capturing<T extends BrowserPage>(page: T): T & { regionReads: StopRegionRequest[] } {
+    const regionReads: StopRegionRequest[] = [];
+    return Object.assign(page, { regionReads, stopRegion: async (request: StopRegionRequest) => { regionReads.push(request); return REGION; } });
+  }
+  function externalJob(database: DatabaseSync, stage: "approved" | "qualified" = "approved"): string {
+    const jobId = approvedJobId(database, stage === "approved" ? "approved" : "qualified");
+    setApplicationType(database, jobId, "EXTERNAL_ATS");
+    if (stage === "qualified") prepareApplication(jobId, { database });
+    return jobId;
+  }
+  const stopEvents = (database: DatabaseSync, jobId: string) => (database.prepare("SELECT detail FROM application_events WHERE job_id = ? AND detail LIKE 'Stop evidence saved%' ORDER BY rowid").all(jobId) as Array<{ detail: string }>).map((row) => row.detail);
+  /** A run trace stand-in that records what the orchestrator tells it. */
+  function fakeTrace(): RunTrace & { calls: string[] } {
+    const calls: string[] = [];
+    let id: string | null = null;
+    return {
+      calls,
+      setRun: (runId) => { id = runId; calls.push(`setRun:${runId}`); },
+      runId: () => id,
+      endedCleanly: () => { calls.push("endedCleanly"); },
+      untraced: (action) => action(),
+      finish: async () => ({ saved: [], dropped: null })
+    };
+  }
+
+  it("captures a field that would not take its value (unfillable-field) for the run, with the reason and the field's label", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = approvedJobId(database);
+    const page = capturing({ ...fakePage(), fillField: async (field: BrowserField) => { if (field.id === "q1") throw playwrightTimeout(); } });
+    const started = await startBrowserRun(jobId, "https://app.joinhandshake.com/apply/900001", { database, dataDir, openPage: async () => page });
+    expect(started.run.status).toBe("paused-needs-input");
+    const stored = readStopEvidence(dataDir, jobId);
+    expect(stored.map((entry) => [entry.kind, entry.runId, entry.reason, entry.fieldLabel])).toEqual([
+      ["unfillable-field", started.run.id, "the field did not respond in time", "What is your available start date?"]
+    ]);
+    expect(page.regionReads).toEqual([{ kind: "field", fieldId: "q1", label: "What is your available start date?" }]);
+    expect(stopEvents(database, jobId)).toEqual([
+      expect.stringMatching(new RegExp(`^Stop evidence saved \\(unfillable-field\\): applications/${jobId}/stop-evidence/[0-9TZ-]+-${started.run.id}-unfillable-field; view it with pnpm run:evidence --run ${started.run.id.slice(0, 8)}\\.$`))
+    ]);
+    database.close();
+  });
+
+  it("captures an unanswered question on a site with no adapter (unanswerable-question), never on a recognized one", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = externalJob(database);
+    const page = capturing(fakePage({ controls: CLUB_CONTROLS, url: EXTERNAL_URL, title: "Fixture Robotics careers" }));
+    const started = await startBrowserRun(jobId, EXTERNAL_URL, { database, dataDir, voiceDrafter: null, openPage: async () => page });
+    expect(started.run.atsConfirmed).toBe(false);
+    expect(started.run.pauses.filter((pause) => pause.status === "open").map((pause) => pause.fieldId)).toEqual(["club"]);
+    expect(readStopEvidence(dataDir, jobId).map((entry) => [entry.kind, entry.fieldLabel])).toEqual([["unanswerable-question", "Which student club do you belong to?"]]);
+    expect(page.regionReads).toEqual([{ kind: "field", fieldId: "club", label: "Which student club do you belong to?" }]);
+
+    const greenhouse = disposableDatabase();
+    const greenhouseDir = disposableDataDir();
+    const greenhouseJob = externalJob(greenhouse);
+    const url = "https://boards.greenhouse.io/example/jobs/1";
+    const recognized = await startBrowserRun(greenhouseJob, url, {
+      database: greenhouse, dataDir: greenhouseDir, voiceDrafter: null, openPage: async () => capturing(fakePage({ controls: CLUB_CONTROLS, url, title: "Example" }))
+    });
+    expect(recognized.run.status).toBe("paused-needs-input");
+    expect(readStopEvidence(greenhouseDir, greenhouseJob)).toEqual([]);
+    database.close();
+    greenhouse.close();
+  });
+
+  it("captures the page, its iframes, and its Apply-like controls when an automatic run finds no form (no-form), for the job", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = externalJob(database, "qualified");
+    const page = capturing(fakePage({ url: EXTERNAL_URL, controls: [{ tag: "button", label: "Apply" }], body: "Robotics Intern\nApply" }));
+    const stopped = startBrowserRun(jobId, EXTERNAL_URL, { database, dataDir, automatic: true, voiceDrafter: null, openPage: async () => page });
+    await expect(stopped).rejects.toBeInstanceOf(AutomaticRunStopped);
+    expect(getBrowserRuns(jobId, database)).toEqual([]);
+    const [stored] = readStopEvidence(dataDir, jobId);
+    expect(stored).toMatchObject({ kind: "no-form", runId: null, region: { anchor: "main", frames: REGION.frames, applyControls: REGION.applyControls } });
+    expect(stored!.reason).toMatch(/^No application form was (?:found|reached) at /);
+    expect(page.regionReads).toEqual([{ kind: "page" }]);
+    expect(stopEvents(database, jobId)).toEqual([expect.stringContaining(`; view it with pnpm run:evidence --job ${jobId.slice(0, 8)}.`)]);
+    const lines: string[] = [];
+    expect(await runEvidenceCommand(["--job", jobId.slice(0, 8)], { open: () => database, close: () => undefined, dataDir: () => dataDir, log: (line) => { lines.push(line); } })).toBe(0);
+    expect(lines).toContain("Run: none (the run stopped before it was saved)");
+    expect(lines).toContain('  - frame https://fixture.icims.com/jobs/1 title "Job application" name "icims_content_iframe" 900x700 visible');
+    database.close();
+  });
+
+  it("captures the page for the run (no-form) when a generic continue reopens to no form, and the run stays paused", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = externalJob(database);
+    const controls: RawControl[] = [
+      { tag: "input", type: "text", id: "essay", label: "What name should appear on your badge?", required: true },
+      { tag: "button", label: "Submit application" }
+    ];
+    const started = await startBrowserRun(jobId, EXTERNAL_URL, {
+      database, dataDir, voiceDrafter: null, renderPdf: async () => ({ pages: 1 }), openPage: async () => fakePage({ url: EXTERNAL_URL, controls })
+    });
+    expect(started.run.status).toBe("paused-needs-input");
+    await answerRunPause(started.run.id, "essay", "Jordan", true, { database });
+    const before = readStopEvidence(dataDir, jobId).filter((entry) => entry.kind === "no-form");
+    expect(before).toEqual([]);
+    const elsewhere = capturing(fakePage({ url: EXTERNAL_URL, controls: [{ tag: "button", label: "Apply" }] }));
+    await expect(continueBrowserRun(started.run.id, { database, dataDir, openPage: async () => elsewhere }))
+      .rejects.toThrow(/^No application form was reached at /);
+    expect(getBrowserRuns(jobId, database)[0]!.status).toBe("paused-needs-input");
+    expect(elsewhere.filled.size).toBe(0);
+    const noForm = readStopEvidence(dataDir, jobId).filter((entry) => entry.kind === "no-form");
+    expect(noForm.map((entry) => entry.runId)).toEqual([started.run.id]);
+    expect(noForm[0]!.reason).toMatch(/^No application form was reached at /);
+    expect(elsewhere.regionReads).toEqual([{ kind: "page" }]);
+    expect(stopEvents(database, jobId)).toContainEqual(
+      expect.stringMatching(new RegExp(`^Stop evidence saved \\(no-form\\): applications/${jobId}/stop-evidence/[0-9TZ-]+-${started.run.id}-no-form; view it with pnpm run:evidence --run ${started.run.id.slice(0, 8)}\\.$`))
+    );
+    database.close();
+  });
+
+  it("captures a Playwright failure before the run is saved (run-failed), and the error still propagates", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = approvedJobId(database);
+    const timeout = Object.assign(new Error("locator.evaluate: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator('body')"), { name: "TimeoutError" });
+    const page = capturing({ ...fakePage(), collectControls: async () => { throw timeout; } });
+    await expect(startBrowserRun(jobId, "https://app.joinhandshake.com/apply/900001", { database, dataDir, openPage: async () => page })).rejects.toBe(timeout);
+    expect(getBrowserRuns(jobId, database)).toEqual([]);
+    expect(readStopEvidence(dataDir, jobId).map((entry) => [entry.kind, entry.runId, entry.reason])).toEqual([
+      ["run-failed", null, "TimeoutError: locator.evaluate: Timeout 30000ms exceeded."]
+    ]);
+    // Another failure saves nothing.
+    const other = disposableDataDir();
+    const plain = capturing({ ...fakePage(), collectControls: async () => { throw new Error("The fixture broke."); } });
+    await expect(startBrowserRun(jobId, "https://app.joinhandshake.com/apply/900001", { database, dataDir: other, openPage: async () => plain })).rejects.toThrow("The fixture broke.");
+    expect(readStopEvidence(other, jobId)).toEqual([]);
+    database.close();
+  });
+
+  it("tells the run trace the run's id, and that it ended cleanly only for a clean start or submit", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = approvedJobId(database);
+    const cleanTrace = fakeTrace();
+    const clean = await startBrowserRun(jobId, "https://app.joinhandshake.com/apply/900001", { database, dataDir, openPage: async () => attachRunTrace(fakePage(), cleanTrace) });
+    expect(clean.run.status).toBe("awaiting-approval");
+    expect(cleanTrace.calls).toEqual([`setRun:${clean.run.id}`, "endedCleanly"]);
+
+    approveRunSubmission(clean.run.id, undefined, { database });
+    const submitTrace = fakeTrace();
+    const submitted = await submitBrowserRun(clean.run.id, { database, dataDir, applicationRecord: null, openPage: async () => attachRunTrace(fakePage(), submitTrace) });
+    expect(submitted.status).toBe("submitted");
+    expect(submitTrace.calls).toEqual(["endedCleanly"]);
+
+    const paused = disposableDatabase();
+    const pausedJob = approvedJobId(paused);
+    const pausedTrace = fakeTrace();
+    const held = await startBrowserRun(pausedJob, "https://app.joinhandshake.com/apply/900001", {
+      database: paused, dataDir: disposableDataDir(), openPage: async () => attachRunTrace(fakePage({ controls: CLUB_CONTROLS }), pausedTrace)
+    });
+    expect(held.run.status).toBe("paused-needs-input");
+    expect(pausedTrace.calls).toEqual([`setRun:${held.run.id}`]);
+
+    const thrownTrace = fakeTrace();
+    const failing = attachRunTrace({ ...fakePage(), collectControls: async () => { throw new Error("The fixture broke."); } }, thrownTrace);
+    await expect(startBrowserRun(pausedJob, "https://app.joinhandshake.com/apply/900001", { database: paused, dataDir: disposableDataDir(), openPage: async () => failing })).rejects.toThrow();
+    expect(thrownTrace.calls).toEqual([]);
+    database.close();
+    paused.close();
   });
 });

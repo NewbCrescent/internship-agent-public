@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { chromium, type Page } from "playwright-core";
@@ -38,6 +38,7 @@ import {
   applicationWallKind,
   applicationWallReason,
   applyDecisions,
+  attachRunTrace,
   atsFlowFor,
   capturePostSubmitEvidence,
   challengePause,
@@ -62,6 +63,9 @@ import {
   matchSelfIdentificationOption,
   multiStepStopReason,
   planAutofill,
+  pruneRunTraces,
+  runTraceOf,
+  runTracesRoot,
   securityCodePause,
   postSubmitEvidenceOf,
   recognizeCurrentForm,
@@ -70,6 +74,7 @@ import {
   resumePdfPath,
   shouldRunHeadless,
   siteWallReason,
+  startRunTrace,
   submitAndConfirm,
   submitTargetHoldReason,
   submitTargetPause,
@@ -77,7 +82,10 @@ import {
   SubmissionCodeNotFound,
   SubmissionHeld,
   SubmissionNeedsInput,
+  traceArtifactsDir,
+  traceSnapshotsWanted,
   unfilledPause,
+  wrapUntracedMethods,
   type ApplyDecisionsOptions,
   type BrowserPage,
   type EducationInputs,
@@ -143,7 +151,17 @@ import { applyVoiceDrafts, createDefaultVoiceDrafter, draftSourcesFor, type Voic
 import { createDefaultPauseReviewer, type PauseReviewer } from "./pause-review";
 import { AutomaticRunStopped, IcimsAccountHeld, PostingClosed, WorkdayAccountHeld, WorkdayEntryStopped } from "./run-errors";
 import { postingLocationNames, postingQuestionContext, savedSelfIdentification } from "./saved-answers";
-import { saveCoveringDialogEvidenceQuietly, saveIcimsEvidenceQuietly, savePostSubmitEvidenceQuietly, saveWorkdayEvidenceQuietly } from "./submit-evidence";
+import {
+  failureStop,
+  fillStops,
+  logRunTraceQuietly,
+  saveCoveringDialogEvidenceQuietly,
+  saveIcimsEvidenceQuietly,
+  savePostSubmitEvidenceQuietly,
+  saveStopEvidenceQuietly,
+  saveWorkdayEvidenceQuietly,
+  workdayStops
+} from "./submit-evidence";
 import { ensureIcimsAccount, type IcimsAccountRuntime } from "./icims-account-service";
 import { getIcimsAccount } from "./icims-account-store";
 import { acceptJobviteConsentStep, logStandingAcceptances, logStandingDialogAcceptance, logStandingDialogLeft, standingPlannerInputs } from "./standing-consent";
@@ -248,25 +266,65 @@ function requireApprovedPackage(database: DatabaseSync, jobId: string, automatic
   return { posting, current, variant };
 }
 
-async function defaultOpenPage(url: string, dataDir: string): Promise<BrowserPage> {
+/**
+ * Where a real run's Playwright trace is kept when the run stops, pauses, or
+ * fails (Track 42, packages/browser/src/run-trace.ts): the job, the run once
+ * it has an id, and the saved account values the kept trace must not hold.
+ */
+type RunTraceTarget = { database: DatabaseSync; jobId: string; runId: string | null; neverStored?: (url: string) => string[] };
+
+async function defaultOpenPage(url: string, dataDir: string, trace: RunTraceTarget | null = null): Promise<BrowserPage> {
   // The Playwright page plus iCIMS's account steps and Jobvite's consent step (taken only when their settings are on).
-  return openProfilePage(url, dataDir, createApplicationPage);
+  return openProfilePage(url, dataDir, createApplicationPage, trace);
 }
 
-async function openProfilePage<T extends BrowserPage>(url: string, dataDir: string, adapt: (page: Page) => T): Promise<T> {
+async function openProfilePage<T extends BrowserPage>(url: string, dataDir: string, adapt: (page: Page) => T, trace: RunTraceTarget | null = null): Promise<T> {
   mkdirSync(join(dataDir, "browser-profile"), { recursive: true });
+  const artifacts = traceArtifactsDir(dataDir);
+  mkdirSync(artifacts, { recursive: true, mode: 0o700 });
+  chmodSync(artifacts, 0o700);
   const context = await chromium.launchPersistentContext(join(dataDir, "browser-profile"), {
     // Visible by default: real runs look like the candidate's own browser.
     headless: shouldRunHeadless(),
-    args: ["--no-sandbox", "--disable-dev-shm-usage"]
+    args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    tracesDir: artifacts
   });
+  // Every real run is traced; the trace is kept only when the run does not end cleanly.
+  const recorder = trace ? await startRunTrace(context, { dir: runTracesRoot(dataDir, trace.jobId), runId: trace.runId, snapshots: traceSnapshotsWanted(url) }) : null;
   const page = await context.newPage();
-  await page.goto(url);
+  const finishTrace = async (): Promise<void> => {
+    if (!recorder || !trace) return;
+    let neverStored: string[] | null;
+    try {
+      neverStored = trace.neverStored?.(page.url()) ?? [];
+    } catch {
+      neverStored = null;
+    }
+    const result = await recorder.finish(neverStored);
+    logRunTraceQuietly(trace.database, trace.jobId, recorder.runId(), result);
+    pruneRunTraces(dataDir);
+  };
+  try {
+    await page.goto(url);
+  } catch (error) {
+    // A page that never opened keeps its trace, and its browser is closed.
+    await finishTrace();
+    await context.close().catch(() => undefined);
+    throw error;
+  }
   const adapter = adapt(page);
+  if (recorder) {
+    wrapUntracedMethods(adapter, recorder);
+    attachRunTrace(adapter, recorder);
+  }
   const closePage = adapter.close.bind(adapter);
   adapter.close = async () => {
-    await closePage();
-    await context.close();
+    try {
+      await finishTrace();
+    } finally {
+      await closePage();
+      await context.close();
+    }
   };
   return adapter;
 }
@@ -678,7 +736,7 @@ async function resolveFields(
     }
     if (isSensitiveRole(classifyFieldRole(field))) {
       const saved = matchSelfIdentificationOption(field, selfIdentification);
-      resolutions.set(field.id, saved ? { status: "SELF_IDENTIFIED", key: saved.key, option: saved.option } : { status: "UNAVAILABLE" });
+      resolutions.set(field.id, saved ? { status: "SELF_IDENTIFIED", key: saved.key, option: saved.option, ...(saved.rule ? { rule: saved.rule } : {}) } : { status: "UNAVAILABLE" });
       continue;
     }
     const resolution = await resolveCandidateQuestion(field.label, { ...context, fieldKind: field.kind }, { database });
@@ -823,7 +881,10 @@ export async function startBrowserRun(
     throw new AutomaticRunStopped(`${posting.companyName} already received your transcript profile, and no 2029 graduation date is recorded. Answer the graduation question for the 2029 profile in candidate memory, then start the run again.`);
   }
   const dataDir = resolveDataDir(options.dataDir);
-  const openPage = options.openPage ?? ((url: string) => defaultOpenPage(url, dataDir));
+  const openPage = options.openPage ?? ((url: string) => defaultOpenPage(url, dataDir, {
+    database, jobId, runId: null,
+    neverStored: (current) => (automatic && options.icimsAccounts ? icimsAccountPassword(options.icimsAccounts, icimsHostOf(current)) : [])
+  }));
   const renderPdf = options.renderPdf ?? renderHtmlToPdf;
   if (parseWorkdayUrl(applicationUrl)) {
     const report = await startWorkdayRun(database, { jobId, candidateId, applicationUrl, posting, current, variantId: variant.id, automatic, lock }, {
@@ -1005,6 +1066,7 @@ export async function startBrowserRun(
         : "Browser run started from the approved package.");
     // The run's id is chosen first, so a covering dialog's capture is saved for it while the dialog is still up.
     const runId = randomUUID();
+    runTraceOf(page)?.setRun(runId);
     const { applied, unfilled } = await applyDecisions(page, form, decisions, uploadPathFor, coveringDialogCapture(database, dataDir, { id: runId, jobId }, page, standing));
     const filled = pauseUnfilled(form, decisions, plan.pauses, unfilled, runId);
     // Each statement accepted or signed under the standing settings, with its exact text (unfilled ones are pauses now).
@@ -1035,11 +1097,20 @@ export async function startBrowserRun(
       status: filled.pauses.length > 0 ? "paused-needs-input" : "awaiting-approval"
     });
     logAliasHits(database, jobId, settleAliasHits(filled.decisions, aliasHits).used);
+    // Track 42: the first stop of each kind saves a capture while the page is open.
+    await saveStopEvidenceQuietly({ database, dataDir, run: { id: runId, jobId }, page, stops: fillStops(form, unfilled, filled.pauses, flow !== "auto") });
+    if (settled.status === "awaiting-approval") runTraceOf(page)?.endedCleanly();
     noteMixedProfile(database, settled, posting.companyName, candidateId, manualPin);
     return { run: settled, form, applied };
   } catch (error) {
-    if (error instanceof WorkdayHandoff) handoff = error.url;
-    else throw error;
+    if (error instanceof WorkdayHandoff) {
+      handoff = error.url;
+      runTraceOf(page)?.endedCleanly();
+    } else {
+      const stop = failureStop(error);
+      if (stop) await saveStopEvidenceQuietly({ database, dataDir, run: { id: null, jobId }, page, stops: [stop] });
+      throw error;
+    }
   } finally {
     await page.close();
   }
@@ -1080,6 +1151,13 @@ function icimsAccountSecrets(runtime: IcimsAccountRuntime, host: string | null):
     return [runtime.email].filter(Boolean);
   }
   return secrets.filter(Boolean);
+}
+
+/** The host's saved iCIMS password, which a kept run trace must not hold; throws when the accounts file cannot be read. */
+function icimsAccountPassword(runtime: IcimsAccountRuntime | null | undefined, host: string | null): string[] {
+  if (!runtime || !host) return [];
+  const password = getIcimsAccount(runtime.file, host)?.password;
+  return password ? [password] : [];
 }
 
 /**
@@ -1490,7 +1568,7 @@ export async function continueBrowserRun(
     });
     return { run: settled, form: { url, title, fields: [] }, applied: countApplied(walk.decisions) };
   }
-  const openPage = options.openPage ?? ((url: string) => defaultOpenPage(url, dataDir));
+  const openPage = options.openPage ?? ((url: string) => defaultOpenPage(url, dataDir, { database, jobId: run.jobId, runId: run.id }));
   const channel = runChannel(
     getJobPosting(database, run.jobId)?.source.applicationType,
     usesTranscript(run.decisions) || run.applicationProfile === "transcript"
@@ -1618,13 +1696,20 @@ export async function continueBrowserRun(
     const stillOpen = filled.pauses.filter((entry) => entry.status === "open").length;
     // Nothing filled and nothing left to ask: the reopened page is not the run's form, so the run stays paused.
     if (stillOpen === 0 && applied === 0 && !filled.decisions.some((decision) => decision.action === "keep")) {
-      throw new Error(noFormReachedReason(page.url()));
+      const error = new Error(noFormReachedReason(page.url()));
+      const stop = failureStop(error);
+      if (stop) await saveStopEvidenceQuietly({ database, dataDir, run: { id: runId, jobId: run.jobId }, page, stops: [stop] });
+      throw error;
     }
     const updated = updateBrowserRun(database, runId, {
       decisions: filled.decisions,
       pauses: filled.pauses,
       status: stillOpen > 0 ? "paused-needs-input" : "awaiting-approval"
     });
+    await saveStopEvidenceQuietly({
+      database, dataDir, run: { id: runId, jobId: run.jobId }, page, stops: fillStops(form, unfilled, filled.pauses, !run.atsConfirmed || run.atsKind === "unknown")
+    });
+    if (updated.status === "awaiting-approval") runTraceOf(page)?.endedCleanly();
     // Statements newly accepted under the standing settings, logged once with their exact text.
     logStandingAcceptances(database, run.jobId, filled.decisions, run.decisions);
     logAliasHits(database, run.jobId, settleAliasHits(filled.decisions, aliased.used).used);
@@ -1787,7 +1872,7 @@ export async function submitBrowserRun(
     await recordSubmission(database, dataDir, run.jobId, walk.fieldLabels, options.applicationRecord);
     return submitted;
   }
-  const openPage = options.openPage ?? ((url: string) => defaultOpenPage(url, dataDir));
+  const openPage = options.openPage ?? ((url: string) => defaultOpenPage(url, dataDir, { database, jobId: run.jobId, runId: run.id }));
   const channel = runChannel(
     getJobPosting(database, run.jobId)?.source.applicationType,
     usesTranscript(run.decisions) || run.applicationProfile === "transcript"
@@ -1928,6 +2013,7 @@ export async function submitBrowserRun(
     });
     setJobStatus(database, run.jobId, null, "SUBMITTED", `Submitted with confirmation: ${confirmation.slice(0, 200)}`);
     outcome = { submitted, labels: Object.fromEntries(form.fields.map((field) => [field.id, field.label])) };
+    runTraceOf(page)?.endedCleanly();
   } catch (error) {
     if (error instanceof SubmissionCodeNotFound) {
       // Nothing was sent: the run goes back to the candidate with the approval withdrawn.
@@ -2082,7 +2168,9 @@ async function startWorkdayRun(
     standing: StandingConsentSettings;
   }
 ): Promise<RunReport> {
-  const openPage = options.openPage ?? ((url: string) => openProfilePage(url, options.dataDir, createWorkdayPage));
+  const openPage = options.openPage ?? ((url: string) => openProfilePage(url, options.dataDir, createWorkdayPage, {
+    database, jobId: input.jobId, runId: null, neverStored: () => workdayAccountPassword(options.account, input.applicationUrl)
+  }));
   const drafter = options.voiceDrafter === undefined ? createDefaultVoiceDrafter({ dataDir: options.dataDir, database }) : options.voiceDrafter;
   const reviewer = options.pauseReviewer === undefined ? createDefaultPauseReviewer({ database, candidateId: input.candidateId }) : options.pauseReviewer;
   const page = asWorkdayPage(await openPage(input.applicationUrl));
@@ -2105,6 +2193,7 @@ async function startWorkdayRun(
       variantId: input.variantId, baseResumeId: uploadedBaseResumeId(walk.decisions), applicationProfile: walk.transcript ? "transcript" : "default", atsKind: "workday", atsConfidence: 1, suggestedAtsKind: null, atsConfirmed: true,
       decisions: walk.decisions, pauses, submittedAnswers: null, confirmationText: null, submissionApprovedAt: null, createdAt: now, updatedAt: now
     });
+    runTraceOf(page)?.setRun(run.id);
     if (walk.outcome === "blocked") {
       await saveWorkdayEvidenceQuietly({
         database, dataDir: options.dataDir, run: { id: run.id, jobId: run.jobId }, page, outcome: "workday-errors",
@@ -2112,6 +2201,11 @@ async function startWorkdayRun(
         secrets: workdayAccountSecrets(options.account, input.applicationUrl)
       });
     }
+    await saveStopEvidenceQuietly({
+      database, dataDir: options.dataDir, run: { id: run.id, jobId: run.jobId }, page, stops: workdayStops(walk),
+      secrets: workdayAccountSecrets(options.account, input.applicationUrl)
+    });
+    if (status === "awaiting-approval") runTraceOf(page)?.endedCleanly();
     return { run, form: { url: page.url(), title: await page.title(), fields: [] }, applied: countApplied(walk.decisions) };
   } finally {
     await page.close();
@@ -2134,7 +2228,9 @@ async function continueWorkdayRun(
   const posting = getJobPosting(database, run.jobId);
   const current = getCurrentPackage(database, run.jobId);
   if (!posting || !current) throw new Error("The posting or its package is missing.");
-  const openPage = options.openPage ?? ((url: string) => openProfilePage(url, options.dataDir, createWorkdayPage));
+  const openPage = options.openPage ?? ((url: string) => openProfilePage(url, options.dataDir, createWorkdayPage, {
+    database, jobId: run.jobId, runId: run.id, neverStored: () => workdayAccountPassword(options.account, run.applicationUrl)
+  }));
   const drafter = options.voiceDrafter === undefined ? createDefaultVoiceDrafter({ dataDir: options.dataDir, database }) : options.voiceDrafter;
   const reviewer = options.mode === "submit" ? null : options.pauseReviewer === undefined ? createDefaultPauseReviewer({ database }) : options.pauseReviewer;
   const answers = new Map(run.pauses.filter((pause) => pause.status === "answered" && pause.answer !== null).map((pause) => [pause.fieldId, pause.answer!]));
@@ -2157,6 +2253,13 @@ async function continueWorkdayRun(
         secrets: workdayAccountSecrets(options.account, run.applicationUrl)
       });
     }
+    if (options.mode === "fill") {
+      await saveStopEvidenceQuietly({
+        database, dataDir: options.dataDir, run: target, page, stops: workdayStops(walk), secrets: workdayAccountSecrets(options.account, run.applicationUrl)
+      });
+    }
+    const clean = options.mode === "submit" ? walk.outcome === "submitted" : workdayOutcome(walk, run.pauses).status === "awaiting-approval";
+    if (clean) runTraceOf(page)?.endedCleanly();
     return { walk, url: page.url(), title: await page.title() };
   } finally {
     await page.close();
@@ -2183,6 +2286,14 @@ function workdayAccountSecrets(account: WorkdayRunContext["account"], applicatio
     return [account.runtime.email].filter(Boolean);
   }
   return secrets.filter(Boolean);
+}
+
+/** The host's saved Workday password, which a kept run trace must not hold; throws when the accounts file cannot be read. */
+function workdayAccountPassword(account: WorkdayRunContext["account"], applicationUrl: string): string[] {
+  if (!account) return [];
+  const location = parseWorkdayUrl(applicationUrl);
+  const password = location ? getWorkdayAccount(account.runtime.file, location.host)?.password : null;
+  return password ? [password] : [];
 }
 
 /**
@@ -2214,6 +2325,15 @@ async function walkWorkdayWithEvidence(
         database, dataDir: evidence.dataDir, run: evidence.run, page, outcome: "workday-entry", detail: error.message,
         secrets: workdayAccountSecrets(evidence.account, applicationUrl)
       });
+    }
+    // Track 42: a Playwright failure while filling (the ZOLL locator timeout) keeps a capture; never in submit mode, which may be after a click.
+    if (mode === "fill") {
+      const stop = failureStop(error);
+      if (stop?.kind === "run-failed") {
+        await saveStopEvidenceQuietly({
+          database, dataDir: evidence.dataDir, run: evidence.run, page, stops: [stop], secrets: workdayAccountSecrets(evidence.account, applicationUrl)
+        });
+      }
     }
     throw error;
   }

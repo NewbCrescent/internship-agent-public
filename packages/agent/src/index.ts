@@ -51,3 +51,4 @@ export * from "./icims-account-store";
 export * from "./icims-verification-mail";
 export * from "./icims-account-service";
 export * from "./standing-consent";
+export * from "./match-reevaluation";

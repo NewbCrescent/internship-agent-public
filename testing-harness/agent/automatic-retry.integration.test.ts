@@ -65,6 +65,7 @@ import {
   prepareApplication,
   putWorkdayAccount,
   readPipelineLock,
+  readStopEvidence,
   readSubmitEvidence,
   reopenUnsubmittedBlocker,
   requeueVerifiedHold,
@@ -75,6 +76,7 @@ import {
   retryAutomaticRun,
   runRetryCommand,
   savePostSubmitEvidence,
+  saveStopEvidenceQuietly,
   startBrowserRun,
   submitBrowserRun,
   UnavailableModelProvider,
@@ -807,6 +809,23 @@ describe("verified pre-submit hold retry", () => {
     }
   );
 
+  it("still requeues a run whose only evidence is Track 42 stop captures (saved before any submit click)", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-verified-stop-");
+    const run = syntheticHeldRun(database, { company: "FixtureStop", by: "pipeline", pauses: [] });
+    const hold = refreshApplicationHolds(database, dataDir)[0]!;
+    await saveStopEvidenceQuietly({
+      database, dataDir, run, page: fakePage(),
+      stops: [
+        { kind: "unfillable-field", reason: "the field did not respond in time", fieldLabel: "City", region: { kind: "field", fieldId: "city", label: "City" } },
+        { kind: "run-failed", reason: "TimeoutError: locator.fill: Timeout 30000ms exceeded.", fieldLabel: null, region: { kind: "page" } }
+      ]
+    });
+    expect(readStopEvidence(dataDir, run.jobId).map((entry) => entry.kind).sort()).toEqual(["run-failed", "unfillable-field"]);
+    expect(requeueVerifiedHold(database, dataDir, run.id, { revision: hold.revision, recheck: "abc123def" }, "Fixed").status).toBe("cancelled");
+    database.close();
+  });
+
   it("requires the current manager revision and requeues only the selected automatic run with a trace", async () => {
     const database = disposableDatabase();
     const dataDir = disposableDirectory("internship-agent-verified-retry-");
@@ -891,6 +910,24 @@ describe("verified job-level hold requeue (--job)", () => {
     const next = await pass(database, dataDir, async () => fakePage());
     expect(next.started).toEqual([{ jobId, runStatus: "awaiting-approval" }]);
     expect(details(database, jobId).at(-1)).toBe(AUTO_START);
+    database.close();
+  });
+
+  it("requeues a job whose stop before any run saved a Track 42 capture, never reading it as a submit attempt", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-job-hold-");
+    const { jobId, hold } = await jobStoppedBeforeRun(database, dataDir);
+    // The no-form stop saved a job-level capture; another job-level capture is added like the ZOLL crash's.
+    await saveStopEvidenceQuietly({
+      database, dataDir, run: { id: null, jobId }, page: fakePage(),
+      stops: [{ kind: "run-failed", reason: "TimeoutError: locator.focus: Timeout 30000ms exceeded.", fieldLabel: null, region: { kind: "page" } }]
+    });
+    expect(readStopEvidence(dataDir, jobId).map((entry) => [entry.kind, entry.runId]).sort()).toEqual([["no-form", null], ["run-failed", null]]);
+    expect(verifiedJobHoldBlocker(database, dataDir, jobId, { revision: hold.revision, recheck: RECHECK })).toBeNull();
+    const { deps, lines } = commandDeps(database, { dataDir: () => dataDir });
+    expect(await runRetryCommand(jobArgs(jobId, hold.revision), deps)).toBe(0);
+    expect(lines).toContain("Retried 1; skipped 0.");
+    expect(statusOf(database, jobId)).toBe("READY_FOR_REVIEW");
     database.close();
   });
 

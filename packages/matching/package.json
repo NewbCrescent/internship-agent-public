@@ -11,7 +11,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest --root ../.. run testing-harness/matching",
     "test:fast": "vitest --root ../.. run testing-harness/matching/eligibility-fit.test.ts testing-harness/matching/semantic-fit.test.ts testing-harness/matching/review-pursuit.test.ts",
-    "test:local": "vitest --root ../.. run testing-harness/matching/match-persistence.integration.test.ts testing-harness/matching/semantic-fit.integration.test.ts"
+    "test:local": "vitest --root ../.. run testing-harness/matching/match-persistence.integration.test.ts testing-harness/matching/semantic-fit.integration.test.ts",
+    "test:reevaluate": "vitest --root ../.. run testing-harness/matching/match-reevaluation.integration.test.ts"
   },
   "dependencies": {
     "@internship-agent/domain": "workspace:*"

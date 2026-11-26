@@ -14,4 +14,6 @@ export * from "./cookie-consent";
 export * from "./announcement-dialog";
 export * from "./standing-dialog";
 export * from "./site-navigation";
+export * from "./stop-evidence";
+export * from "./run-trace";
 export * from "./submit-gate";

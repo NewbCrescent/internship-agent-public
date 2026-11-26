@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 import { z } from "zod";
@@ -17,16 +17,33 @@ import {
 } from "@internship-agent/db";
 import {
   capturePostSubmitEvidence,
+  captureStopEvidence,
   captureWorkdayEvidence,
+  COVERING_DIALOG_REASON,
+  runTracesRoot,
+  STOP_KINDS,
+  stopEvidenceRoot,
   submitEvidenceRoot,
   type AshbySubmitDiagnostics,
   type AshbySubmitNetwork,
   type BrowserPage,
   type PostSubmitEvidence,
+  type RunTraceResult,
+  type StopKind,
+  type StopRegionRequest,
+  type UnfilledField,
   type WorkdayPage,
-  type WorkdayPageError
+  type WorkdayPageError,
+  type WorkdayWalkResult
 } from "@internship-agent/browser";
-import { workspaceProfileSchema, type BrowserRun, type JobPosting, type WorkspaceProfile } from "@internship-agent/domain";
+import {
+  workspaceProfileSchema,
+  type BrowserRun,
+  type JobPosting,
+  type PauseRecord,
+  type RecognizedForm,
+  type WorkspaceProfile
+} from "@internship-agent/domain";
 
 import { redactNoticeText } from "./pass-notice";
 
@@ -60,6 +77,9 @@ import { redactNoticeText } from "./pass-notice";
  * as `covering-dialog`, once per run (saveCoveringDialogEvidenceQuietly):
  * the screenshot, the redacted visible text, and each covering dialog's
  * redacted text, role, aria attributes, and button labels.
+ *
+ * Stop evidence (Track 42) is saved in the job's `stop-evidence/` folder the first time each kind of pause or stop happens in a run (saveStopEvidenceQuietly, at most five per run): the screenshot, the redacted visible text, the query-stripped URL, the stop's reason and field label, and a bounded, redacted excerpt of the page region it concerns.
+ * Kept Playwright run traces (packages/browser/src/run-trace.ts, the job's `run-traces/` folder) are listed by `pnpm run:evidence` with the command that opens them; they are never read here.
  */
 
 export const SUBMIT_EVIDENCE_EVENT = "Post-submit evidence saved";
@@ -584,6 +604,411 @@ export async function saveCoveringDialogEvidenceQuietly(input: SaveCoveringDialo
   }
 }
 
+// ---- Stop evidence (Track 42) and run traces ----
+
+export const STOP_EVIDENCE_EVENT = "Stop evidence saved";
+const STOP_NOT_SAVED_EVENT = "Stop evidence not saved.";
+/** At most this many stop captures per run: the first of each kind. */
+export const STOP_CAPTURES_PER_RUN = 5;
+/** The newest this many stop captures of a job are kept; older ones are deleted. */
+export const STOP_CAPTURES_KEPT_PER_JOB = 20;
+export const RUN_TRACE_EVENT = "Run trace saved";
+const RUN_TRACE_NOT_KEPT_EVENT = "Run trace not kept";
+const STOP_FOLDER = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-/;
+const RUN_TRACE_FILE = /^trace-(?:job|[0-9a-f-]{36})-[0-9TZ-]+(?:-\d+)?\.zip$/;
+const UNANSWERABLE_REASON = "The agent had no answer it may use for this question, on a site it has no adapter for.";
+const WORKDAY_UNFILLED = /^The agent could not fill "[\s\S]*?": ([\s\S]*?)\. Answer it here, or fill it in the browser\.$/;
+const PLAYWRIGHT_ERROR = /^(?:locator|page|frame|elementHandle|keyboard|mouse|browserContext|browser|jsHandle)\.[A-Za-z]+: /;
+const NO_FORM_ERROR = /^No application form was (?:found|reached) at /;
+
+const stopFrameSchema = z.object({
+  src: z.string().max(500), title: z.string().max(200), name: z.string().max(100),
+  width: z.number().int().min(0).max(100_000), height: z.number().int().min(0).max(100_000), visible: z.boolean()
+});
+const stopControlSchema = z.object({
+  tag: z.string().max(20), text: z.string().max(120), href: z.string().max(500).nullable(), role: z.string().max(40).nullable(),
+  ariaLabel: z.string().max(120), disabled: z.boolean(), visible: z.boolean()
+});
+
+/** One stop capture, as stored: every text redacted and clipped, every list cut to its bound. */
+export const stopEvidenceFileSchema = z.object({
+  version: z.literal(1),
+  /** Null when the run stopped before its row was saved. */
+  runId: z.string().min(1).nullable(),
+  jobId: z.string().min(1),
+  capturedAt: z.iso.datetime(),
+  outcome: z.literal("stop"),
+  kind: z.enum(STOP_KINDS),
+  reason: z.string().max(500),
+  fieldLabel: z.string().max(300).nullable(),
+  url: z.string().max(2_000),
+  alertText: z.string().max(1_000),
+  text: z.string().max(MAX_TEXT),
+  screenshot: z.string().nullable(),
+  region: z.object({
+    anchor: z.string().max(40),
+    html: z.string().max(12_000),
+    truncated: z.boolean(),
+    frames: z.array(stopFrameSchema).max(20),
+    applyControls: z.array(stopControlSchema).max(20)
+  }).nullable()
+});
+
+export type StoredStopEvidence = z.infer<typeof stopEvidenceFileSchema>;
+
+/** One stop to capture: its kind, the agent's reason, the field's label, and the page region it concerns. */
+export type StopRequest = { kind: StopKind; reason: string; fieldLabel: string | null; region: StopRegionRequest };
+
+/**
+ * The stops a generic fill leaves: each field the page would not take (not a
+ * covering dialog, which Track 39 captures), and, on a site with no adapter,
+ * each open question the agent had no answer for (not a safeguard, upload,
+ * or voice draft).
+ */
+export function fillStops(form: RecognizedForm, unfilled: UnfilledField[], pauses: PauseRecord[], unrecognizedSite: boolean): StopRequest[] {
+  const fields = new Map(form.fields.map((field) => [field.id, field]));
+  const unfilledIds = new Set(unfilled.map((entry) => entry.fieldId));
+  const stops: StopRequest[] = [];
+  for (const entry of unfilled) {
+    if (entry.reason === COVERING_DIALOG_REASON) continue;
+    const field = fields.get(entry.fieldId);
+    if (!field) continue;
+    stops.push({ kind: "unfillable-field", reason: entry.reason, fieldLabel: field.label, region: { kind: "field", fieldId: field.id, label: field.label } });
+  }
+  if (unrecognizedSite) {
+    for (const pause of pauses) {
+      if (pause.status !== "open" || pause.safeguard || pause.upload || (pause.draft ?? null) !== null || unfilledIds.has(pause.fieldId)) continue;
+      const field = fields.get(pause.fieldId);
+      if (!field) continue;
+      stops.push({ kind: "unanswerable-question", reason: UNANSWERABLE_REASON, fieldLabel: field.label, region: { kind: "field", fieldId: field.id, label: field.label } });
+    }
+  }
+  return stops;
+}
+
+/**
+ * The stops a Workday walk leaves: history rows Workday did not add or whose
+ * control did not respond (never naming the row), fields that would not take
+ * their value, and a blocked step with none of Workday's own errors.
+ */
+export function workdayStops(walk: WorkdayWalkResult): StopRequest[] {
+  const stops: StopRequest[] = [];
+  for (const pause of walk.pauses) {
+    if (pause.status !== "open") continue;
+    const separator = pause.fieldId.indexOf("::");
+    const id = separator >= 0 ? pause.fieldId.slice(separator + 2) : pause.fieldId;
+    const section = id.startsWith("history:work:") ? "Work Experience" : id.startsWith("history:education:") ? "Education" : null;
+    if (section) {
+      if (/^Workday did not add an? (?:Work Experience|Education) row/.test(pause.question)) {
+        stops.push({ kind: "history-row", reason: `Workday did not add a ${section} row.`, fieldLabel: section, region: { kind: "section", label: section } });
+        continue;
+      }
+      const control = /^Workday's (.{1,60}) control on this row did not respond/.exec(pause.question);
+      if (control) {
+        stops.push({
+          kind: "history-row", reason: `Workday's ${control[1]} control on ${section === "Education" ? "an" : "a"} ${section} row did not respond.`, fieldLabel: section,
+          region: { kind: "section", label: section }
+        });
+        continue;
+      }
+    }
+    if (pause.question.startsWith('The agent could not fill "') && !pause.question.includes(`: ${COVERING_DIALOG_REASON}`)) {
+      const parsed = WORKDAY_UNFILLED.exec(pause.question);
+      stops.push({
+        kind: "unfillable-field", reason: parsed?.[1] ?? "the field would not take its value", fieldLabel: pause.label,
+        region: { kind: "field", fieldId: id, label: pause.label }
+      });
+    }
+  }
+  if (walk.outcome === "blocked" && walk.workdayErrors.length === 0) {
+    stops.push({
+      kind: "step-transition", reason: walk.errors.at(-1) ?? "Workday did not move on to the next step.", fieldLabel: walk.steps.at(-1)?.name ?? null,
+      region: { kind: "page" }
+    });
+  }
+  return stops;
+}
+
+/**
+ * The stop a thrown error is: `no-form` for "No application form was found
+ * (or reached) at …", `run-failed` for a Playwright error (its first line
+ * only: Playwright's call log names resolved elements with their values),
+ * otherwise null.
+ */
+export function failureStop(error: unknown): StopRequest | null {
+  if (!(error instanceof Error)) return null;
+  if (NO_FORM_ERROR.test(error.message)) return { kind: "no-form", reason: error.message, fieldLabel: null, region: { kind: "page" } };
+  if (error.name === "TimeoutError" || PLAYWRIGHT_ERROR.test(error.message)) {
+    const first = (error.message.replace(/\u001b\[[0-9;]*m/g, "").split(/\n|Call log:/)[0] ?? "").trim();
+    return { kind: "run-failed", reason: clip(`${error.name}: ${first}`, 300), fieldLabel: null, region: { kind: "page" } };
+  }
+  return null;
+}
+
+/** A quoted value ("no suggestion matched "…"", a file name) is never kept: the agent may have typed it. */
+const withoutQuotedValues = (text: string): string => text.replace(/"[^"]*"/g, '"[value]"');
+
+/** Region markup as stored: emails and URL queries redacted again (digit runs were redacted in the page, outside reference attributes). */
+function redactRegionHtml(html: string): string {
+  return html
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")
+    .replace(/(https?:\/\/[^\s?#"'<>]+)[?#][^\s"'<>]*/g, "$1");
+}
+
+export type SaveStopEvidenceInput = {
+  database: DatabaseSync;
+  dataDir: string;
+  /** `id` is null when the run stopped before its row was saved. */
+  run: { id: string | null; jobId: string };
+  page: BrowserPage;
+  stops: StopRequest[];
+  /** Values never stored (account emails and passwords): each is replaced by "[redacted]". */
+  secrets?: string[];
+  now?: () => Date;
+};
+
+async function saveOneStop(input: SaveStopEvidenceInput, stop: StopRequest, scrub: (text: string) => string): Promise<void> {
+  const { database, dataDir, run, page } = input;
+  const capturedAt = (input.now?.() ?? new Date()).toISOString();
+  const folder = `${capturedAt.replace(/[:.]/g, "-")}-${run.id ?? "job"}-${stop.kind}`;
+  const root = stopEvidenceRoot(dataDir, run.jobId);
+  const dir = join(root, folder);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(root, 0o700);
+  chmodSync(dir, 0o700);
+  const capture = await captureStopEvidence(page, stop.region);
+  const screenshotPath = join(dir, "screenshot.png");
+  let screenshotSaved = false;
+  try {
+    await page.screenshot(screenshotPath, { fullPage: true });
+    chmodSync(screenshotPath, 0o600);
+    screenshotSaved = true;
+  } catch {
+    rmSync(screenshotPath, { force: true });
+  }
+  const text = (value: string, max: number) => clip(redactNoticeText(scrub(value)), max);
+  const region = capture.region;
+  const stored = stopEvidenceFileSchema.parse({
+    version: 1,
+    runId: run.id,
+    jobId: run.jobId,
+    capturedAt,
+    outcome: "stop",
+    kind: stop.kind,
+    reason: clip(redactNoticeText(scrub(withoutQuotedValues(stop.reason))), 500),
+    fieldLabel: stop.fieldLabel === null ? null : text(stop.fieldLabel, 300),
+    url: clip(scrub(capture.url), 2_000),
+    alertText: text(capture.alertText, 1_000),
+    text: redactEvidenceText(scrub(capture.bodyText)),
+    screenshot: screenshotSaved ? "screenshot.png" : null,
+    region: region === null ? null : {
+      anchor: clip(String(region.anchor), 40),
+      html: clip(redactRegionHtml(scrub(String(region.html))), 12_000),
+      truncated: region.truncated === true,
+      frames: region.frames.slice(0, 20).map((frame) => ({
+        src: text(frame.src, 500), title: text(frame.title, 200), name: text(frame.name, 100),
+        width: count(frame.width, 0, 100_000), height: count(frame.height, 0, 100_000), visible: frame.visible === true
+      })),
+      applyControls: region.applyControls.slice(0, 20).map((control) => ({
+        tag: /^[a-z][a-z0-9-]{0,19}$/.test(control.tag) ? control.tag : "element",
+        text: text(control.text, 120),
+        href: control.href === null ? null : text(control.href, 500),
+        role: control.role === null ? null : text(control.role, 40),
+        ariaLabel: text(control.ariaLabel, 120),
+        disabled: control.disabled === true,
+        visible: control.visible === true
+      }))
+    }
+  } satisfies StoredStopEvidence);
+  writePrivateAtomic(join(dir, "evidence.json"), JSON.stringify(stored, null, 2) + "\n");
+  const status = getJobPosting(database, run.jobId)?.status ?? "APPLYING";
+  logApplicationEvent(database, {
+    jobId: run.jobId, fromStatus: status, toStatus: status,
+    detail: `${STOP_EVIDENCE_EVENT} (${stop.kind}): applications/${run.jobId}/stop-evidence/${folder}; view it with pnpm run:evidence ${run.id ? `--run ${run.id.slice(0, 8)}` : `--job ${run.jobId.slice(0, 8)}`}.`
+  });
+}
+
+/** Keeps the newest STOP_CAPTURES_KEPT_PER_JOB capture folders of the job (by name, which starts with the capture time). */
+function pruneStopEvidence(dataDir: string, jobId: string): void {
+  const root = stopEvidenceRoot(dataDir, jobId);
+  const folders = readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && STOP_FOLDER.test(entry.name))
+    .map((entry) => entry.name)
+    .sort()
+    .reverse();
+  for (const name of folders.slice(STOP_CAPTURES_KEPT_PER_JOB)) rmSync(join(root, name), { recursive: true, force: true });
+}
+
+/**
+ * Saves one capture for the first stop of each kind in the run, at most
+ * STOP_CAPTURES_PER_RUN per run (counting the run's stored captures), while
+ * the page is still open. Reads only: never clicks or types. Never throws and
+ * never changes the run; a capture that fails logs a plain event.
+ */
+export async function saveStopEvidenceQuietly(input: SaveStopEvidenceInput): Promise<void> {
+  try {
+    if (input.stops.length === 0) return;
+    const secrets = (input.secrets ?? []).filter((secret) => secret.length > 0);
+    const scrub = (text: string) => scrubSecrets(text, secrets);
+    const existing = input.run.id ? readStopEvidence(input.dataDir, input.run.jobId).filter((entry) => entry.runId === input.run.id) : [];
+    const seen = new Set<StopKind>(existing.map((entry) => entry.kind));
+    let budget = STOP_CAPTURES_PER_RUN - existing.length;
+    for (const stop of input.stops) {
+      if (budget <= 0) break;
+      if (seen.has(stop.kind)) continue;
+      seen.add(stop.kind);
+      budget -= 1;
+      try {
+        await saveOneStop(input, stop, scrub);
+      } catch {
+        try {
+          const status = getJobPosting(input.database, input.run.jobId)?.status ?? "APPLYING";
+          logApplicationEvent(input.database, { jobId: input.run.jobId, fromStatus: status, toStatus: status, detail: STOP_NOT_SAVED_EVENT });
+        } catch {
+          // The run's own outcome stands.
+        }
+      }
+    }
+    try {
+      pruneStopEvidence(input.dataDir, input.run.jobId);
+    } catch {
+      // Pruning never changes the run.
+    }
+  } catch {
+    // The run's own outcome stands.
+  }
+}
+
+/** Every valid stop capture of the job, newest first; unreadable or invalid files are skipped. */
+export function readStopEvidence(dataDir: string, jobId: string): Array<StoredStopEvidence & { dir: string }> {
+  const root = stopEvidenceRoot(dataDir, jobId);
+  let names: string[];
+  try {
+    names = readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+  const found: Array<StoredStopEvidence & { dir: string }> = [];
+  for (const name of names) {
+    const dir = join(root, name);
+    let parsed: ReturnType<typeof stopEvidenceFileSchema.safeParse>;
+    try {
+      parsed = stopEvidenceFileSchema.safeParse(JSON.parse(readFileSync(join(dir, "evidence.json"), "utf8")));
+    } catch {
+      continue;
+    }
+    if (parsed.success && parsed.data.jobId === jobId) found.push({ ...parsed.data, dir });
+  }
+  return found.sort((a, b) => (a.capturedAt < b.capturedAt ? 1 : a.capturedAt > b.capturedAt ? -1 : 0));
+}
+
+/** The job's kept run traces (the run's only, when `runId` is given), newest first by name. */
+export function listRunTraces(dataDir: string, jobId: string, runId?: string): Array<{ path: string; bytes: number; savedAt: string }> {
+  const root = runTracesRoot(dataDir, jobId);
+  let names: string[];
+  try {
+    names = readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isFile()).map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+  const traces: Array<{ path: string; bytes: number; savedAt: string }> = [];
+  // Newest first by the start time in the name (after the run id), then by name.
+  const stamp = (name: string) => name.replace(/^trace-(?:job|[0-9a-f-]{36})-/, "");
+  const ordered = names
+    .filter((entry) => RUN_TRACE_FILE.test(entry) && (runId === undefined || entry.startsWith(`trace-${runId}-`)))
+    .sort((a, b) => (stamp(a) < stamp(b) ? 1 : stamp(a) > stamp(b) ? -1 : a < b ? 1 : a > b ? -1 : 0));
+  for (const name of ordered) {
+    const path = join(root, name);
+    try {
+      const stat = statSync(path);
+      traces.push({ path, bytes: stat.size, savedAt: stat.mtime.toISOString() });
+    } catch {
+      continue;
+    }
+  }
+  return traces;
+}
+
+const RUN_TRACE_DROPS: Record<NonNullable<RunTraceResult["dropped"]>, string> = {
+  "secret-found": "it held a value the agent never stores",
+  "network-found": "it held network records",
+  unreadable: "it could not be checked",
+  "trace-error": "tracing failed",
+  "secrets-unknown": "the saved account values could not be read to check it"
+};
+
+/** Logs where a run's kept trace is, or why it was not kept; nothing for a discarded (clean) one. Never throws. */
+export function logRunTraceQuietly(database: DatabaseSync, jobId: string, runId: string | null, result: RunTraceResult): void {
+  try {
+    let detail: string | null = null;
+    if (result.saved.length > 0) {
+      const paths = result.saved.map((path) => `applications/${jobId}/run-traces/${basename(path)}`).join(", ");
+      detail = `${RUN_TRACE_EVENT}: ${paths}; view it with pnpm run:evidence ${runId ? `--run ${runId.slice(0, 8)}` : `--job ${jobId.slice(0, 8)}`}.`;
+    } else if (result.dropped !== null) {
+      detail = `${RUN_TRACE_NOT_KEPT_EVENT}: ${RUN_TRACE_DROPS[result.dropped]}.`;
+    }
+    if (detail === null) return;
+    const status = getJobPosting(database, jobId)?.status ?? "APPLYING";
+    logApplicationEvent(database, { jobId, fromStatus: status, toStatus: status, detail });
+  } catch {
+    // The run's own outcome stands.
+  }
+}
+
+const STOP_TEXT: Record<StopKind, string> = {
+  "history-row": "a Workday history row paused",
+  "unfillable-field": "a field would not take its value",
+  "unanswerable-question": "a question on a site with no adapter had no answer",
+  "no-form": "no application form was found",
+  "run-failed": "the run failed before it finished",
+  "step-transition": "a Workday step did not move on or could not be read"
+};
+
+/** The lines `pnpm run:evidence` prints for one stop capture, after its heading and run line. */
+export function describeStopEvidence(entry: StoredStopEvidence & { dir: string }): string[] {
+  const lines = [`URL: ${entry.url || "(none)"}`, `Stop: ${entry.kind} — ${entry.reason}`];
+  if (entry.fieldLabel !== null) lines.push(`Field: ${entry.fieldLabel}`);
+  if (entry.alertText) lines.push(`Site error text: ${entry.alertText}`);
+  const region = entry.region;
+  if (region === null) {
+    lines.push("Region: not read");
+  } else {
+    lines.push(`Region (${region.anchor}, ${region.html.length} characters${region.truncated ? ", cut at the cap" : ""}):`);
+    lines.push(region.html || "(empty)");
+    if (region.frames.length > 0) {
+      lines.push(`Frames: ${region.frames.length}`);
+      for (const frame of region.frames) {
+        lines.push(`  - frame ${frame.src || "(no src)"} title "${frame.title}" name "${frame.name}" ${frame.width}x${frame.height} ${frame.visible ? "visible" : "hidden"}`);
+      }
+    }
+    if (region.applyControls.length > 0 || entry.kind === "no-form") {
+      lines.push(`Apply-like controls: ${region.applyControls.length}`);
+      for (const control of region.applyControls) {
+        const extra = [
+          control.href !== null && `href ${control.href}`, control.role !== null && `role ${control.role}`,
+          control.ariaLabel && `aria-label "${control.ariaLabel}"`, control.disabled && "disabled", !control.visible && "hidden"
+        ].filter(Boolean).join(", ");
+        lines.push(`  - ${control.tag} "${control.text}"${extra ? ` (${extra})` : ""}`);
+      }
+    }
+  }
+  lines.push(entry.screenshot ? `Screenshot: ${join(entry.dir, entry.screenshot)}` : "Screenshot: not saved");
+  lines.push("Visible text (redacted):");
+  lines.push(entry.text);
+  return lines;
+}
+
+/** The lines `pnpm run:evidence` prints for kept run traces; [] when there are none. */
+export function describeRunTraces(traces: Array<{ path: string; bytes: number; savedAt: string }>): string[] {
+  if (traces.length === 0) return [];
+  const lines = [`Run traces: ${traces.length}`];
+  for (const trace of traces) {
+    lines.push(`  - ${trace.path} (${(trace.bytes / (1024 * 1024)).toFixed(1)} MB, saved ${trace.savedAt})`);
+    lines.push(`    open it with: pnpm exec playwright show-trace ${trace.path}`);
+  }
+  return lines;
+}
+
 /** Every valid evidence entry under the job's folder, newest first. */
 function readEvidenceEntries(dataDir: string, jobId: string): Array<StoredSubmitEvidence & { dir: string }> {
   const root = submitEvidenceRoot(dataDir, jobId);
@@ -640,6 +1065,9 @@ const OUTCOME_TEXT: Record<StoredSubmitEvidence["outcome"], string> = {
   "icims-application": "the agent reached iCIMS's application and stopped",
   "covering-dialog": "a dialog covered the form while the agent filled it"
 };
+
+/** What `pnpm run:evidence` shows: post-submit and Workday/iCIMS evidence, and stop captures (`outcome: "stop"`). */
+type ShownEvidence = (StoredSubmitEvidence & { dir: string }) | (StoredStopEvidence & { dir: string });
 
 type EvidenceFlags = { target: { kind: "run" | "job"; ref: string }; profile: WorkspaceProfile; all: boolean };
 
@@ -717,7 +1145,8 @@ function resolveEvidenceJob(database: DatabaseSync, typed: string): JobPosting {
 /**
  * `pnpm run:evidence (--run <ref> | --job <ref>) [--all] [--profile real|demo]`:
  * prints a run's stored evidence, or a job's (its runs' and its Workday
- * account-step stops'), the newest capture or all with --all.
+ * account-step stops'), with their stop captures (Track 42), the newest
+ * capture or all with --all, then the kept run traces and how to open them.
  * Read only: no lock, no writes, no network, no model.
  */
 export async function runEvidenceCommand(argv: string[], deps: Partial<RunEvidenceDeps> = {}): Promise<number> {
@@ -734,30 +1163,42 @@ export async function runEvidenceCommand(argv: string[], deps: Partial<RunEviden
   }
   const database = io.open(flags.profile);
   try {
-    let stored: Array<StoredSubmitEvidence & { dir: string }>;
+    let stored: ShownEvidence[];
+    let traces: Array<{ path: string; bytes: number; savedAt: string }>;
     const byJob = flags.target.kind === "job";
     try {
+      const dataDir = io.dataDir(flags.profile);
       if (byJob) {
         const job = resolveEvidenceJob(database, flags.target.ref);
         io.log(`Job ${job.id.slice(0, 8)}: ${clip(job.companyName, 120)} — ${clip(job.title, 120)} (${job.status})`);
-        stored = readJobEvidence(io.dataDir(flags.profile), job.id);
+        stored = [...readJobEvidence(dataDir, job.id), ...readStopEvidence(dataDir, job.id)];
+        traces = listRunTraces(dataDir, job.id);
       } else {
         const run = resolveEvidenceRun(database, flags.target.ref);
         const posting = getJobPosting(database, run.jobId);
         const name = posting ? `${clip(posting.companyName, 120)} — ${clip(posting.title, 120)}` : "Unknown posting";
         io.log(`Run ${run.id.slice(0, 8)}: ${name} (${run.status})`);
-        stored = readSubmitEvidence(io.dataDir(flags.profile), run);
+        stored = [...readSubmitEvidence(dataDir, run), ...readStopEvidence(dataDir, run.jobId).filter((entry) => entry.runId === run.id)];
+        traces = listRunTraces(dataDir, run.jobId, run.id);
       }
     } catch (error) {
       io.log(error instanceof Error ? error.message : String(error));
       return 1;
     }
+    stored.sort((a, b) => (a.capturedAt < b.capturedAt ? 1 : a.capturedAt > b.capturedAt ? -1 : 0));
     if (stored.length === 0) {
       io.log(byJob ? "No evidence is stored for this job." : "No post-submit evidence is stored for this run.");
+      for (const line of describeRunTraces(traces)) io.log(line);
       return 0;
     }
     const shown = flags.all ? stored : stored.slice(0, 1);
     for (const [index, entry] of shown.entries()) {
+      if (entry.outcome === "stop") {
+        io.log(`Evidence ${index + 1} of ${stored.length}, captured ${entry.capturedAt}: stop (${STOP_TEXT[entry.kind]})`);
+        if (byJob) io.log(entry.runId ? `Run: ${entry.runId.slice(0, 8)}` : "Run: none (the run stopped before it was saved)");
+        for (const line of describeStopEvidence(entry)) io.log(line);
+        continue;
+      }
       io.log(`Evidence ${index + 1} of ${stored.length}, captured ${entry.capturedAt}: ${entry.outcome} (${OUTCOME_TEXT[entry.outcome]})`);
       if (byJob) io.log(entry.runId
         ? `Run: ${entry.runId.slice(0, 8)}`
@@ -781,6 +1222,7 @@ export async function runEvidenceCommand(argv: string[], deps: Partial<RunEviden
       io.log("Visible text (redacted):");
       io.log(entry.text);
     }
+    for (const line of describeRunTraces(traces)) io.log(line);
     return 0;
   } finally {
     io.close(flags.profile);

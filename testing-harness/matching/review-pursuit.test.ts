@@ -114,6 +114,21 @@ describe("reviewPursuit", () => {
     expect(result).toEqual({ pursue: true, unverified: ["Experience with Elixir"] });
   });
 
+  it("reads an MS in the title as Mississippi only at a Mississippi posting (Track 56)", () => {
+    const title = "Intern, MS - Summer 2027";
+    const open = single("Experience with Elixir", "SKILL", SKILL_REVIEW_REASON);
+    const report = { verdict: "NEEDS_REVIEW" as const, eligible: true, findings: open.findings };
+    const raw = "Jackson, MS";
+    const jackson = {
+      jobId: JOB_ID, raw, city: "Jackson", region: "MS", countryCode: "US", workMode: "UNSPECIFIED" as const,
+      span: { start: 0, end: raw.length, excerpt: raw }
+    };
+    expect(reviewPursuit(report, { title, requirements: open.requirements, locations: [jackson] }))
+      .toEqual({ pursue: true, unverified: ["Experience with Elixir"] });
+    expect(reviewPursuit(report, { title, requirements: open.requirements }))
+      .toEqual({ pursue: false, reason: "The title targets graduate study." });
+  });
+
   it("does not pursue a missing degree or a missing full-time answer", () => {
     const missing = pursue(single("Bachelor's degree in Computer Science", "DEGREE",
       "No degree is recorded on the profile, so degree eligibility needs candidate review."));

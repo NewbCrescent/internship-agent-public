@@ -9,6 +9,7 @@ import { asksForAllSchools, asksForHighSchool, schoolsAttendedLines, type Educat
 import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, fieldOfStudyCategoryOption, isStandardAnswerKey, matchOfferedOption, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption } from "@internship-agent/domain";
 
 import { classifyFieldRole, classifyUploadRole, isSensitiveRole } from "./ats/field-roles";
+import { RACE_ONLY_DECLINE_REASON, type SelfIdentificationRule } from "./ats/self-identification";
 import { isHearAboutQuestion, pickHearAboutOption } from "./ats/hear-about";
 import { usStateAlternate } from "./ats/us-states";
 import { isListSearchBox, isSafeguardField, isSignupField, stripRequiredMarker } from "./form-recognition";
@@ -22,8 +23,8 @@ export type FieldResolution =
       /** The catalog recognized the question, but no saved answer settles it (it needs confirmation, is ambiguous, or has no saved fact). */
       held?: true;
     }
-  /** A saved voluntary self-identification answer matched exactly one offered option (ats/self-identification.ts). */
-  | { status: "SELF_IDENTIFIED"; key: string; option: string }
+  /** A saved voluntary self-identification answer matched exactly one offered option, or the race-only rule chose the list's decline option (ats/self-identification.ts). */
+  | { status: "SELF_IDENTIFIED"; key: string; option: string; rule?: SelfIdentificationRule }
   /** A candidate-supplied answer from question memory, read only for questions the catalog does not map. */
   | { status: "REMEMBERED_ANSWER"; answerId: string; answer: string; answerKey: string; answerKind: "text" | "option" };
 
@@ -139,7 +140,8 @@ export function planAutofill(form: RecognizedForm, inputs: PlannerInputs): Autof
     if (isSensitiveRole(role)) {
       // Demographic and equal-opportunity questions are filled only from the
       // candidate's saved voluntary self-identification answers, and only when
-      // exactly one offered option matches; otherwise the candidate answers
+      // exactly one offered option matches (or, under the candidate's race-only
+      // rule of 2026-11-26, the list's one decline option); otherwise the candidate answers
       // in-session and nothing is stored.
       const saved = inputs.resolutions.get(field.id);
       if (saved?.status === "SELF_IDENTIFIED" && (field.kind === "select" || field.kind === "radio" || (field.kind === "checkbox" && (field.options?.length ?? 0) >= 2)) &&
@@ -149,7 +151,7 @@ export function planAutofill(form: RecognizedForm, inputs: PlannerInputs): Autof
           action: "choose",
           value: saved.option,
           basis: { kind: "fact", key: saved.key, scope: "global" },
-          reason: "Your saved voluntary self-identification answer matches one of the offered options.",
+          reason: saved.rule === "race_only_decline" ? RACE_ONLY_DECLINE_REASON : "Your saved voluntary self-identification answer matches one of the offered options.",
           pause: null
         });
         continue;
