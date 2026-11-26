@@ -10,6 +10,7 @@ import {
   COURSEWORK_FACT_KEY,
   DERIVED_STANDARD_KEYS,
   factDefinitions,
+  highSchoolDetailsSchema,
   scopeKey,
   type Candidate,
   type CandidateFact,
@@ -18,7 +19,8 @@ import {
   type CandidatePreference,
   type CandidatePreferenceInput,
   type CandidateProfileInput,
-  type FactScope
+  type FactScope,
+  type HighSchoolDetails
 } from "@internship-agent/domain";
 
 type CandidateRow = {
@@ -48,6 +50,10 @@ type CandidateRow = {
   high_school_name: string | null;
   high_school_start_year: string | null;
   high_school_end_year: string | null;
+  high_school_city: string | null;
+  high_school_region: string | null;
+  high_school_postal_code: string | null;
+  high_school_source: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -176,6 +182,37 @@ export function setCandidatePreferredName(
   if (row.preferred_name === preferredName) return "unchanged";
   database.prepare("UPDATE candidates SET preferred_name = ?, updated_at = ? WHERE id = ?")
     .run(preferredName, new Date().toISOString(), candidateId);
+  return "set";
+}
+
+const HIGH_SCHOOL_COLUMNS: Record<keyof HighSchoolDetails, string> = {
+  city: "high_school_city",
+  region: "high_school_region",
+  postalCode: "high_school_postal_code",
+  startYear: "high_school_start_year",
+  endYear: "high_school_end_year"
+};
+
+/**
+ * Writes the given high-school details and their provenance note (pnpm profile:facts' highSchool file); every
+ * other column is left as it is. The caller decides which details are missing.
+ */
+export function setCandidateHighSchoolDetails(
+  database: DatabaseSync,
+  candidateId: string,
+  details: HighSchoolDetails,
+  source: string
+): "set" | "unchanged" | "missing" {
+  const parsed = highSchoolDetailsSchema.parse(details);
+  const note = source.trim();
+  if (note.length < 1 || note.length > 300) throw new Error("The high school's source note must be 1 to 300 characters.");
+  const row = database.prepare("SELECT id FROM candidates WHERE id = ?").get(candidateId) as { id: string } | undefined;
+  if (!row) return "missing";
+  const keys = (Object.keys(HIGH_SCHOOL_COLUMNS) as Array<keyof HighSchoolDetails>).filter((key) => parsed[key] !== undefined);
+  if (keys.length === 0) return "unchanged";
+  const assignments = keys.map((key) => `${HIGH_SCHOOL_COLUMNS[key]} = ?`);
+  database.prepare(`UPDATE candidates SET ${assignments.join(", ")}, high_school_source = ?, updated_at = ? WHERE id = ?`)
+    .run(...keys.map((key) => parsed[key]!), note, new Date().toISOString(), candidateId);
   return "set";
 }
 
@@ -381,6 +418,10 @@ function mapCandidate(row: CandidateRow): Candidate {
     highSchoolName: row.high_school_name ?? undefined,
     highSchoolStartYear: row.high_school_start_year ?? undefined,
     highSchoolEndYear: row.high_school_end_year ?? undefined,
+    highSchoolCity: row.high_school_city ?? undefined,
+    highSchoolRegion: row.high_school_region ?? undefined,
+    highSchoolPostalCode: row.high_school_postal_code ?? undefined,
+    highSchoolSource: row.high_school_source ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };

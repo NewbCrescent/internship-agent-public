@@ -7,9 +7,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   createDatabase,
+  getCandidate,
   getCurrentFact,
   getCurrentFacts,
   LOCAL_CANDIDATE_ID,
+  saveCandidate,
   saveCandidateFact,
   seedDevelopmentData
 } from "@internship-agent/db";
@@ -207,6 +209,65 @@ describe("pnpm profile:facts", () => {
     files.set("revoke.json", JSON.stringify({ revoke: [{ key: "relevant_coursework" }] }));
     expect(await run(["--profile", "demo", "--set-file", "revoke.json"])).toBe(1);
     expect(factCount(database)).toBe(before);
+    database.close();
+  });
+
+  it("fills only the high school's missing details from a highSchool file, and never prints a value", async () => {
+    const { database, files, output, run } = workspace();
+    saveCandidate(database, LOCAL_CANDIDATE_ID, {
+      fullName: "Jordan Rivera", highSchoolName: "Northwind High School", highSchoolStartYear: "2021", highSchoolEndYear: "2025"
+    });
+    const updatedAt = () => getCandidate(database, LOCAL_CANDIDATE_ID)?.updatedAt;
+    const before = { facts: factCount(database), updatedAt: updatedAt() };
+    const values = ["Springfield", "Oregon", "97477", "Northwind", "The fixture's statement of 2026-11-26"];
+    const school = { school: "Northwind High School", city: "Springfield", region: "Oregon", postalCode: "97477", startYear: "2021", source: "The fixture's statement of 2026-11-26" };
+    files.set("high-school.json", JSON.stringify({ highSchool: school }));
+
+    expect(await run(["--profile", "demo", "--set-file", "high-school.json", "--dry-run"])).toBe(0);
+    expect(output.splice(0)).toEqual([
+      "would set high school city [profile]: set",
+      "would set high school state [profile]: set",
+      "would set high school ZIP code [profile]: set",
+      "unchanged high school start year [profile]: set",
+      "would record the high school's source [profile]"
+    ]);
+    expect(getCandidate(database, LOCAL_CANDIDATE_ID)).toMatchObject({ highSchoolCity: undefined, highSchoolSource: undefined });
+    expect(updatedAt()).toBe(before.updatedAt);
+
+    expect(await run(["--profile", "demo", "--set-file", "high-school.json"])).toBe(0);
+    const lines = output.splice(0);
+    expect(lines).toEqual([
+      "set high school city [profile]: set",
+      "set high school state [profile]: set",
+      "set high school ZIP code [profile]: set",
+      "unchanged high school start year [profile]: set",
+      "recorded the high school's source [profile]"
+    ]);
+    expect(getCandidate(database, LOCAL_CANDIDATE_ID)).toMatchObject({
+      highSchoolName: "Northwind High School", highSchoolStartYear: "2021", highSchoolEndYear: "2025",
+      highSchoolCity: "Springfield", highSchoolRegion: "Oregon", highSchoolPostalCode: "97477", highSchoolSource: school.source
+    });
+    expect(factCount(database)).toBe(before.facts);
+
+    // A saved value that differs is kept, never overwritten.
+    files.set("differs.json", JSON.stringify({ highSchool: { ...school, city: undefined, region: undefined, postalCode: undefined, startYear: "2020" } }));
+    expect(await run(["--profile", "demo", "--set-file", "differs.json"])).toBe(0);
+    expect(output.splice(0)).toEqual(["kept high school start year [profile]: the saved value differs and is not overwritten"]);
+    expect(getCandidate(database, LOCAL_CANDIDATE_ID)?.highSchoolStartYear).toBe("2021");
+
+    // Another school, or an unknown key, writes nothing.
+    const saved = getCandidate(database, LOCAL_CANDIDATE_ID);
+    files.set("other.json", JSON.stringify({ highSchool: { ...school, school: "Southwind High School", endYear: "2024" } }));
+    expect(await run(["--profile", "demo", "--set-file", "other.json"])).toBe(1);
+    expect(output.splice(0)).toEqual(["The saved high school is not the one the file names; nothing was written."]);
+    files.set("unknown.json", JSON.stringify({ highSchool: { ...school, county: "Lane" } }));
+    expect(await run(["--profile", "demo", "--set-file", "unknown.json"])).toBe(1);
+    expect(output.splice(0)).toEqual(["Invalid high school file at highSchool."]);
+    expect(getCandidate(database, LOCAL_CANDIDATE_ID)).toEqual(saved);
+
+    for (const line of lines) {
+      for (const value of values) expect(line).not.toContain(value);
+    }
     database.close();
   });
 });

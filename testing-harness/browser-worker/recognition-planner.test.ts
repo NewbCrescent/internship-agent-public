@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { promptSearchTerms, type FillDecision } from "@internship-agent/domain";
+import { promptSearchTerms, type EducationRow, type FillDecision } from "@internship-agent/domain";
 
 import {
   absentDecisionFields,
@@ -2515,6 +2515,110 @@ describe("live unrecognized forms (Track 37)", () => {
       expect(chooseAnnouncementClose([{ ...welcome, closes: [{ tag: "0-0", text: "Accept", ariaLabel: "", title: "" }, { tag: "0-1", text: "Continue", ariaLabel: "", title: "" }] }])).toBeNull();
       expect(chooseAnnouncementClose([])).toBeNull();
     });
+  });
+});
+
+describe("high-school and every-school questions (the candidate's rule, 2026-11-26)", () => {
+  type Inputs = Parameters<typeof planAutofill>[1];
+  const college: EducationRow = {
+    key: "college", school: "Example State University", level: "bachelor", degree: "B.A. Computer Science",
+    fieldOfStudy: "Computer Science", gpa: null, startYear: 2025, endYear: 2028
+  };
+  const highSchool: EducationRow = {
+    key: "high_school", school: "Northwind High School", level: "high_school", degree: null, fieldOfStudy: null, gpa: null, startYear: 2021, endYear: 2025
+  };
+  const schools = { rows: [college, highSchool], highSchoolPlace: { city: "Springfield", region: "Oregon", postalCode: "97477" } };
+  const graduation = { date: "2028-05-15", basis: { kind: "fact" as const, key: "graduation_date", scope: "global" } };
+  const collegeDate = { status: "RESOLVED", key: "graduation_date", scope: "global", display: "2028-05-15", value: "2028-05-15" } as const;
+  const plan = (controls: RawControl[], extra: Partial<Inputs> = {}) =>
+    planAutofill(recognizeForm("https://job-boards.greenhouse.io/fixture/jobs/3", "Apply", controls), {
+      profile: { addressCity: "Fixture City", addressRegion: "Washington", addressPostalCode: "98001", gpa: "3.8" },
+      resolutions: new Map(), packageAnswers: [], variantId: null,
+      education: { school: "Example State University", degree: "B.A. Computer Science", startMonth: "2025-08", graduation },
+      schools, ...extra
+    });
+  const decision = (result: ReturnType<typeof planAutofill>, id: string) => result.decisions.find((entry) => entry.fieldId === id)!;
+  const text = (id: string, label: string, required = label.endsWith("*")) => control({ tag: "input", type: "text", id, label, required });
+
+  it("fills a High school question with the saved high school", () => {
+    const result = plan([text("hs", "High school*")]);
+    expect(decision(result, "hs")).toMatchObject({ action: "fill", value: "Northwind High School", basis: { kind: "profile", field: "highSchoolName" } });
+    expect(result.pauses).toEqual([]);
+  });
+
+  it("answers a high-school graduation year from the high school, never the college's graduation date", () => {
+    const year = plan([text("hs_year", "High school graduation year*")], { resolutions: new Map([["hs_year", collegeDate]]) });
+    expect(decision(year, "hs_year")).toMatchObject({ action: "fill", value: "2025", basis: { kind: "profile", field: "highSchoolEndYear" } });
+    const date = plan([text("hs_date", "High school graduation date*")], { resolutions: new Map([["hs_date", collegeDate]]) });
+    expect(decision(date, "hs_date").action).toBe("pause");
+    expect(decision(date, "hs_date").value).toBeNull();
+    const optional = plan([text("hs_date", "High school graduation date")], { resolutions: new Map([["hs_date", collegeDate]]) });
+    expect(decision(optional, "hs_date")).toMatchObject({ action: "skip", value: null });
+  });
+
+  it("answers the high school's city, state, ZIP code, and location from the saved place, never the mailing address", () => {
+    const result = plan([
+      text("hs_city", "High school city"),
+      control({ tag: "select", id: "hs_state", label: "High school state", options: ["Oregon", "Washington"] }),
+      text("hs_zip", "High school ZIP code"),
+      text("hs_location", "High school location")
+    ]);
+    expect(decision(result, "hs_city")).toMatchObject({ action: "fill", value: "Springfield", basis: { kind: "profile", field: "highSchoolCity" } });
+    expect(decision(result, "hs_state")).toMatchObject({ action: "choose", value: "Oregon", basis: { kind: "profile", field: "highSchoolRegion" } });
+    expect(decision(result, "hs_zip")).toMatchObject({ action: "fill", value: "97477", basis: { kind: "profile", field: "highSchoolPostalCode" } });
+    expect(decision(result, "hs_location")).toMatchObject({ action: "fill", value: "Springfield, Oregon", basis: { kind: "profile", field: "highSchoolPlace" } });
+  });
+
+  it("chooses the one fitting high-school option, and pauses when none fits", () => {
+    const list = (options: string[]) => control({ tag: "select", id: "hs_list", label: "Which high school did you attend?*", required: true, options });
+    expect(decision(plan([list(["Northwind High School", "Southwind High School"])]), "hs_list"))
+      .toMatchObject({ action: "choose", value: "Northwind High School" });
+    const none = plan([list(["Southwind High School"])]);
+    expect(decision(none, "hs_list").action).toBe("pause");
+    expect(none.pauses).toHaveLength(1);
+  });
+
+  it("pauses a required high-school question and skips an optional one when nothing is saved", () => {
+    // No schools input at all.
+    const required = planAutofill(recognizeForm("https://job-boards.greenhouse.io/fixture/jobs/3", "Apply", [text("hs", "High school*")]), {
+      profile: {}, resolutions: new Map(), packageAnswers: [], variantId: null
+    });
+    expect(decision(required, "hs").action).toBe("pause");
+    const optional = planAutofill(recognizeForm("https://job-boards.greenhouse.io/fixture/jobs/3", "Apply", [text("hs", "High school")]), {
+      profile: {}, resolutions: new Map(), packageAnswers: [], variantId: null
+    });
+    expect(decision(optional, "hs")).toMatchObject({ action: "skip", value: null });
+  });
+
+  it("leaves an optional high-school GPA empty", () => {
+    expect(decision(plan([text("hs_gpa", "High school GPA")]), "hs_gpa")).toMatchObject({ action: "skip", value: null });
+  });
+
+  it("lists every school attended, the college first, only when both are saved", () => {
+    const area = control({ tag: "textarea", id: "all", label: "Please list all schools you have attended*", required: true });
+    expect(decision(plan([area]), "all")).toMatchObject({
+      action: "fill",
+      value: "Example State University, B.A. Computer Science, 2025-2028\nNorthwind High School, Springfield, Oregon, 2021-2025",
+      basis: { kind: "profile", field: "education" }
+    });
+    expect(decision(plan([text("all", "Please list all schools you have attended*")]), "all")).toMatchObject({
+      action: "fill",
+      value: "Example State University, B.A. Computer Science, 2025-2028; Northwind High School, Springfield, Oregon, 2021-2025"
+    });
+    const collegeOnly = plan([area], { schools: { rows: [college] } });
+    expect(decision(collegeOnly, "all").action).toBe("pause");
+  });
+  it("keeps the high-school rule and the field-of-study and location lists apart on one form", () => {
+    const result = plan([
+      control({ tag: "select", id: "fos", label: "Field of study*", required: true, options: ["Select...", "Engineering (Non-Computer Science)", "Engineering – Computer Science & Technology", "Other"] }),
+      control({ tag: "select", id: "where", label: "Where are you currently located?*", required: true, options: ["Canada", "United States of America"] }),
+      control({ tag: "input", type: "text", id: "hs", label: "High school*", required: true }),
+      control({ tag: "input", type: "text", id: "hsloc", label: "High school location" })
+    ], { profile: { fieldOfStudy: "Computer Science", addressCity: "Springfield", addressRegion: "Illinois", addressCountry: "United States of America" } });
+    expect(decision(result, "fos")).toMatchObject({ action: "choose", value: "Engineering – Computer Science & Technology", basis: { kind: "profile", field: "fieldOfStudy" } });
+    expect(decision(result, "where")).toMatchObject({ action: "choose", value: "United States of America", basis: { kind: "profile", field: "addressCountry" } });
+    expect(decision(result, "hs")).toMatchObject({ action: "fill", value: "Northwind High School", basis: { kind: "profile", field: "highSchoolName" } });
+    expect(decision(result, "hsloc")).toMatchObject({ action: "fill", value: "Springfield, Oregon" });
   });
 });
 

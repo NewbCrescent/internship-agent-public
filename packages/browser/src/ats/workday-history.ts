@@ -2,6 +2,7 @@ import type { Locator, Page } from "playwright-core";
 
 import {
   chooseDegreeOption,
+  educationRowsForSection,
   matchFieldOfStudyOption,
   matchPromptOption,
   promptSearchTerms,
@@ -35,7 +36,11 @@ import {
  * candidate instead of a guess. Any list still open is closed before an Add,
  * Delete, or dropdown click (a multi-select Field of Study list stays open
  * after a pick and covers the controls below it), and a covered control is
- * focused and activated with Enter instead of force-clicked.
+ * focused and activated with Enter instead of force-clicked. The Education
+ * section gets the college rows only unless its own label asks for high school
+ * or for every school attended (educationRowsForSection; the candidate's rule,
+ * 2026-11-26); a high-school row already on the page is then deleted and
+ * recorded like any row that is not the candidate's.
  */
 export type HistoryFillResult = { decisions: FillDecision[]; pauses: PauseRecord[] };
 
@@ -115,6 +120,19 @@ async function tagSections(page: Page): Promise<Record<Kind, number | null>> {
     }
     return found as Record<"work" | "education", number | null>;
   }, [SECTION_ATTRIBUTE, PANEL_ATTRIBUTE] as const);
+}
+
+/** A tagged section's own label: its aria-labelledby text, else its first heading or legend, else "Education". */
+async function sectionLabelOf(page: Page, kind: Kind): Promise<string> {
+  return page.locator(`[${SECTION_ATTRIBUTE}="${kind}"]`).first().evaluate((section) => {
+    const text = (element: Element) => (element.textContent ?? "").replace(/\s+/g, " ").trim();
+    const labelled = (section.getAttribute("aria-labelledby") ?? "").split(/\s+/).filter(Boolean)
+      .map((id) => section.ownerDocument.getElementById(id)).filter((label): label is HTMLElement => label !== null)
+      .map(text).join(" ").trim();
+    if (labelled) return labelled;
+    const heading = section.querySelector("h2, h3, h4, legend");
+    return (heading ? text(heading) : "") || "Education";
+  }, undefined, { timeout: HISTORY_ACTION_MS }).catch(() => "Education");
 }
 
 const panel = (page: Page, kind: Kind, index: number) => page.locator(`[${SECTION_ATTRIBUTE}="${kind}"] [${PANEL_ATTRIBUTE}="${index}"]`).first();
@@ -479,9 +497,11 @@ export async function fillWorkdayHistory(
     }
   };
 
+  // The candidate's rule (2026-11-26): the high school only where the section asks for it or for every school.
+  const educationRows = counts.education === null ? [] : educationRowsForSection(history.education, await sectionLabelOf(page, "education"));
   const plans: Array<{ kind: Kind; key: RegExp; rows: Array<{ name: string; fill: (scope: Locator) => Promise<void> }> }> = [
     { kind: "work", key: LABELS.work.company, rows: history.work.map((row) => ({ name: row.company, fill: (scope) => fillWorkRow(page, scope, row, record) })) },
-    { kind: "education", key: LABELS.education.school, rows: history.education.map((row) => ({ name: row.school, fill: (scope) => fillEducationRow(page, scope, row, record, answers) })) }
+    { kind: "education", key: LABELS.education.school, rows: educationRows.map((row) => ({ name: row.school, fill: (scope) => fillEducationRow(page, scope, row, record, answers) })) }
   ];
   for (const plan of plans) {
     if (counts[plan.kind] === null) continue;

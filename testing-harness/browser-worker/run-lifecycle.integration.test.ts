@@ -23,6 +23,7 @@ import {
   saveBrowserSession,
   saveCandidate,
   saveCandidateFact,
+  setCandidateHighSchoolDetails,
   seedDevelopmentData
 } from "@internship-agent/db";
 import { AUTO_SUBMIT_EVENT, type BrowserField } from "@internship-agent/domain";
@@ -1466,6 +1467,34 @@ describe("education block", () => {
     expect(page.filled.has("end-month--0")).toBe(false);
     expect(page.filled.has("end-year--0")).toBe(false);
     expect([...page.filled.values()]).not.toContain("2028");
+    database.close();
+  });
+
+  it("answers high-school and every-school questions from the profile's schools, never the college's graduation date (the candidate's rule, 2026-11-26)", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = approvedJobId(database);
+    setApplicationType(database, jobId, "EXTERNAL_ATS");
+    saveCandidate(database, LOCAL_CANDIDATE_ID, {
+      fullName: "Jordan Rivera", school: "Example State University", degree: "B.S. Computer Science",
+      graduationDate: "2027-05-15", educationStartMonth: "2024-08",
+      highSchoolName: "Northwind High School", highSchoolStartYear: "2021", highSchoolEndYear: "2025"
+    });
+    expect(setCandidateHighSchoolDetails(database, LOCAL_CANDIDATE_ID, { city: "Springfield", region: "Oregon" }, "Fixture")).toBe("set");
+    graduationFacts(database, true);
+    const page = externalPage([
+      { tag: "input", type: "text", id: "high-school", label: "High school", required: true },
+      { tag: "textarea", id: "all-schools", label: "Please list all schools you have attended", required: true },
+      { tag: "input", type: "text", id: "high-school-date", label: "High school graduation date", required: false },
+      { tag: "input", type: "file", id: "resume", label: "Resume", required: true },
+      { tag: "button", label: "Submit application" }
+    ]);
+    const started = await startBrowserRun(jobId, EXTERNAL_URL, { database, dataDir, renderPdf: async () => ({ pages: 1 }), openPage: async () => page });
+    expect(started.run.applicationProfile).toBe("default");
+    expect(page.filled.get("high-school")).toBe("Northwind High School");
+    expect(page.filled.get("all-schools")).toBe("Example State University, B.S. Computer Science, 2024-2028\nNorthwind High School, Springfield, Oregon, 2021-2025");
+    expect(page.filled.has("high-school-date")).toBe(false);
+    expect([...page.filled.values()]).not.toContain("2028-05-15");
     database.close();
   });
 });

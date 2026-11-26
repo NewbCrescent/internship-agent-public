@@ -5,6 +5,7 @@ import type {
   RecognizedForm
 } from "@internship-agent/domain";
 import { factOption, FACT_OPTION_KEYS, samePlace, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
+import { asksForAllSchools, asksForHighSchool, schoolsAttendedLines, type EducationRow, type HighSchoolPlace } from "@internship-agent/domain";
 import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, fieldOfStudyCategoryOption, isStandardAnswerKey, matchOfferedOption, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption } from "@internship-agent/domain";
 
 import { classifyFieldRole, classifyUploadRole, isSensitiveRole } from "./ats/field-roles";
@@ -62,7 +63,11 @@ export type PlannerInputs = {
   standing?: StandingInputs;
   /** The posting's places ("City, Region" or its stated text), for "are you located in or near the city" options. */
   postingLocations?: string[];
+  /** The candidate's schools, for questions that name high school or ask for every school attended (the candidate's rule, 2026-11-26). */
+  schools?: SchoolInputs;
 };
+
+export type SchoolInputs = { rows: EducationRow[]; highSchoolPlace?: HighSchoolPlace };
 
 export type EducationInputs = {
   school?: string;
@@ -180,6 +185,10 @@ export function planAutofill(form: RecognizedForm, inputs: PlannerInputs): Autof
 
 function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
   const resolution = inputs.resolutions.get(field.id);
+
+  // A question that names high school or asks for every school comes first, so the contact and college rules never answer it; it returns null for every other label, so field-of-study and current-location lists still reach profileListDecision below.
+  const school = schoolQuestionDecision(field, inputs.schools, resolution);
+  if (school) return school;
 
   if (isHearAboutQuestion(field.label)) {
     const saved = resolution?.status === "RESOLVED" && resolution.key === "how_heard" ? resolution : null;
@@ -980,6 +989,123 @@ function educationDecision(field: BrowserField, education: EducationInputs | und
       safeguard: false
     });
   }
+  return null;
+}
+
+type HighSchoolDetail = "name" | "startYear" | "endYear" | "city" | "region" | "postalCode" | "place";
+
+const HIGH_SCHOOL_BASIS: Record<HighSchoolDetail, string> = {
+  name: "highSchoolName",
+  startYear: "highSchoolStartYear",
+  endYear: "highSchoolEndYear",
+  city: "highSchoolCity",
+  region: "highSchoolRegion",
+  postalCode: "highSchoolPostalCode",
+  place: "highSchoolPlace"
+};
+
+const HIGH_SCHOOL_DETAIL_WORDS: Record<HighSchoolDetail, string> = {
+  name: "name",
+  startYear: "start year",
+  endYear: "graduation year",
+  city: "city",
+  region: "state",
+  postalCode: "ZIP code",
+  place: "city and state"
+};
+
+const WHEN_WORDS = /\b(?:year|date|when)\b/;
+const HIGH_SCHOOL_NAME_LABEL = /^(?:(?:name of (?:your |the )?)?(?:high|secondary) school(?: name| attended)?|(?:what|which) (?:high|secondary) school did you (?:attend|graduate from)\??|(?:high|secondary) school(?: name)? ?(?:\/|or) ?ged(?: name)?)$/;
+
+/** Which high-school detail a label that names high school asks for, or null when it asks for none this rule answers. */
+function highSchoolDetailOf(label: string): HighSchoolDetail | null {
+  if (/\b(?:graduat\w*|completion|completed|finished|end)\b/.test(label) && WHEN_WORDS.test(label)) return "endYear";
+  if (/\b(?:start|started|began|entered)\b/.test(label) && WHEN_WORDS.test(label)) return "startYear";
+  if (/\b(?:zip|postal)\b/.test(label)) return "postalCode";
+  if (/\blocation\b|\bcity(?:,| and| ?\/) ?state\b/.test(label)) return "place";
+  if (/\bcity\b/.test(label)) return "city";
+  if (/\b(?:state|province)\b/.test(label)) return "region";
+  if (HIGH_SCHOOL_NAME_LABEL.test(label)) return "name";
+  return null;
+}
+
+/** The one option equal to `value`, ignoring case, or undefined. */
+function exactOption(value: string, options: string[]): string | undefined {
+  const wanted = value.trim().toLocaleLowerCase("en-US");
+  const matches = options.filter((option) => option.trim().toLocaleLowerCase("en-US") === wanted);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+/**
+ * The candidate's rule (2026-11-26) for questions about schools: a question
+ * asking for every school attended gets one line per school (the college,
+ * then the high school), and a question naming high school, secondary school,
+ * or GED gets the high school's saved name, start or graduation year, city,
+ * state, ZIP code, or "City, State" — typed, searched, or the one option that
+ * fits. Nothing saved, or no fitting option, pauses when required and skips
+ * when optional; a high-school question never takes the college's graduation
+ * date. Null leaves the field to the other rules.
+ */
+function schoolQuestionDecision(field: BrowserField, schools: SchoolInputs | undefined, resolution: FieldResolution | undefined): FillDecision | null {
+  const label = normalizedLabel(field.label);
+  const rows = schools?.rows ?? [];
+  const place = schools?.highSchoolPlace ?? {};
+  if (asksForAllSchools(label)) {
+    if (field.kind !== "text" && field.kind !== "textarea") return null;
+    const lines = schoolsAttendedLines(rows, place);
+    if (!lines) return null;
+    return fill(field, lines.join(field.kind === "textarea" ? "\n" : "; "), { kind: "profile", field: "education" },
+      "Every school on your profile: the college, then the high school (your rule of 2026-11-26).");
+  }
+  if (!asksForHighSchool(label)) return null;
+  const detail = highSchoolDetailOf(label);
+  const pause = (question: string) => pauseDecision(field, { question: question.slice(0, 500), key: null, scope: null, safeguard: false });
+  if (!detail) {
+    if (resolution?.status === "RESOLVED" && resolution.key === "graduation_date") {
+      return field.required
+        ? pause(`“${field.label}” asks about your high school; the saved graduation date is your college's, so it is not used here. What should it say?`)
+        : skip(field, `“${field.label}” asks about your high school; the saved graduation date is your college's, so it stays empty.`);
+    }
+    return null;
+  }
+  const highSchool = rows.find((row) => row.key === "high_school");
+  const year = (value: number | null | undefined) => (value === null || value === undefined ? undefined : String(value));
+  const city = place.city?.trim() || undefined;
+  const region = place.region?.trim() || undefined;
+  const values: Record<HighSchoolDetail, string | undefined> = {
+    name: highSchool?.school.trim() || undefined,
+    startYear: year(highSchool?.startYear),
+    endYear: year(highSchool?.endYear),
+    city,
+    region,
+    postalCode: place.postalCode?.trim() || undefined,
+    place: city && region ? `${city}, ${region}` : undefined
+  };
+  const yearDetail = detail === "startYear" || detail === "endYear";
+  if (yearDetail && ((/\bdate\b/.test(label) && !/\b(?:year|when)\b/.test(label)) || field.kind === "date")) {
+    return field.required
+      ? pause(`Only your high school's ${detail === "startYear" ? "start" : "end"} year is saved; enter the date yourself.`)
+      : skip(field, `Only your high school's ${detail === "startYear" ? "start" : "end"} year is saved, so this optional date stays empty.`);
+  }
+  const value = values[detail];
+  if (!value) {
+    return field.required
+      ? pause(`Nothing saved states your high school's ${HIGH_SCHOOL_DETAIL_WORDS[detail]} for “${field.label}”. What should it say?`)
+      : skip(field, "An optional high-school field with nothing saved stays empty.");
+  }
+  const basis = { kind: "profile" as const, field: HIGH_SCHOOL_BASIS[detail] };
+  const reason = "Your high school on your profile (asked for by name; your rule of 2026-11-26).";
+  if (field.widget === "autocomplete") return suggest(field, value, basis);
+  if ((field.kind === "select" || field.kind === "radio") && field.options?.length) {
+    const options = field.options;
+    const option = detail === "name" ? sameNamedOption(value, options) ?? undefined
+      : yearDetail ? options.find((entry) => entry.trim() === value)
+      : detail === "region" ? stateOption(value, options) ?? exactOption(value, options)
+      : exactOption(value, options);
+    if (option) return { fieldId: field.id, action: "choose", value: option, basis, reason, pause: null };
+    return pause(`Your profile says “${value}” for “${field.label}”, which is not one of its options. Which option should be chosen?`);
+  }
+  if (TEXT_KINDS.has(field.kind) || field.kind === "textarea" || (field.kind === "number" && yearDetail)) return fill(field, value, basis, reason);
   return null;
 }
 

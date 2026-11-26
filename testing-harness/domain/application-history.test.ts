@@ -1,16 +1,21 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  asksForAllSchools,
+  asksForHighSchool,
   bachelorKind,
   campusOption,
   chooseDegreeOption,
+  educationRowsForSection,
   fieldOfStudyCategoryOption,
+  highSchoolPlaceOf,
   matchFieldOfStudyOption,
   matchPromptOption,
   planApplicationHistory,
   promptSearchTerms,
   sameNameKey,
   sameNamedOption,
+  schoolsAttendedLines,
   type Candidate,
   type EducationRow,
   type ResumeEntry
@@ -157,6 +162,60 @@ describe("application history", () => {
     expect(matchFieldOfStudyOption("Computer Science", ["Computer and Information Science"])).toBe("Computer and Information Science");
     expect(matchFieldOfStudyOption("Economics", ["Economic Development", "Business"])).toBeNull();
     expect(matchFieldOfStudyOption("Business", ["Busines", "Business Administration"])).toBe("Business Administration");
+  });
+});
+
+describe("the high school only where a form asks for it (the candidate's rule, 2026-11-26)", () => {
+  const college: EducationRow = {
+    key: "college", school: "Example State University", level: "bachelor", degree: "B.A. Computer Science",
+    fieldOfStudy: "Computer Science", gpa: null, startYear: 2025, endYear: 2028
+  };
+  const highSchool: EducationRow = {
+    key: "high_school", school: "Northwind High School", level: "high_school", degree: null, fieldOfStudy: null, gpa: null, startYear: 2021, endYear: 2025
+  };
+  const place = { city: "Springfield", region: "Oregon", postalCode: "97477" };
+
+  it("tells a high-school label from a degree or school label", () => {
+    for (const label of ["High school", "Secondary school name", "High School / GED", "Name of your high-school", "High school diploma"]) {
+      expect(asksForHighSchool(label), label).toBe(true);
+    }
+    for (const label of ["Degree / Diploma", "School", "Education", "Diploma"]) {
+      expect(asksForHighSchool(label), label).toBe(false);
+    }
+  });
+
+  it("tells an every-school question from a single-school one", () => {
+    for (const label of ["Please list all schools you have attended", "List every college or university you attended", "All colleges and universities attended"]) {
+      expect(asksForAllSchools(label), label).toBe(true);
+    }
+    for (const label of ["School attended", "High school", "Education"]) {
+      expect(asksForAllSchools(label), label).toBe(false);
+    }
+  });
+
+  it("gives an Education section the college only, a high-school section the high school, and an every-school section both", () => {
+    expect(educationRowsForSection([college, highSchool], "Education")).toEqual([college]);
+    expect(educationRowsForSection([college, highSchool], "High School")).toEqual([highSchool]);
+    expect(educationRowsForSection([college, highSchool], "Education (list all schools attended)")).toEqual([college, highSchool]);
+  });
+
+  it("lists every school attended, the college first, only when both are saved", () => {
+    expect(schoolsAttendedLines([highSchool, college], place)).toEqual([
+      "Example State University, B.A. Computer Science, 2025-2028",
+      "Northwind High School, Springfield, Oregon, 2021-2025"
+    ]);
+    expect(schoolsAttendedLines([college], place)).toBeNull();
+    expect(schoolsAttendedLines([highSchool], place)).toBeNull();
+    expect(schoolsAttendedLines([{ ...college, degree: null, endYear: null }, { ...highSchool, startYear: null }])).toEqual([
+      "Example State University, 2025",
+      "Northwind High School, 2025"
+    ]);
+  });
+
+  it("reads the high school's place from the profile", () => {
+    expect(highSchoolPlaceOf(null)).toEqual({ city: undefined, region: undefined, postalCode: undefined });
+    expect(highSchoolPlaceOf({ ...CANDIDATE, highSchoolCity: "Springfield", highSchoolRegion: "Oregon", highSchoolPostalCode: "97477" }))
+      .toEqual(place);
   });
 });
 

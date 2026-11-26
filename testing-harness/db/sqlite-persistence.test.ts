@@ -29,6 +29,7 @@ import {
   reviseResumeEntry,
   revokeCandidateFact,
   saveCandidate,
+  setCandidateHighSchoolDetails,
   setResumeEntryInWorkHistory,
   setResumeEntryOnResume,
   saveBaseResume,
@@ -227,6 +228,28 @@ describe("resume entries", () => {
     expect(setResumeEntryInWorkHistory(database, job.id, "someone-else", false)).toBe(false);
     const stored = listResumeEntries(database, LOCAL_CANDIDATE_ID).find((entry) => entry.id === job.id);
     expect(stored).toMatchObject({ inWorkHistory: true, onResume: true, current: { id: job.current.id } });
+    database.close();
+  });
+
+  it("stores the high school's place and provenance (migration 0035), and a profile save keeps them", () => {
+    const { database } = temporaryDatabase();
+    expect(setCandidateHighSchoolDetails(database, LOCAL_CANDIDATE_ID, { city: "Springfield" }, "Fixture")).toBe("missing");
+    const profile = { fullName: "Jordan Rivera", highSchoolName: "Northwind High School", highSchoolStartYear: "2021" };
+    saveCandidate(database, LOCAL_CANDIDATE_ID, profile);
+    expect(setCandidateHighSchoolDetails(database, LOCAL_CANDIDATE_ID, {}, "Fixture")).toBe("unchanged");
+    expect(getCandidate(database, LOCAL_CANDIDATE_ID)?.highSchoolSource).toBeUndefined();
+    expect(setCandidateHighSchoolDetails(database, LOCAL_CANDIDATE_ID, { city: "Springfield", region: "Oregon", postalCode: "97477", endYear: "2025" }, "The fixture's statement"))
+      .toBe("set");
+    const expected = {
+      highSchoolName: "Northwind High School", highSchoolStartYear: "2021", highSchoolEndYear: "2025",
+      highSchoolCity: "Springfield", highSchoolRegion: "Oregon", highSchoolPostalCode: "97477", highSchoolSource: "The fixture's statement"
+    };
+    expect(getCandidate(database, LOCAL_CANDIDATE_ID)).toMatchObject(expected);
+    // The profile page's save does not carry the place, so it keeps it.
+    saveCandidate(database, LOCAL_CANDIDATE_ID, { ...profile, highSchoolEndYear: "2025", phone: "555-0100" });
+    expect(getCandidate(database, LOCAL_CANDIDATE_ID)).toMatchObject({ ...expected, phone: "555-0100" });
+    expect(() => setCandidateHighSchoolDetails(database, LOCAL_CANDIDATE_ID, { startYear: "21" }, "Fixture")).toThrow(/year like 2021/);
+    expect(() => setCandidateHighSchoolDetails(database, LOCAL_CANDIDATE_ID, { city: "Springfield" }, " ")).toThrow(/source note/);
     database.close();
   });
 

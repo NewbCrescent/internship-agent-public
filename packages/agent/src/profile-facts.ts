@@ -10,6 +10,7 @@ import {
   LOCAL_CANDIDATE_ID,
   revokeCandidateFact,
   saveCandidateFact,
+  setCandidateHighSchoolDetails,
   setCandidatePreferredName,
   supersedeCandidateFact
 } from "@internship-agent/db";
@@ -20,13 +21,16 @@ import {
   factDefinitions,
   factScopeSchema,
   formatFactValue,
+  highSchoolDetailsSchema,
   isStandardAnswerKey,
+  sameNameKey,
   scopeKey,
   standardAnswersFileSchema,
   workspaceProfileSchema,
   type CandidateFactKey,
   type CandidateFactValue,
   type FactScope,
+  type HighSchoolDetails,
   type StandardAnswersFile,
   type WorkspaceProfile
 } from "@internship-agent/domain";
@@ -48,6 +52,12 @@ import { formerEmployerNamed, standardAnswerFactFile } from "./standard-answers"
  * Each answer is saved as its catalog fact (the 50-mile answer scoped to
  * San Francisco only), the preferred first name goes to the profile, and
  * every saved value prints only as "set". Unknown keys fail, naming the key.
+ *
+ * A file with a `highSchool` object (highSchoolFileSchema) fills the saved
+ * high school's details that are not yet saved: city, state, ZIP code, start
+ * and end year, with a provenance note. A saved value that differs is kept,
+ * a file naming another school writes nothing, and only detail names print,
+ * never values.
  */
 // Built at resolve time from other saved answers; never written by a fact file.
 const NOT_STORED = [COURSEWORK_FACT_KEY, "us_person", "us_citizen_or_national", "us_citizen_or_permanent_resident", "f1_optional_practical_training", "unrestricted_us_work_authorization", "salary_expectation"] as const;
@@ -66,6 +76,15 @@ export const factFileSchema = z.object({
 }).strict();
 
 export type FactFile = z.infer<typeof factFileSchema>;
+
+export const highSchoolFileSchema = z.object({
+  highSchool: highSchoolDetailsSchema.extend({
+    school: z.string().trim().min(1).max(160),
+    source: z.string().trim().min(1).max(300)
+  }).strict()
+}).strict();
+
+export type HighSchoolFile = z.infer<typeof highSchoolFileSchema>;
 
 export type ProfileFactsDeps = {
   open(profile: WorkspaceProfile): DatabaseSync;
@@ -216,6 +235,7 @@ export async function runProfileFacts(argv: string[], deps: Partial<ProfileFacts
 
   let file: FactFile | null = null;
   let standard: StandardAnswersFile | null = null;
+  let highSchool: HighSchoolFile | null = null;
   if (args.setFile) {
     let text: string;
     try {
@@ -231,8 +251,17 @@ export async function runProfileFacts(argv: string[], deps: Partial<ProfileFacts
       io.log("The fact file is not valid JSON.");
       return 1;
     }
-    const factShape = typeof raw === "object" && raw !== null && !Array.isArray(raw) && ("facts" in raw || "revoke" in raw);
-    if (factShape) {
+    const object = typeof raw === "object" && raw !== null && !Array.isArray(raw) ? raw : null;
+    const factShape = object !== null && ("facts" in object || "revoke" in object);
+    if (object !== null && "highSchool" in object) {
+      // The high school's details: only paths are printed, never values.
+      const parsed = highSchoolFileSchema.safeParse(raw);
+      if (!parsed.success) {
+        for (const issue of parsed.error.issues) io.log(`Invalid high school file at ${issue.path.join(".") || "(root)"}.`);
+        return 1;
+      }
+      highSchool = parsed.data;
+    } else if (factShape) {
       const parsed = factFileSchema.safeParse(raw);
       if (!parsed.success) {
         for (const issue of parsed.error.issues) io.log(`Invalid fact file at ${issue.path.join(".") || "(root)"}.`);
@@ -257,6 +286,7 @@ export async function runProfileFacts(argv: string[], deps: Partial<ProfileFacts
 
   const database = io.open(args.profile);
   try {
+    if (highSchool) return applyHighSchoolDetails(database, highSchool, { dryRun: args.dryRun, log: io.log });
     if (standard) return applyStandardAnswers(database, standard, { dryRun: args.dryRun, log: io.log });
     if (!file) {
       for (const line of listFacts(database)) io.log(line);
@@ -299,5 +329,73 @@ function applyStandardAnswers(
     return 1;
   }
   options.log(outcome === "set" ? "set preferred name [profile]: set" : "unchanged preferred name [profile]: set");
+  return 0;
+}
+
+const HIGH_SCHOOL_DETAILS: Array<{ key: keyof HighSchoolDetails; label: string }> = [
+  { key: "city", label: "city" },
+  { key: "region", label: "state" },
+  { key: "postalCode", label: "ZIP code" },
+  { key: "startYear", label: "start year" },
+  { key: "endYear", label: "end year" }
+];
+
+/**
+ * Fills the saved high school's details that are not yet saved, from the
+ * highSchool file, with its provenance note. A saved value that differs is
+ * kept, another school writes nothing, and no value is ever printed.
+ */
+export function applyHighSchoolDetails(
+  database: DatabaseSync,
+  file: HighSchoolFile,
+  options: { dryRun: boolean; log: (line: string) => void }
+): number {
+  const candidate = getCandidate(database, LOCAL_CANDIDATE_ID);
+  if (!candidate) {
+    options.log("The workspace has no candidate profile; nothing was written.");
+    return 1;
+  }
+  const given = file.highSchool;
+  if (!candidate.highSchoolName || sameNameKey(candidate.highSchoolName) !== sameNameKey(given.school)) {
+    options.log("The saved high school is not the one the file names; nothing was written.");
+    return 1;
+  }
+  const saved: HighSchoolDetails = {
+    city: candidate.highSchoolCity,
+    region: candidate.highSchoolRegion,
+    postalCode: candidate.highSchoolPostalCode,
+    startYear: candidate.highSchoolStartYear,
+    endYear: candidate.highSchoolEndYear
+  };
+  const toSet: HighSchoolDetails = {};
+  const lines: string[] = [];
+  for (const { key, label } of HIGH_SCHOOL_DETAILS) {
+    const value = given[key];
+    if (value === undefined) continue;
+    const current = saved[key]?.trim();
+    if (!current) {
+      toSet[key] = value;
+      lines.push(`${options.dryRun ? "would set" : "set"} high school ${label} [profile]: set`);
+    } else if (current === value) {
+      lines.push(`unchanged high school ${label} [profile]: set`);
+    } else {
+      lines.push(`kept high school ${label} [profile]: the saved value differs and is not overwritten`);
+    }
+  }
+  const anything = Object.keys(toSet).length > 0;
+  if (options.dryRun) {
+    if (anything) lines.push("would record the high school's source [profile]");
+    for (const line of lines) options.log(line);
+    return 0;
+  }
+  if (anything) {
+    const outcome = setCandidateHighSchoolDetails(database, LOCAL_CANDIDATE_ID, toSet, given.source);
+    if (outcome === "missing") {
+      options.log("The workspace has no candidate profile; nothing was written.");
+      return 1;
+    }
+    lines.push("recorded the high school's source [profile]");
+  }
+  for (const line of lines) options.log(line);
   return 0;
 }

@@ -6,7 +6,10 @@ import type { ResumeEntry } from "./resume-document";
  * My Experience) receive. Every value is the candidate's own: experience
  * entries they include in work history, their high school from the profile,
  * and their college from the profile's school, degree, GPA, and graduation
- * date. Nothing here is inferred.
+ * date. Nothing here is inferred. The high school is listed in the
+ * candidate's history, but a history section receives it only when the
+ * section asks for high school or for every school attended
+ * (educationRowsForSection; the candidate's rule, 2026-11-26).
  */
 export type MonthYear = { year: number; month: number };
 
@@ -96,6 +99,65 @@ export function planApplicationHistory(input: {
     });
   }
   return { work, education };
+}
+
+/** The high school's place from the profile (migration 0035), when the candidate saved it. */
+export type HighSchoolPlace = { city?: string; region?: string; postalCode?: string };
+
+export function highSchoolPlaceOf(candidate: Candidate | null): HighSchoolPlace {
+  return { city: candidate?.highSchoolCity, region: candidate?.highSchoolRegion, postalCode: candidate?.highSchoolPostalCode };
+}
+
+/**
+ * Words that ask for the high school: "high school", "secondary school", or
+ * "GED". The bare word "diploma" is not one, since Workday degree lists label
+ * themselves "Degree / Diploma"; "High school diploma" still matches.
+ */
+const HIGH_SCHOOL_WORDS = /\b(?:high|secondary)[\s-]school\b|\bGED\b/i;
+
+export function asksForHighSchool(label: string): boolean {
+  return HIGH_SCHOOL_WORDS.test(label);
+}
+
+const ALL_SCHOOLS = /\b(?:all|every|each)\b(?:\s+\w+){0,4}?\s+(?:schools?|colleges?|universities|institutions)\b[^.?!]{0,40}\battended\b/i;
+
+/** A label that asks for every school attended: "Please list all schools you have attended". */
+export function asksForAllSchools(label: string): boolean {
+  return ALL_SCHOOLS.test(label);
+}
+
+/**
+ * The education rows a history section receives (the candidate's rule, 2026-11-26): every row when its label
+ * asks for every school attended, only the high school when it names high school, secondary school, or GED,
+ * and otherwise every row but the high school.
+ */
+export function educationRowsForSection(rows: EducationRow[], sectionLabel: string): EducationRow[] {
+  if (asksForAllSchools(sectionLabel)) return rows;
+  if (asksForHighSchool(sectionLabel)) return rows.filter((row) => row.key === "high_school");
+  return rows.filter((row) => row.key !== "high_school");
+}
+
+function yearsText(row: EducationRow): string | null {
+  if (row.startYear !== null && row.endYear !== null) return `${row.startYear}-${row.endYear}`;
+  const one = row.startYear ?? row.endYear;
+  return one === null ? null : String(one);
+}
+
+/**
+ * One line per school for an "all schools attended" question, the college rows first, then the high school:
+ * "<school>, <degree>, <start>-<end>" and "<high school>, <city>, <state>, <start>-<end>" (parts that are not
+ * saved are left out; years: "start-end", else the one year saved). Null unless at least one college row and
+ * the high-school row are present, so a partial list is never given.
+ */
+export function schoolsAttendedLines(rows: EducationRow[], place: HighSchoolPlace = {}): string[] | null {
+  const colleges = rows.filter((row) => row.key === "college");
+  const highSchool = rows.find((row) => row.key === "high_school");
+  if (colleges.length === 0 || !highSchool) return null;
+  const line = (parts: Array<string | null | undefined>) => parts.filter((part): part is string => Boolean(part && part.trim())).join(", ");
+  return [
+    ...colleges.map((row) => line([row.school, row.degree, yearsText(row)])),
+    line([highSchool.school, place.city, place.region, yearsText(highSchool)])
+  ];
 }
 
 /** Curly and modifier apostrophes (‘ ’ ʼ) as a plain "'", so "Bachelor’s" reads as "Bachelor's". */

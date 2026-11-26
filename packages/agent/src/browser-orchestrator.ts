@@ -97,6 +97,7 @@ import {
   AUTO_SUBMIT_EVENT,
   autoSubmitBlockers,
   factDefinitions,
+  highSchoolPlaceOf,
   isWorkdayErrorPauseId,
   manualOnly,
   normalizeQuestionText,
@@ -722,6 +723,7 @@ function plannerInputsFor(database: DatabaseSync, candidateId: string, candidate
   standing: StandingConsentSettings;
   postingLocations: string[];
 }): PlannerInputs {
+  const graduation = runGraduation(database, candidateId, input.profile, candidate);
   return {
     profile: {
       email: candidate?.email,
@@ -751,10 +753,16 @@ function plannerInputsFor(database: DatabaseSync, candidateId: string, candidate
       school: candidate?.school,
       degree: candidate?.degree,
       startMonth: candidate?.educationStartMonth,
-      graduation: runGraduation(database, candidateId, input.profile, candidate)
+      graduation
     },
     standing: standingPlannerInputs(candidate, input.standing),
-    postingLocations: input.postingLocations
+    postingLocations: input.postingLocations,
+    // The candidate's rule (2026-11-26): high-school and every-school questions; a college end year comes only from the run's graduation answer.
+    schools: {
+      rows: planApplicationHistory({ entries: [], candidate, graduationDate: graduation?.date ?? null }).education
+        .map((row) => (row.key === "college" && !graduation ? { ...row, endYear: null } : row)),
+      highSchoolPlace: highSchoolPlaceOf(candidate)
+    }
   };
 }
 

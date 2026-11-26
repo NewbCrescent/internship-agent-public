@@ -42,6 +42,16 @@
  *   "preferred_first_name": "<name>",
  *   "concerns_working_on_dod_projects": <true | false>
  * }
+ *
+ * Also accepts the high school's details file (placeholders; it fills only
+ * details not yet saved, keeps a saved value that differs, refuses a school
+ * other than the saved one, and prints detail names, never values):
+ * {
+ *   "highSchool": {
+ *     "school": "<the saved high school's name>", "city": "<city>", "region": "<state>", "postalCode": "<ZIP code>",
+ *     "startYear": "<YYYY>", "endYear": "<YYYY>", "source": "<where the candidate stated it>"
+ *   }
+ * }
  */
 import { runProfileFacts } from "../src/profile-facts";
 

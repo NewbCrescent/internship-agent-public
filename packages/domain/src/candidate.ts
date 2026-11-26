@@ -45,8 +45,22 @@ export const candidateProfileInputSchema = z.object({
 export const candidateSchema = candidateProfileInputSchema.extend({
   id: z.string().min(1),
   createdAt: z.iso.datetime(),
-  updatedAt: z.iso.datetime()
+  updatedAt: z.iso.datetime(),
+  /** The high school's place and where its details came from (migration 0035); not on the profile page, so a profile save keeps them. */
+  highSchoolCity: z.string().max(80).optional(),
+  highSchoolRegion: z.string().max(80).optional(),
+  highSchoolPostalCode: z.string().max(20).optional(),
+  highSchoolSource: z.string().max(300).optional()
 });
+
+/** The high school's details the candidate stated outside the profile page (pnpm profile:facts' highSchool file). */
+export const highSchoolDetailsSchema = z.object({
+  city: z.string().trim().min(1).max(80).optional(),
+  region: z.string().trim().min(1).max(80).optional(),
+  postalCode: z.string().trim().min(1).max(20).optional(),
+  startYear: z.string().trim().regex(/^(19|20)\d{2}$/, "Use a year like 2021.").optional(),
+  endYear: z.string().trim().regex(/^(19|20)\d{2}$/, "Use a year like 2021.").optional()
+}).strict();
 
 export const workModeSchema = z.enum(["remote", "hybrid", "onsite"]);
 
@@ -65,6 +79,7 @@ export const candidatePreferenceSchema = candidatePreferenceInputSchema.extend({
 
 export type CandidateProfileInput = z.infer<typeof candidateProfileInputSchema>;
 export type Candidate = z.infer<typeof candidateSchema>;
+export type HighSchoolDetails = z.infer<typeof highSchoolDetailsSchema>;
 export type CandidatePreferenceInput = z.input<typeof candidatePreferenceInputSchema>;
 export type CandidatePreference = z.infer<typeof candidatePreferenceSchema>;
 export type WorkMode = z.infer<typeof workModeSchema>;

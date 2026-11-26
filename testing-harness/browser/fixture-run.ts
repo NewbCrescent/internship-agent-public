@@ -30,7 +30,7 @@ import {
   renderHtmlToPdf,
   submitAndConfirm
 } from "@internship-agent/browser";
-import type { ApplicationHistory, ResumeDocument } from "@internship-agent/domain";
+import type { ApplicationHistory, EducationRow, ResumeDocument } from "@internship-agent/domain";
 import { renderResumeDocumentHtml } from "@internship-agent/resume";
 
 const FIXTURE_RESUME: ResumeDocument = {
@@ -215,6 +215,18 @@ async function main(): Promise<void> {
     ]
   });
   const historyOptions = { standard: history(2028), transcript: history(2029), answers: new Map<string, string>() };
+  // Two colleges and the high school: Workday's Education section gets the two colleges only (the candidate's rule,
+  // 2026-11-26), so the scenarios that need a second row use a second college.
+  const secondCollege = (): EducationRow => ({
+    key: "college", school: "University of California, Los Angeles", level: "bachelor", degree: "B.S. Computer Science",
+    fieldOfStudy: "Computer Engineering", gpa: null, startYear: 2023, endYear: 2025
+  });
+  const twoColleges = (endYear: number): ApplicationHistory => {
+    const base = history(endYear);
+    return { ...base, education: [base.education[0]!, secondCollege(), base.education[1]!] };
+  };
+  const twoCollegeOptions = { standard: twoColleges(2028), transcript: twoColleges(2029), answers: new Map<string, string>() };
+  const highSchoolRows = (rows: Array<Record<string, string>>) => rows.filter((row) => /high school/i.test(row.school ?? ""));
   const planWorkday = async (_step: unknown, workdayForm: Parameters<typeof planAutofill>[0], state?: { transcript: boolean }) => {
     const planned = planAutofill(workdayForm, {
       profile: contact, resolutions: new Map(), packageAnswers: [], variantId: "11111111-1111-4111-8111-111111111111",
@@ -269,11 +281,12 @@ async function main(): Promise<void> {
     tutor.toM !== "05" || tutor.toY !== "2026" || tutor.description !== "Taught Python to middle schoolers." || intern?.location !== "Remote" || intern.toM !== "08") {
     failures.push(`workday: work history not entered as recorded: ${JSON.stringify(workdayState.work)}`);
   }
-  const [college, highSchool] = workdayState.education;
-  if (workdayState.education.length !== 2 || college?.school !== "University of California, Berkeley" || college.degree !== "Bachelor of Arts (BA)" ||
+  const [college] = workdayState.education;
+  // The candidate's rule (2026-11-26): Workday's Education section gets the college only, never the high school.
+  if (workdayState.education.length !== 1 || college?.school !== "University of California, Berkeley" || college.degree !== "Bachelor of Arts (BA)" ||
     college.field !== "Computer Science" || college.gpa !== "3.8" || college.fromY !== "2025" || college.toY !== "2028" ||
-    highSchool?.school !== "Northwind High School" || highSchool.degree !== "High School Diploma" || highSchool.fromY !== "2021" || highSchool.toY !== "2025") {
-    failures.push(`workday: education not entered as recorded (a B.A. must never become a B.S.): ${JSON.stringify(workdayState.education)}`);
+    highSchoolRows(workdayState.education).length) {
+    failures.push(`workday: education not entered as recorded (the college only, and a B.A. must never become a B.S.): ${JSON.stringify(workdayState.education)}`);
   }
   const confirmWorkday = async (page: WorkdayPage) => {
     for (let attempt = 0; attempt < 20 && !(await page.bodyText()).includes("Application Submitted"); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 100));
@@ -349,7 +362,7 @@ async function main(): Promise<void> {
     !transcriptWalk.decisions.some((decision) => decision.action === "remove" && decision.value === "Resume Parse Corp")) {
     failures.push("workday transcript: the parsed row that is not the candidate's was not deleted and recorded");
   }
-  if (backfilled.work.length !== 2 || backfilled.education.length !== 2) failures.push(`workday transcript: rows duplicated on the second pass: ${backfilled.work.length} work, ${backfilled.education.length} education`);
+  if (backfilled.work.length !== 2 || backfilled.education.length !== 1) failures.push(`workday transcript: rows duplicated on the second pass: ${backfilled.work.length} work, ${backfilled.education.length} education`);
   if (backfilled.education[0]?.toY !== "2029") failures.push(`workday transcript: Berkeley's end year was not backfilled to 2029 (${backfilled.education[0]?.toY})`);
   if (backfilled.resumes.join() !== "resume-graduating-2029.pdf") failures.push(`workday transcript: the resume was not replaced by the 2029 print (${backfilled.resumes.join()})`);
   if (backfilled.transcript !== "transcript.pdf") failures.push("workday transcript: the transcript was not uploaded");
@@ -379,7 +392,7 @@ async function main(): Promise<void> {
   await realTab.goto(`${workdayUrl}?widgets=real`);
   const realWorkday = createWorkdayPage(realTab);
   await realWorkday.enterApplication();
-  const realWalk = await walkWorkdayApplication(realWorkday, planWorkday, { mode: "fill", history: historyOptions })
+  const realWalk = await walkWorkdayApplication(realWorkday, planWorkday, { mode: "fill", history: twoCollegeOptions })
     .catch((error: unknown) => {
       failures.push(`workday real widgets: the walk threw: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
       return null;
@@ -397,24 +410,29 @@ async function main(): Promise<void> {
     failures.push(`workday real widgets: work dates were not typed behind their displays: ${JSON.stringify(realState.work)}`);
   }
   if (realState.education[0]?.toY !== "2028") failures.push(`workday real widgets: Berkeley's end year is ${JSON.stringify(realState.education[0]?.toY)}, not 2028`);
-  // The Field of Study list left open after its pick must not cover Add Another, and a GED listed first is never a diploma.
-  if (realState.education.length !== 2 || realState.education[0]?.field !== "Computer Science" || realState.education[1]?.degree !== "High School Diploma") {
+  // The Field of Study list left open after its pick must not cover Add Another (the second college's row); the
+  // high school is not entered (a GED listed first is never a diploma: the domain chooseDegreeOption tests).
+  if (realState.education.length !== 2 || realState.education[0]?.field !== "Computer Science" || realState.education[1]?.degree !== "Bachelor of Science (BS)" ||
+    highSchoolRows(realState.education).length) {
     failures.push(`workday real widgets: education rows not entered as recorded: ${JSON.stringify(realState.education)}`);
   }
 
   // Synthetic, modeled on the Activision / xboxgaming.wd1 evidence (2026-11-25): every row's Field of Study is
-  // required, and nothing saved states the high school's. The walk asks that row's question before saving the
-  // step, and the answer is used on the next continue.
-  const highSchoolName = history(2028).education[1]!.school;
-  const fosFieldId = `My Experience::history:education:${highSchoolName}:field`;
-  const fosHistory = { standard: history(2028), transcript: history(2029), answers: new Map<string, string>() };
+  // required, and nothing saved states the second school's field of study. The walk asks that row's question
+  // before saving the step, and the answer is used on the next continue.
+  const noField = (endYear: number): ApplicationHistory => {
+    const base = twoColleges(endYear);
+    return { ...base, education: base.education.map((row) => (row.school === secondCollege().school ? { ...row, fieldOfStudy: null } : row)) };
+  };
+  const fosFieldId = `My Experience::history:education:${secondCollege().school}:field`;
+  const fosHistory = { standard: noField(2028), transcript: noField(2029), answers: new Map<string, string>() };
   const fosTab = await launched.newPage();
   await fosTab.goto(`${workdayUrl}?fos=required`);
   const fosWorkday = createWorkdayPage(fosTab);
   await fosWorkday.enterApplication();
   const fosWalk = await walkWorkdayApplication(fosWorkday, planWorkday, { mode: "fill", history: fosHistory });
   if (fosWalk.outcome !== "paused" || !fosWalk.pauses.some((pause) => pause.status === "open" && pause.fieldId === fosFieldId)) {
-    failures.push(`workday required field of study: expected the high-school row's question, got ${fosWalk.outcome} (${fosWalk.errors.join(" ")} ${fosWalk.pauses
+    failures.push(`workday required field of study: expected the second school's question, got ${fosWalk.outcome} (${fosWalk.errors.join(" ")} ${fosWalk.pauses
       .map((pause) => `${pause.fieldId}: ${pause.question}`).join(" | ")})`);
   }
   if (fosWalk.pauses.some((pause) => pause.fieldId.includes("workday-error"))) failures.push("workday required field of study: the step was saved and Workday's error came back");
@@ -433,10 +451,10 @@ async function main(): Promise<void> {
   await idsTab.goto(`${workdayUrl}?edudates=ids`);
   const idsWorkday = createWorkdayPage(idsTab);
   await idsWorkday.enterApplication();
-  const idsWalk = await walkWorkdayApplication(idsWorkday, planWorkday, { mode: "fill", history: historyOptions });
+  const idsWalk = await walkWorkdayApplication(idsWorkday, planWorkday, { mode: "fill", history: twoCollegeOptions });
   const idsState = await fixtureState(idsTab);
   if (idsWalk.outcome !== "review" || idsState.education[0]?.fromY !== "2025" || idsState.education[0]?.toY !== "2028" ||
-    idsState.education[1]?.fromY !== "2021" || idsState.education[1]?.toY !== "2025") {
+    idsState.education[1]?.fromY !== "2023" || idsState.education[1]?.toY !== "2025") {
     failures.push(`workday education date ids: dates not found by container id: ${idsWalk.outcome} ${JSON.stringify(idsState.education)} (${idsWalk.pauses
       .filter((pause) => pause.status === "open").map((pause) => `${pause.fieldId}: ${pause.question}`).join(" | ")})`);
   }
@@ -460,7 +478,7 @@ async function main(): Promise<void> {
   await coveredTab.goto(`${workdayUrl}?widgets=real&school=text`);
   const coveredWorkday = createWorkdayPage(coveredTab);
   await coveredWorkday.enterApplication();
-  const coveredWalk = await walkWorkdayApplication(coveredWorkday, planWorkday, { mode: "fill", history: historyOptions })
+  const coveredWalk = await walkWorkdayApplication(coveredWorkday, planWorkday, { mode: "fill", history: twoCollegeOptions })
     .catch((error: unknown) => {
       failures.push(`workday covered degree: the walk threw: ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
       return null;
@@ -470,7 +488,7 @@ async function main(): Promise<void> {
       .filter((pause) => pause.status === "open").map((pause) => `${pause.fieldId}: ${pause.question}`).join(" | ")})`);
   }
   const coveredState = await fixtureState(coveredTab);
-  if (coveredState.education.length !== 2 || coveredState.education[0]?.degree !== "Bachelor of Arts (BA)" || coveredState.education[1]?.degree !== "High School Diploma") {
+  if (coveredState.education.length !== 2 || coveredState.education[0]?.degree !== "Bachelor of Arts (BA)" || coveredState.education[1]?.degree !== "Bachelor of Science (BS)") {
     failures.push(`workday covered degree: degrees not chosen: ${JSON.stringify(coveredState.education)}`);
   }
 
@@ -505,13 +523,13 @@ async function main(): Promise<void> {
   await remountTab.goto(`${workdayUrl}?school=text&remount=1`);
   const remountWorkday = createWorkdayPage(remountTab);
   await remountWorkday.enterApplication();
-  const remountWalk = await walkWorkdayApplication(remountWorkday, planWorkday, { mode: "fill", history: historyOptions }).catch(threw("re-drawn education row"));
+  const remountWalk = await walkWorkdayApplication(remountWorkday, planWorkday, { mode: "fill", history: twoCollegeOptions }).catch(threw("re-drawn education row"));
   if (remountWalk) {
     const remountState = await fixtureState(remountTab);
-    const [remountCollege, remountHighSchool] = remountState.education;
-    const typed = history(2028).education;
-    if (remountWalk.outcome !== "review" || remountState.education.length !== 2 || remountCollege?.degree !== "Bachelor of Arts (BA)" || remountHighSchool?.degree !== "High School Diploma" ||
-      remountCollege.school !== typed[0]!.school || remountHighSchool.school !== typed[1]!.school) {
+    const [remountCollege, remountSecond] = remountState.education;
+    const typed = twoColleges(2028).education;
+    if (remountWalk.outcome !== "review" || remountState.education.length !== 2 || remountCollege?.degree !== "Bachelor of Arts (BA)" || remountSecond?.degree !== "Bachelor of Science (BS)" ||
+      remountCollege.school !== typed[0]!.school || remountSecond.school !== typed[1]!.school) {
       failures.push(`workday re-drawn education row: expected Review with both rows entered, got ${remountWalk.outcome} ${JSON.stringify(remountState.education)} (${remountWalk.errors.join(" ")} ${openPauses(remountWalk)})`);
     }
   }
@@ -528,13 +546,13 @@ async function main(): Promise<void> {
   if (ariaWalk) {
     const ariaState = await fixtureState(ariaTab);
     const [ariaTutor, ariaIntern] = ariaState.work;
-    const [ariaCollege, ariaHighSchool] = ariaState.education;
+    const [ariaCollege] = ariaState.education;
     const rowPauses = ariaWalk.pauses.filter((pause) => pause.fieldId.endsWith(":row"));
     if (ariaWalk.outcome !== "review" || rowPauses.length || ariaState.websites !== 0 ||
       ariaState.work.length !== 2 || ariaTutor?.company !== "Northwind Tutoring" || ariaTutor.title !== "Programming Tutor" || ariaIntern?.company !== "Contoso Identity" ||
-      ariaState.education.length !== 2 || ariaCollege?.school !== "University of California, Berkeley" || ariaCollege.degree !== "Bachelor of Arts (BA)" ||
-      ariaHighSchool?.school !== "Northwind High School" || ariaHighSchool.degree !== "High School Diploma") {
-      failures.push(`workday aria sections: expected Review with both sections entered and no website row, got ${ariaWalk.outcome} (websites ${ariaState.websites}; work ${JSON.stringify(ariaState.work.map((row) => row.company))}; education ${JSON.stringify(ariaState.education.map((row) => [row.school, row.degree]))}; ${ariaWalk.errors.join(" ")} ${openPauses(ariaWalk)})`);
+      ariaState.education.length !== 1 || ariaCollege?.school !== "University of California, Berkeley" || ariaCollege.degree !== "Bachelor of Arts (BA)" ||
+      highSchoolRows(ariaState.education).length) {
+      failures.push(`workday aria sections: expected Review with both sections entered (the college only) and no website row, got ${ariaWalk.outcome} (websites ${ariaState.websites}; work ${JSON.stringify(ariaState.work.map((row) => row.company))}; education ${JSON.stringify(ariaState.education.map((row) => [row.school, row.degree]))}; ${ariaWalk.errors.join(" ")} ${openPauses(ariaWalk)})`);
     }
   }
 

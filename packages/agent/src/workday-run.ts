@@ -15,6 +15,7 @@ import {
   type WorkdayWalkResult
 } from "@internship-agent/browser";
 import {
+  highSchoolPlaceOf,
   parseWorkdayUrl,
   workdaySiteKey,
   type ApplicationProfile,
@@ -172,7 +173,12 @@ async function planWorkdayStep(
     packageAnswers: context.packageAnswers,
     variantId: context.variantId,
     transcriptDocumentId,
-    standing: context.standing
+    standing: context.standing,
+    // The candidate's rule (2026-11-26): a question step's high-school and every-school questions.
+    schools: {
+      rows: ((transcript && context.history?.transcript) ? context.history.transcript : context.history?.standard)?.education ?? [],
+      highSchoolPlace: highSchoolPlaceOf(candidate)
+    }
   });
   let { decisions, pauses } = applyAnswers(step, form, plan.decisions, plan.pauses, context.answers);
   const aliased = settleAliasHits(decisions, aliasHits);
