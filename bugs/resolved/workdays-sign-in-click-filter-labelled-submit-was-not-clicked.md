@@ -18,3 +18,7 @@ button, whatever its label; the label rules remain as fallbacks. Rockwell's
 sign-in then meets the 500 ms gate above. Regression: the submit-label
 scenario in `testing-harness/browser/workday-account-run.ts` (`pnpm
 test:browser:workday-account`).
+
+## Refuted causes
+
+- The cookie banner covering the Sign In button. Evidence: the read-only live capture of Rockwell's sign-in step (2026-11-24) showed the banner in normal page flow at the top (position static, no full-viewport backdrop), and `elementFromPoint` at the button's centre returned the "Submit" click filter.

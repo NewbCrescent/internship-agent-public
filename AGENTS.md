@@ -86,6 +86,10 @@ Use `pnpm agent:verify` for change-aware checks or `pnpm verify:feature -- <feat
 
 For bugs: reproduce, isolate the cause, plan, verify the plan against the reproduction, then prove the fix with the smallest reusable regression. If a real-path check is impossible, state the boundary instead of implying coverage.
 
+Before planning a fix, read the bug's "Refuted causes" and every resolved bug for the same site or area. Record each theory that evidence disproves in that bug's file under a `## Refuted causes` heading, one `- <theory>. Evidence: <run id, capture, or test that killed it>` entry per theory.
+
+A fix whose fixtures were modelled rather than captured from the real page says so in its bug file, on a line `fixture: modelled` or `fixture: captured <date>`. A modelled fix is not resolved until a live run confirms it.
+
 Browser verification must start and stop its own server on a dedicated port and use a temporary data directory. Never kill or reuse a server owned by the user.
 
 ## Documentation discipline

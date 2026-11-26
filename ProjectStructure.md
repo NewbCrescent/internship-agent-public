@@ -60,7 +60,7 @@ The candidate-owned graduate-internship exclusion is typed in `packages/domain`,
 
 ## `testing-harness`
 
-Manifest-driven agent verification. Pure tests, temporary-SQLite integration, browser workflows, runner support, and workflow self-tests are separated by tier and feature.
+Manifest-driven agent verification. Pure tests, temporary-SQLite integration, browser workflows, runner support, and workflow self-tests are separated by tier and feature. `support/gate-slots.mjs` is the machine-wide gate-slot semaphore that `agent-finish.mjs` and the browser-tier suites `run.mjs` starts take a slot from (`INTERNSHIP_AGENT_GATE_SLOTS`, default 2), with lock files in the per-user temp directory.
 
 ## `docs/technical`
 
@@ -68,7 +68,7 @@ The technical guide, split so parallel runs edit different lines: one folder per
 
 ## `bugs`
 
-Confirmed defects, one file per bug: `open/<slug>.md` until it is fixed, then moved with `git mv` to `resolved/<slug>.md`. The slug is the title in lower-case words joined by hyphens, and the file starts with `# <title>`. Bugs are not numbered, and `BUGS.md` only describes this layout, so filing or resolving a bug never edits a shared line.
+Confirmed defects, one file per bug: `open/<slug>.md` until it is fixed, then moved with `git mv` to `resolved/<slug>.md`. The slug is the title in lower-case words joined by hyphens, and the file starts with `# <title>`. Bugs are not numbered, and `BUGS.md` only describes this layout, so filing or resolving a bug never edits a shared line. A bug file may end with a `## Refuted causes` section, one `- <theory>. Evidence: <...>` entry per disproved theory, and states how its fixture was made on a `fixture: modelled` or `fixture: captured <date>` line.
 
 ## `scripts`
 

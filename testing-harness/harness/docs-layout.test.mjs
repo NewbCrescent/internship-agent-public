@@ -74,3 +74,18 @@ test("bugs holds one titled file per bug, open or resolved", () => {
     }
   }
 });
+
+test("a bug's Refuted causes section lists at least one entry with its evidence", () => {
+  for (const status of ["open", "resolved"]) {
+    for (const file of entries(`bugs/${status}`)) {
+      const path = `bugs/${status}/${file.name}`;
+      const lines = read(path).split("\n");
+      const start = lines.indexOf("## Refuted causes");
+      if (start === -1) continue;
+      const end = lines.findIndex((line, index) => index > start && /^#{1,2} /.test(line));
+      const items = lines.slice(start + 1, end === -1 ? undefined : end).filter((line) => line.startsWith("- "));
+      assert.ok(items.length > 0, `${path} has a "Refuted causes" heading with no entry`);
+      items.forEach((item) => assert.match(item, /Evidence: \S/, `${path} has a refuted cause with no evidence: ${item}`));
+    }
+  }
+});

@@ -29,3 +29,7 @@ message appeared); the network record (next entry) answers it on the next
 real attempt. Regressions: the value-select recognition checks in
 `pnpm test:browser:greenhouse` (`fixtures/ashby-value-select.html`) and the
 visa-support mapper test in `pnpm test:agent`.
+
+## Refuted causes
+
+- H1, the empty required "Visa Support" answer as the most likely cause of the First Resonance failures. Evidence: Ashby's bundle has no client-side required check, so an empty required answer alone would not stop a submit click from sending (`ashbys-single-choice-answers-were-dropped-when-the-form-was-reloaded-to-submit.md`), and the First Resonance <run id> and Contoro <run id> records of 2026-11-25 08:4xZ show no reCAPTCHA token request and no submit after the click; the clicks went to the autofill pane's "Upload file" button (Track 27, `ashby-submit-clicks-went-to-the-upload-file-button.md`).

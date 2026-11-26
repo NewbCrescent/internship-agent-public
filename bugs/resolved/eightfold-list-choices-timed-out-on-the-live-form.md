@@ -9,3 +9,9 @@ A click on such a list or its option that times out closes a site announcement f
 A choice the input does not show pauses with "the site did not keep the choice".
 The next real Eightfold run confirms the post-upload case.
 Regressions: scenarios (d) and (e) of `pnpm test:browser:unrecognized-forms` (`fixtures/eightfold-application.html`, its `?blocked=1` layer an assumed stand-in and its `?blocked=dialog` session dialog the safeguard case), and the announcement chooser cases in `pnpm test:browser-worker:fast`.
+
+fixture: captured 2026-11-25 (`fixtures/eightfold-application.html`, derived from the read-only live capture; its `?blocked=1` layer is an assumed stand-in, and the post-upload case awaits the next real Eightfold run)
+
+## Refuted causes
+
+- Track 35's list reading, modeled on Octuple's public source (editable lists sent through the type-ahead path: click, clear, type, pick a suggestion). Evidence: Lockheed Martin run <run id> (pass 18, 2026-11-26) failed every list choice with "the field did not respond in time", and the read-only capture of the live form on 2026-11-25 (Track 37) showed that Octuple's lists show every option on opening.

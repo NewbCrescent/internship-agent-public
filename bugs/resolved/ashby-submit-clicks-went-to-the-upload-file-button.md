@@ -32,3 +32,8 @@ test:browser:greenhouse` with production-typed buttons and the fixture's
 autofill-click count. Boundary: whether Ashby accepts a submit from the
 agent's browser is unproven until a real attempt; the Lumora SUBMITTED
 record from the closed-dialog relabel is not changed here.
+
+## Refuted causes
+
+- Track 16's busy notice (a click refused while an answer save was running). Evidence: it never appeared in the captures (their detail is empty), and the First Resonance <run id> and Contoro <run id> records of 2026-11-25 08:4xZ show no reCAPTCHA token request and no submit after the click, the only Ashby call being an answer save made before it.
+- Hypothesis (c), a client-side check. Evidence: Ashby's handler (public bundle index-DYvFpVME.js, read 2026-11-25) checks only pending saves before it asks reCAPTCHA Enterprise for a token, reads a device fingerprint, and sends the submit mutation.

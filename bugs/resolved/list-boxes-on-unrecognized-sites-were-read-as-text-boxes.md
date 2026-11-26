@@ -22,3 +22,9 @@ the recorded field shapes, and the next real run confirms it. Regressions:
 `pnpm test:browser:unrecognized-forms` (fixtures/aria-list-application.html),
 the Track 35 cases in `pnpm test:browser-worker:fast`, and the unrecognized
 site run in `pnpm test:browser-worker:local`.
+
+fixture: modelled (`fixtures/aria-list-application.html`: the Eightfold markup derived from Octuple's source and the recorded field shapes; no live check was allowed)
+
+## Refuted causes
+
+- This fix's model of Eightfold's editable Octuple lists as searched lists that are typed into (Track 35). Evidence: on the real Lockheed Martin run <run id> (pass 18, 2026-11-26) every list was read with its options and every choice failed with "the field did not respond in time", and the read-only live capture of 2026-11-25 (Track 37) showed that these lists show every option on opening, so Track 35 had sent them through the type-ahead path (click, clear, type) (`eightfold-list-choices-timed-out-on-the-live-form.md`).

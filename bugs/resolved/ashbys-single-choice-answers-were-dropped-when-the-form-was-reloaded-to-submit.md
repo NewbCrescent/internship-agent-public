@@ -30,3 +30,9 @@ has no client-side required check, so an empty required answer alone
 would not stop a submit click from sending; why those clicks sent
 nothing (no reCAPTCHA token request) stays open until a reopened run's
 network record shows it.
+
+fixture: modelled (`fixtures/ashby-value-select.html`: a fresh render id per load and React-controlled radios derived from Ashby's public bundle)
+
+## Refuted causes
+
+- The unclicked single-choice radio (an empty required answer) as why the First Resonance submit clicks sent nothing (Track 25). Evidence: Ashby's bundle has no client-side required check, so an empty required answer alone would not stop a submit click from sending (above), and the First Resonance <run id> and Contoro <run id> records of 2026-11-25 08:4xZ (Track 22's network record) show no reCAPTCHA token request and no submit after the click; the clicks went to the autofill pane's "Upload file" button (Track 27, `ashby-submit-clicks-went-to-the-upload-file-button.md`).

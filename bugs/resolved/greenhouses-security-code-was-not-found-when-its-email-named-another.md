@@ -21,3 +21,7 @@ email check (`unsubmittedEvidence`) and the Gmail watcher's application
 matching still need the posting's company in the subject. Regression: the
 job-wrapping cases in `testing-harness/agent/greenhouse-security-code.test.ts`
 (`pnpm test:agent:security-code`).
+
+## Refuted causes
+
+- The poll window, time zone, folder, and code layout. Evidence: a read-only IMAP check (headers and structure only) for run <run id> showed the email in the INBOX at 02:59:22Z, well inside the wait, HTML only, with an 8-character code after the "…on your application:" anchor the lookup reads.
