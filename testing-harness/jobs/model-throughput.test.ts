@@ -1,5 +1,6 @@
-import { z } from "zod";
 import { describe, expect, it } from "vitest";
+
+import { githubRepositoryRefSchema } from "@internship-agent/domain";
 
 import {
   mapWithConcurrency,
@@ -93,10 +94,10 @@ describe("model rate limits and parallelism", () => {
 });
 
 describe("provider rate-limit handling", () => {
-  const schema = z.object({ ok: z.boolean() });
+  const schema = githubRepositoryRefSchema;
   const request = { task: "job.requirement_classification" as const, tier: "cheap" as const, jobId: null, instructions: "Return JSON.", input: "x", schema };
   const success = () => new Response(JSON.stringify({
-    choices: [{ message: { content: "{\"ok\":true}" }, finish_reason: "stop" }],
+    choices: [{ message: { content: JSON.stringify({ owner: "example", name: "fixture-repo" }) }, finish_reason: "stop" }],
     usage: { prompt_tokens: 10, completion_tokens: 20 }
   }), { status: 200, headers: { "content-type": "application/json" } });
   const limited = () => new Response("slow down", { status: 429, statusText: "Too Many Requests", headers: { "retry-after": "3" } });
@@ -113,7 +114,7 @@ describe("provider rate-limit handling", () => {
       sleep: async (ms) => { slept.push(ms); }
     });
     const result = await provider.complete(request);
-    expect(result.value).toEqual({ ok: true });
+    expect(result.value).toEqual({ owner: "example", name: "fixture-repo" });
     expect(slept).toEqual([3_000, 3_000]);
     expect(clock.time()).toBeGreaterThanOrEqual(3_000);
   });

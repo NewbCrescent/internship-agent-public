@@ -12,3 +12,4 @@ While a live process holds it, a second pipeline run refuses to start, the Jobs 
 A lock whose process has exited is stale and ignored.
 The review queue also lists APPLYING jobs whose latest run awaits approval or input.
 Before preparing, `advancePipeline` analyzes any DISCOVERED posting that has no match report, so postings stranded by an interrupted discovery run are not skipped forever by known-link filtering.
+`pnpm pipeline:run` and the watcher's passes turn that off and resume those postings in discovery instead, oldest first within the discovery time budget (see **Discovery time budget**); a `--skip-discovery` pass leaves them for the next pass that checks sources.

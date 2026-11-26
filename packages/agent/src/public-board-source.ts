@@ -7,6 +7,14 @@ export type PublicBoard = { kind: "greenhouse" | "lever" | "ashby"; slug: string
 type Board = PublicBoard;
 type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
 const MAX_RESPONSE_BYTES = 5_000_000;
+/** Ashby's posting API has no paging and no content-free list, so an Ashby board's answer may be this large (Shield AI's was 9.9 MB on 2026-11-26). */
+const MAX_ASHBY_RESPONSE_BYTES = 16_000_000;
+/** An oversized Lever board is read again in pages of this many jobs, at most MAX_LEVER_PAGES pages (2,000 jobs). */
+const LEVER_PAGE_SIZE = 100;
+const MAX_LEVER_PAGES = 20;
+/** An oversized Greenhouse board's internship postings are read one request at a time, within these limits per board. */
+const MAX_POSTING_REQUESTS = 120;
+const POSTING_REQUESTS_TIME_MS = 120_000;
 const MAX_BOARD_POSTINGS = 100;
 const INTERN_TITLE = /\b(intern|internship|co-op)\b/i;
 
@@ -17,6 +25,24 @@ export class PublicBoardError extends Error {
     this.name = "PublicBoardError";
   }
 }
+
+/** A board answer past its byte limit; an oversized Greenhouse or Lever board is read again in smaller requests. */
+class BoardResponseTooLarge extends Error {
+  constructor() {
+    super("The public board response is too large to process safely.");
+    this.name = "BoardResponseTooLarge";
+  }
+}
+
+/** A board's job as read; `unread` marks an internship title whose posting could not be read this check. */
+type BoardJob = {
+  title: string;
+  url: string;
+  text: string;
+  publication?: PostingPublication | null;
+  unread?: { decision: "unavailable" | "not-reached"; reason: string };
+};
+type BoardRead = { jobs: BoardJob[]; status: number; endpoint: string; note: string };
 
 const greenhouseJob = z.object({ title: z.string(), absolute_url: z.url(), content: z.string().optional(), first_published: z.unknown().optional() });
 const leverJob = z.object({ text: z.string(), hostedUrl: z.url(), descriptionPlain: z.string().optional(), description: z.string().optional() });
@@ -67,7 +93,7 @@ function validPostingUrl(raw: string): boolean {
   } catch { return false; }
 }
 
-async function boundedJson(response: Response): Promise<unknown> {
+async function boundedJson(response: Response, maxBytes = MAX_RESPONSE_BYTES): Promise<unknown> {
   if (!response.body) throw new Error("The public board returned an empty response.");
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -77,9 +103,9 @@ async function boundedJson(response: Response): Promise<unknown> {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_RESPONSE_BYTES) {
+      if (size > maxBytes) {
         await reader.cancel();
-        throw new Error("The public board response is too large to process safely.");
+        throw new BoardResponseTooLarge();
       }
       chunks.push(value);
     }
@@ -104,7 +130,9 @@ export async function fetchPublicBoard(
       ? `https://api.lever.co/v0/postings/${board.slug}?mode=json`
       : `https://api.ashbyhq.com/posting-api/job-board/${board.slug}`;
   let status: number;
-  let jobs: Array<{ title: string; url: string; text: string; publication?: PostingPublication | null }>;
+  let jobs: BoardJob[];
+  let traced = endpoint;
+  let note = "";
   try {
     const response = await fetcher(endpoint, { redirect: "error", signal: AbortSignal.timeout(15_000) });
     status = response.status;
@@ -112,8 +140,22 @@ export async function fetchPublicBoard(
       try { await response.body?.cancel(); } catch { /* the status is the answer */ }
       throw new PublicBoardError(`The public board answered ${response.status}.`, response.status);
     }
-    const payload = await boundedJson(response);
-    jobs = board.kind === "greenhouse"
+    let payload: unknown;
+    let oversized = false;
+    try {
+      payload = await boundedJson(response, board.kind === "ashby" ? MAX_ASHBY_RESPONSE_BYTES : MAX_RESPONSE_BYTES);
+    } catch (error) {
+      if (!(error instanceof BoardResponseTooLarge) || board.kind === "ashby") throw error;
+      oversized = true;
+    }
+    if (oversized) {
+      // Too large in one answer: Greenhouse's content-free list plus each internship posting, or Lever's pages.
+      const reread = board.kind === "greenhouse" ? await readGreenhouseByPosting(board.slug, fetcher) : await readLeverPages(board.slug, fetcher);
+      jobs = reread.jobs;
+      status = reread.status;
+      traced = reread.endpoint;
+      note = reread.note;
+    } else jobs = board.kind === "greenhouse"
       ? z.object({ jobs: z.array(greenhouseJob).max(2_000) }).parse(payload).jobs.map((job) => ({ title: job.title, url: job.absolute_url, text: job.content ?? "", publication: employerPublication(job.first_published, job.absolute_url, "first_published") }))
       : board.kind === "lever"
         ? z.array(leverJob).max(2_000).parse(payload).map((job) => ({ title: job.text, url: job.hostedUrl, text: job.descriptionPlain ?? job.description ?? "" }))
@@ -121,7 +163,7 @@ export async function fetchPublicBoard(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     observe.onFetch?.({
-      url: endpoint, decision: "board-fetch-failed",
+      url: traced, decision: "board-fetch-failed",
       status: error instanceof PublicBoardError ? error.status : null, reason: message.slice(0, 300)
     });
     throw error;
@@ -139,6 +181,10 @@ export async function fetchPublicBoard(
       rows.push({ ...base, decision: "invalid-link", reason: "the board's posting link is not a public https link" });
       return;
     }
+    if (job.unread) {
+      rows.push({ ...base, decision: job.unread.decision, reason: job.unread.reason });
+      return;
+    }
     const text = plainText(job.text);
     if (text.length < 80) {
       rows.push({ ...base, decision: "unavailable", reason: "the board gives fewer than 80 characters of description" });
@@ -152,12 +198,108 @@ export async function fetchPublicBoard(
     rows.push({ ...base, decision: "resolved", reason: "read from the public board", postingUrl: job.url });
   });
   observe.onFetch?.({
-    url: endpoint, decision: "board-fetched", status,
-    reason: `${jobs.length} jobs, ${internships} internship titles, ${kept.length} kept`,
+    url: traced, decision: "board-fetched", status,
+    reason: `${jobs.length} jobs, ${internships} internship titles, ${kept.length} kept` + (note ? `; ${note}` : ""),
     jobs: jobs.length, internships, kept: kept.length
   });
   for (const row of rows) observe.onRow?.(row);
   return kept;
+}
+
+/** The same request options as a board's first request: no redirects, a 15-second timeout. */
+const boardRequest = (): RequestInit => ({ redirect: "error", signal: AbortSignal.timeout(15_000) });
+
+async function answerOk(response: Response): Promise<void> {
+  if (response.ok) return;
+  try { await response.body?.cancel(); } catch { /* the status is the answer */ }
+  throw new PublicBoardError(`The public board answered ${response.status}.`, response.status);
+}
+
+/**
+ * An oversized Greenhouse board: its content-free job list, then each
+ * internship posting's own request, one at a time, within the per-board
+ * limits. Other titles are listed without a request.
+ */
+async function readGreenhouseByPosting(slug: string, fetcher: Fetcher): Promise<BoardRead> {
+  const endpoint = `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs`;
+  const response = await fetcher(endpoint, boardRequest());
+  await answerOk(response);
+  const listed = z.object({
+    jobs: z.array(z.object({ id: z.number().int().positive(), title: z.string(), absolute_url: z.url(), first_published: z.unknown().optional() })).max(10_000)
+  }).parse(await boundedJson(response)).jobs;
+  const started = Date.now();
+  let requests = 0;
+  let withText = 0;
+  const jobs: BoardJob[] = [];
+  for (const job of listed) {
+    const entry: BoardJob = { title: job.title, url: job.absolute_url, text: "" };
+    jobs.push(entry);
+    if (!INTERN_TITLE.test(job.title) || !validPostingUrl(job.absolute_url)) continue;
+    if (withText >= MAX_BOARD_POSTINGS) {
+      entry.unread = { decision: "not-reached", reason: `past this board's limit of ${MAX_BOARD_POSTINGS} internship postings` };
+      continue;
+    }
+    if (requests >= MAX_POSTING_REQUESTS) {
+      entry.unread = { decision: "not-reached", reason: `past this board's limit of ${MAX_POSTING_REQUESTS} posting requests` };
+      continue;
+    }
+    if (Date.now() - started >= POSTING_REQUESTS_TIME_MS) {
+      entry.unread = { decision: "not-reached", reason: `past this board's ${POSTING_REQUESTS_TIME_MS / 1000}-second limit for posting requests` };
+      continue;
+    }
+    requests += 1;
+    try {
+      const answer = await fetcher(`${endpoint}/${job.id}`, boardRequest());
+      if (!answer.ok) {
+        try { await answer.body?.cancel(); } catch { /* the status is the answer */ }
+        entry.unread = { decision: "unavailable", reason: `the board's posting request answered ${answer.status}` };
+        continue;
+      }
+      const detail = greenhouseJob.parse(await boundedJson(answer));
+      entry.text = detail.content ?? "";
+      entry.publication = employerPublication(detail.first_published ?? job.first_published, job.absolute_url, "first_published");
+      if (plainText(entry.text).length >= 80) withText += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      entry.unread = { decision: "unavailable", reason: `the board's posting request failed: ${message.slice(0, 200)}` };
+    }
+  }
+  return {
+    jobs, status: response.status, endpoint,
+    note: `the full board was over 5 MB, so its job list and ${requests} postings were read one by one`
+  };
+}
+
+/**
+ * An oversized Lever board read again in pages; only internship titles keep
+ * their text between pages, so memory stays bounded.
+ */
+async function readLeverPages(slug: string, fetcher: Fetcher): Promise<BoardRead> {
+  const pageUrl = (page: number) => `https://api.lever.co/v0/postings/${slug}?mode=json&skip=${page * LEVER_PAGE_SIZE}&limit=${LEVER_PAGE_SIZE}`;
+  const seen = new Set<string>();
+  const jobs: BoardJob[] = [];
+  let status = 0;
+  let pages = 0;
+  let lastFull = false;
+  for (let page = 0; page < MAX_LEVER_PAGES; page += 1) {
+    const response = await fetcher(pageUrl(page), boardRequest());
+    await answerOk(response);
+    if (page === 0) status = response.status;
+    const entries = z.array(leverJob).max(LEVER_PAGE_SIZE).parse(await boundedJson(response));
+    pages += 1;
+    for (const job of entries) {
+      if (seen.has(job.hostedUrl)) continue;
+      seen.add(job.hostedUrl);
+      jobs.push({ title: job.text, url: job.hostedUrl, text: INTERN_TITLE.test(job.text) ? (job.descriptionPlain ?? job.description ?? "") : "" });
+    }
+    lastFull = entries.length >= LEVER_PAGE_SIZE;
+    if (!lastFull) break;
+  }
+  return {
+    jobs, status, endpoint: pageUrl(0),
+    note: `the full board was over 5 MB, so it was read in ${pages} pages of ${LEVER_PAGE_SIZE}` +
+      (lastFull && pages >= MAX_LEVER_PAGES ? `; stopped at ${MAX_LEVER_PAGES} pages` : "")
+  };
 }
 
 function hostOf(raw: string): string {

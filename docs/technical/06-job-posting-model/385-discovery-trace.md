@@ -8,6 +8,7 @@ The decisions are read (and then stored), already known, older than the age limi
 Row numbers are the 1-based position in the list's parse output: file order for Simplify and Speedy, and for Vansh the valid rows newest first, then the malformed rows.
 An ingest line records what ingestion did with each resolved posting: stored new, updated, duplicate, already in the live pipeline, skipped by the candidate's discovery feedback, failed to store, or past the batch limit.
 A fetch line records each public board request: the API endpoint and its host, the HTTP status, fetched or failed with the reason, and the board's job, internship-title, and kept counts; a board's dropped internship rows (invalid link, description under 80 characters, past the 100-posting limit) and its kept rows are row lines, and its other titles are only counted on the fetch line.
+An oversized board read again (Greenhouse's job list and postings, Lever's pages) writes one fetch line naming the list or first-page endpoint, with how it was read in its reason; its posting and page requests are not traced one by one.
 Board checks write their pass line with `full: false` and never write quiet rows, so a pass with many boards does not re-read the day's trace file for each one.
 An end line closes the check with counts by decision, counts by reason, and counts by host for the rows that were dropped, plus the error when the check failed.
 A read row that was then stored counts under its ingest decision, so the end counts show final decisions.

@@ -13,6 +13,10 @@ When every new link is known or unresolvable after skipping, the check finishes 
 Every QUALIFIED posting at or above `INTERNSHIP_AGENT_PREPARE_MIN_FIT` (default 0) is prepared after a discovery run, with no top-N cut; callers may still pass an explicit threshold and limit.
 Other links remain in the source repository for manual review; the source check reports how many were skipped.
 Company-board fetches still use public listing APIs without redirects, with a 15-second timeout, a 5 MB response limit, and at most 100 internship listings ingested per run.
+A Greenhouse board whose answer is over 5 MB is read again as its content-free list `/v1/boards/{slug}/jobs` (up to 10,000 jobs) plus `/v1/boards/{slug}/jobs/{id}` for each internship title, one request at a time, at most 120 requests and 120 seconds per board; a title past those limits is not reached this check, and a failed posting request leaves that title unavailable.
+A Lever board whose answer is over 5 MB is read again in pages of 100 (`?mode=json&skip=N&limit=100`), at most 20 pages, and only internship titles keep their text between pages.
+An Ashby board's answer may be up to 16 MB, because Ashby's posting API has no paging and no content-free list.
+Read-only measurements on 2026-11-26: Ironvale's Greenhouse board was 46 MB with content and 2.7 MB without, 2,598 jobs and 43 internship titles; Veeva Systems' Lever board was 12.4 MB, 874 jobs and 7 internship titles, about 1.4 MB per page of 100; Shield AI's Ashby board was 9.9 MB, 686 jobs and 22 internship titles.
 GitHub sources are limited to one check per minute.
 The source row is stamped before each fetch attempt, including failed attempts.
 Adding a source does not poll or import it.

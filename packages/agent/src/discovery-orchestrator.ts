@@ -6,10 +6,12 @@ import {
   findJobBySourceUrl,
   getDiscoverySkip,
   getDatabase,
+  getJobMatch,
   getJobPosting,
   getJobStatus,
   getRequirementLabelHold,
   listCurrentPostingIdentities,
+  listJobSummaries,
   listDiscoveryRuns,
   listDiscoverySkips,
   listDiscoverySkipsWithTitles,
@@ -46,6 +48,7 @@ import { mapWithConcurrency, modelConcurrency } from "./concurrency";
 import { labelsPendingNotice } from "./requirement-relabel";
 import { openDiscoveryTrace, type DiscoveryFetchEvent, type DiscoveryRowEvent, type DiscoveryTrace } from "./discovery-trace";
 import type { ModelProvider } from "./model/provider";
+import type { DiscoveryTimeBudget } from "./discovery-time-budget";
 
 export const MAX_BATCH_ITEMS = 100;
 
@@ -57,6 +60,8 @@ export type BatchReport = {
   feedbackSkippedJobIds: string[];
   errors: string[];
   sourceNotes: string[];
+  /** New postings stored but left unanalyzed for the next pass by the pass's discovery time budget. */
+  deferredJobIds: string[];
   /** Why the source check's discovery trace could not be written, if it could not. */
   traceError?: string | null;
 };
@@ -132,6 +137,8 @@ export async function fetchCompanySource(
     fetcher?: Fetcher;
     /** Runs the ingest step; a pass checking boards concurrently passes a gate that runs one ingest at a time. */
     ingestGate?: <T>(task: () => Promise<T>) => Promise<T>;
+    /** The pass's discovery time budget; analysis of new postings stops once it is spent. */
+    budget?: DiscoveryTimeBudget | null;
   } = {}
 ): Promise<BatchReport> {
   const database = options.database ?? getDatabase();
@@ -212,8 +219,10 @@ export async function checkPublicBoards(
     now?: Date;
     limit?: number;
     concurrency?: number;
+    /** The pass's discovery time budget; once it is spent no further board is started. */
+    budget?: DiscoveryTimeBudget | null;
   }
-): Promise<{ checked: string[]; failed: number; notDue: number; backedOff: number; deferred: number }> {
+): Promise<{ checked: string[]; failed: number; notDue: number; backedOff: number; deferred: number; budgetDeferred: number }> {
   const { log } = options;
   const plan = planBoardChecks(boards, options.now ?? new Date(), options.limit ?? BOARD_CHECKS_PER_PASS);
   let tail: Promise<unknown> = Promise.resolve();
@@ -223,13 +232,18 @@ export async function checkPublicBoards(
     return run;
   };
   let failed = 0;
+  const budgetDeferred = new Set<string>();
   await mapWithConcurrency(plan.due, options.concurrency ?? BOARD_CHECK_CONCURRENCY, async (source) => {
+    // Past the time budget a board is not started: it keeps its last fetch time, so it stays due and goes first next pass.
+    if (options.budget?.spent()) { options.budget.deferBoard(); budgetDeferred.add(source.id); return; }
     try {
-      const { run, sourceNotes, errors, traceError } = await fetchCompanySource(source.id, {
-        database, fetchBatch: options.fetchBatch, fetcher: options.fetcher, traceDirectory: options.traceDirectory, ingestGate: gate
+      const { run, sourceNotes, errors, traceError, deferredJobIds } = await fetchCompanySource(source.id, {
+        database, fetchBatch: options.fetchBatch, fetcher: options.fetcher, traceDirectory: options.traceDirectory, ingestGate: gate,
+        budget: options.budget
       });
       if (run.ingested || run.promoted || errors.length) {
         log(`${source.label}: fetched ${run.fetched}, duplicates ${run.deduped}, new ${run.ingested}, prepared ${run.promoted}.` +
+          (deferredJobIds.length ? ` ${deferredJobIds.length} left for the next pass (budget).` : "") +
           (sourceNotes.length ? " " + sourceNotes.join(" ") : "") + (errors.length ? ` ${errors.length} error(s).` : ""));
       }
       if (traceError) log(`${source.label}: discovery trace not written (${traceError}).`);
@@ -238,12 +252,32 @@ export async function checkPublicBoards(
       log(`${source.label}: ${error instanceof Error ? error.message : String(error)}`);
     }
   });
-  log(`Public boards: checked ${plan.due.length} (${failed} failed), not due ${plan.notDue.length}, ` +
-    `backed off ${plan.backedOff.length}, left for a later pass ${plan.deferred.length}.`);
+  log(`Public boards: checked ${plan.due.length - budgetDeferred.size} (${failed} failed), not due ${plan.notDue.length}, ` +
+    `backed off ${plan.backedOff.length}, left for a later pass ${plan.deferred.length}` +
+    (budgetDeferred.size ? `, left by the time budget ${budgetDeferred.size}` : "") + ".");
   return {
-    checked: plan.due.map((source) => source.label),
-    failed, notDue: plan.notDue.length, backedOff: plan.backedOff.length, deferred: plan.deferred.length
+    checked: plan.due.filter((source) => !budgetDeferred.has(source.id)).map((source) => source.label),
+    failed, notDue: plan.notDue.length, backedOff: plan.backedOff.length, deferred: plan.deferred.length,
+    budgetDeferred: budgetDeferred.size
   };
+}
+
+/**
+ * Resumes the postings an earlier pass's time budget (or an interrupted
+ * discovery run) left stored with no analysis: DISCOVERED, no match, not
+ * skipped by feedback, not held for labels, oldest first. They go through
+ * the same analysis and preparation as new postings, within the budget.
+ */
+export async function resumeDeferredAnalysis(
+  database: DatabaseSync,
+  options: { budget: DiscoveryTimeBudget; candidateId?: string }
+): Promise<{ waiting: number; analyzed: number; prepared: number; deferred: number; errors: string[] }> {
+  const backlog = listJobSummaries(database, { status: "DISCOVERED" }).reverse()
+    .filter((job) => !getJobMatch(database, job.id) && !getDiscoverySkip(database, job.id) && !getRequirementLabelHold(database, job.id))
+    .map((job) => job.id);
+  if (backlog.length === 0) return { waiting: 0, analyzed: 0, prepared: 0, deferred: 0, errors: [] };
+  const result = await analyzeAndPrepare(database, backlog, { candidateId: options.candidateId ?? LOCAL_CANDIDATE_ID, budget: options.budget });
+  return { waiting: backlog.length, analyzed: result.ranked.length, prepared: result.promotedJobIds.length, deferred: result.deferredJobIds.length, errors: result.errors };
 }
 
 export function addCompanySource(
@@ -295,7 +329,7 @@ async function processDiscoveredItems(
   sourceId: string | null,
   items: DiscoveredItem[],
   errors: string[],
-  options: { candidateId?: string; threshold?: number; limit?: number; provider?: ModelProvider; trace?: DiscoveryTrace | null },
+  options: { candidateId?: string; threshold?: number; limit?: number; provider?: ModelProvider; trace?: DiscoveryTrace | null; budget?: DiscoveryTimeBudget | null },
   sourceNotes: string[] = []
 ): Promise<BatchReport> {
   const candidateId = options.candidateId ?? LOCAL_CANDIDATE_ID;
@@ -308,7 +342,7 @@ async function processDiscoveredItems(
   if (items.length === 0) {
     // An empty check (a board with no internship postings) loads no posting identities.
     const finished = finishDiscoveryRun(database, run.id, { fetched: 0, deduped: 0, ingested: 0, analyzed: 0, promoted: 0 });
-    return { run: finished, jobIds: [], promotedJobIds: [], skippedJobIds: [], feedbackSkippedJobIds: [], errors, sourceNotes };
+    return { run: finished, jobIds: [], promotedJobIds: [], skippedJobIds: [], feedbackSkippedJobIds: [], errors, sourceNotes, deferredJobIds: [] };
   }
   const { unique, duplicates: batchDuplicates } = dedupeItems(items, (item) => [
     `posting:${postingDedupeKey(item.companyName, item.title, item.text)}`,
@@ -404,7 +438,46 @@ async function processDiscoveredItems(
     });
   }
 
-  const ranked: Array<{ jobId: string; verdict: string; fitScore: number }> = [];
+  const analysis = await analyzeAndPrepare(database, jobIds, {
+    candidateId, threshold: options.threshold, limit: options.limit, budget: options.budget
+  });
+  skippedJobIds.push(...analysis.skippedJobIds);
+  errors.push(...analysis.errors);
+  const { ranked, promotedJobIds, deferredJobIds } = analysis;
+
+  const finished = finishDiscoveryRun(database, run.id, {
+    fetched: items.length,
+    deduped: batchDuplicates + existingDuplicates,
+    ingested: jobIds.length,
+    analyzed: ranked.length,
+    promoted: promotedJobIds.length
+  });
+  return { run: finished, jobIds, promotedJobIds, skippedJobIds, feedbackSkippedJobIds, errors, sourceNotes, deferredJobIds };
+}
+
+type AnalysisResult = {
+  ranked: Array<{ jobId: string; verdict: string; fitScore: number }>;
+  promotedJobIds: string[];
+  skippedJobIds: string[];
+  deferredJobIds: string[];
+  errors: string[];
+};
+
+/**
+ * Matches, AI-fits, and prepares stored postings one at a time, as discovery
+ * does for new postings; once the pass's time budget is spent the remaining
+ * postings are left stored with no match for the next pass.
+ */
+async function analyzeAndPrepare(
+  database: DatabaseSync,
+  jobIds: readonly string[],
+  options: { candidateId: string; threshold?: number; limit?: number; budget?: DiscoveryTimeBudget | null }
+): Promise<AnalysisResult> {
+  const ranked: AnalysisResult["ranked"] = [];
+  const skippedJobIds: string[] = [];
+  const deferredJobIds: string[] = [];
+  const errors: string[] = [];
+  const candidateId = options.candidateId;
   const target = targetTerm();
   for (const jobId of jobIds) {
     // Re-analysis rewrites the posting status, which would drag a live
@@ -420,6 +493,8 @@ async function processDiscoveredItems(
       errors.push(posting ? labelsPendingNotice(posting) : `${REQUIREMENT_LABELS_UNAVAILABLE}: ${jobId}.`);
       continue;
     }
+    // Past the pass's time budget the posting stays stored as DISCOVERED with no match; the next pass resumes it oldest first.
+    if (options.budget?.spent()) { options.budget.deferPosting(); deferredJobIds.push(jobId); continue; }
     try {
       const { report } = evaluateAndPersistMatch(jobId, { database, candidateId });
       // With a target set, postings it rules out get no model call and are not
@@ -456,12 +531,5 @@ async function processDiscoveredItems(
     }
   }
 
-  const finished = finishDiscoveryRun(database, run.id, {
-    fetched: items.length,
-    deduped: batchDuplicates + existingDuplicates,
-    ingested: jobIds.length,
-    analyzed: ranked.length,
-    promoted: promotedJobIds.length
-  });
-  return { run: finished, jobIds, promotedJobIds, skippedJobIds, feedbackSkippedJobIds, errors, sourceNotes };
+  return { ranked, promotedJobIds, skippedJobIds, deferredJobIds, errors };
 }

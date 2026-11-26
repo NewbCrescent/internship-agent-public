@@ -189,6 +189,8 @@ export async function advancePipeline(options: {
   securityCodeMailbox?: VerificationMailboxFactory | null;
   /** Tests only: how the security code is polled (default every 10 s for up to 3 minutes). */
   securityCodeWait?: { pollMs?: number; timeoutMs?: number; sleep?: (ms: number) => Promise<void> };
+  /** false leaves DISCOVERED postings with no match to discovery's resume step (runPipelinePass), so none is prepared or run before its AI fit; default true. */
+  analyzeLeftovers?: boolean;
 } = {}): Promise<PipelineReport> {
   const database = options.database ?? getDatabase();
   const candidateId = options.candidateId ?? LOCAL_CANDIDATE_ID;
@@ -223,14 +225,16 @@ export async function advancePipeline(options: {
   report.analyzed.push(...relabel.reevaluated);
   report.errors.push(...relabel.errors);
 
-  for (const job of listJobSummaries(database)) {
-    if (job.status !== "DISCOVERED" || getJobMatch(database, job.id) || getDiscoverySkip(database, job.id) ||
-      getRequirementLabelHold(database, job.id)) continue;
-    try {
-      evaluateAndPersistMatch(job.id, { database, candidateId });
-      report.analyzed.push(job.id);
-    } catch (error) {
-      report.errors.push(`Analysis failed for ${job.id}: ${messageOf(error)}`);
+  if (options.analyzeLeftovers !== false) {
+    for (const job of listJobSummaries(database)) {
+      if (job.status !== "DISCOVERED" || getJobMatch(database, job.id) || getDiscoverySkip(database, job.id) ||
+        getRequirementLabelHold(database, job.id)) continue;
+      try {
+        evaluateAndPersistMatch(job.id, { database, candidateId });
+        report.analyzed.push(job.id);
+      } catch (error) {
+        report.errors.push(`Analysis failed for ${job.id}: ${messageOf(error)}`);
+      }
     }
   }
 

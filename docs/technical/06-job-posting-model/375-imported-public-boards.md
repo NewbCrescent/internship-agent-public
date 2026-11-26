@@ -20,7 +20,7 @@ Each board is checked at most once every 6 hours, measured from its `last_fetche
 A board whose fetch fails is backed off: it is checked again after 12 hours, doubling with each failure in a row up to 7 days, and after 7 days at once when it answered 404 or 410.
 The board's `failure_count`, `last_error`, and `retry_after` record this, and a successful fetch clears them; a failing board stays enabled and is never retried every pass.
 The dashboard's Check board still checks a board on demand, and the Jobs page shows where an imported board came from and why a failing board is backed off.
-The pass logs a line only for a board that stored, prepared, or failed, plus one summary line with the boards checked, failed, not due, backed off, and left for a later pass.
+The pass logs a line only for a board that stored, prepared, or failed, plus one summary line with the boards checked, failed, not due, backed off, and left for a later pass, and, when the discovery time budget ran out, the boards left by it (see **Discovery time budget**).
 A board with no internship postings right now finishes as an empty run with the note "No internship postings on this board right now." instead of failing.
 The list doorbell (`pnpm pipeline:watch`) still rings only for GitHub lists, so boards are checked only by `pnpm pipeline:run`.
 No conditional requests are sent (Greenhouse's ETag comes with `cache-control: max-age=0, private`); the interval and the back-off bound the load on the board APIs.

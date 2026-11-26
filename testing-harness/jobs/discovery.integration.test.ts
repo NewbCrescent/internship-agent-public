@@ -18,6 +18,8 @@ import {
   skipDiscoveredJobs,
   acquirePipelineLock,
   readPipelineLock,
+  type DiscoveryFetchEvent,
+  type DiscoveryRowEvent,
   type ModelProvider,
   type StructuredRequest
 } from "@internship-agent/agent";
@@ -585,5 +587,91 @@ describe("bulk discovery run", () => {
     );
     expect(ashby).toHaveLength(1);
     expect(ashby[0].sourceUrl).toBe("https://jobs.ashbyhq.com/meridian/123");
+  });
+
+  it("reads an oversized Greenhouse board from its job list and each internship posting", async () => {
+    const list = "https://boards-api.greenhouse.io/v1/boards/meridian/jobs";
+    const job = (id: number, title: string) => ({ id, title, absolute_url: `https://boards.greenhouse.io/meridian/jobs/${id}` });
+    const requested: string[] = [];
+    const fetches: DiscoveryFetchEvent[] = [];
+    const rows: DiscoveryRowEvent[] = [];
+    const items = await fetchPublicBoard(
+      { label: "Meridian Tools", url: "https://boards.greenhouse.io/meridian" },
+      async (url, init) => {
+        requested.push(url);
+        expect(init?.redirect).toBe("error");
+        if (url === `${list}?content=true`) return new Response("x".repeat(5_000_001));
+        if (url === list) {
+          return new Response(JSON.stringify({ jobs: [
+            job(11, "Software Engineering Intern"), job(12, "Senior Engineer"), job(13, "Data Intern"), job(14, "Design Intern")
+          ] }));
+        }
+        if (url === `${list}/11`) return new Response(JSON.stringify({ ...job(11, "Software Engineering Intern"), content: STRONG_POSTING }));
+        if (url === `${list}/13`) return new Response("{}", { status: 404 });
+        if (url === `${list}/14`) return new Response(JSON.stringify({ ...job(14, "Design Intern"), content: "Too short." }));
+        throw new Error(`unexpected request ${url}`);
+      },
+      { onFetch: (event) => fetches.push(event), onRow: (event) => rows.push(event) }
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0]!.title).toBe("Software Engineering Intern");
+    expect(items[0]!.text).toContain("Requirements");
+    expect(requested).toEqual([`${list}?content=true`, list, `${list}/11`, `${list}/13`, `${list}/14`]);
+    expect(fetches).toHaveLength(1);
+    expect(fetches[0]).toMatchObject({ url: list, decision: "board-fetched", jobs: 4, internships: 3, kept: 1 });
+    expect(fetches[0]!.reason).toContain("over 5 MB");
+    const byUrl = new Map(rows.map((row) => [row.url, row]));
+    expect(byUrl.get(job(11, "").absolute_url)?.decision).toBe("resolved");
+    expect(byUrl.get(job(13, "").absolute_url)).toMatchObject({ decision: "unavailable" });
+    expect(byUrl.get(job(13, "").absolute_url)?.reason).toContain("404");
+    expect(byUrl.get(job(14, "").absolute_url)).toMatchObject({ decision: "unavailable" });
+    expect(byUrl.get(job(14, "").absolute_url)?.reason).toContain("fewer than 80 characters");
+  });
+
+  it("reads an oversized Lever board in pages of 100", async () => {
+    const base = "https://api.lever.co/v0/postings/meridian?mode=json";
+    const senior = (n: number) => ({ text: `Senior Engineer ${n}`, hostedUrl: `https://jobs.lever.co/meridian/senior-${n}`, descriptionPlain: "A fictional senior role." });
+    const requested: string[] = [];
+    const fetches: DiscoveryFetchEvent[] = [];
+    const items = await fetchPublicBoard(
+      { label: "Meridian Tools", url: "https://jobs.lever.co/meridian" },
+      async (url) => {
+        requested.push(url);
+        if (url === base) return new Response("x".repeat(5_000_001));
+        if (url === `${base}&skip=0&limit=100`) {
+          return new Response(JSON.stringify([
+            ...Array.from({ length: 99 }, (_, index) => senior(index)),
+            { text: "Software Engineering Intern", hostedUrl: "https://jobs.lever.co/meridian/1", descriptionPlain: STRONG_POSTING }
+          ]));
+        }
+        if (url === `${base}&skip=100&limit=100`) {
+          return new Response(JSON.stringify([
+            { text: "Data Intern", hostedUrl: "https://jobs.lever.co/meridian/2", descriptionPlain: STRONG_POSTING },
+            senior(100)
+          ]));
+        }
+        throw new Error(`unexpected request ${url}`);
+      },
+      { onFetch: (event) => fetches.push(event) }
+    );
+    expect(items.map((item) => item.title)).toEqual(["Software Engineering Intern", "Data Intern"]);
+    expect(requested).toEqual([base, `${base}&skip=0&limit=100`, `${base}&skip=100&limit=100`]);
+    expect(fetches).toHaveLength(1);
+    expect(fetches[0]).toMatchObject({ url: `${base}&skip=0&limit=100`, decision: "board-fetched", jobs: 102, internships: 2, kept: 2 });
+  });
+
+  it("reads an Ashby board up to 16 MB", async () => {
+    const items = await fetchPublicBoard(
+      { label: "Meridian Tools", url: "https://jobs.ashbyhq.com/meridian" },
+      async () => new Response(JSON.stringify({ jobs: [
+        { title: "Software Engineering Intern", jobUrl: "https://jobs.ashbyhq.com/meridian/1", descriptionPlain: STRONG_POSTING },
+        { title: "Senior Engineer", jobUrl: "https://jobs.ashbyhq.com/meridian/2", descriptionPlain: "y".repeat(6_000_000) }
+      ] }))
+    );
+    expect(items).toHaveLength(1);
+    await expect(fetchPublicBoard(
+      { label: "Meridian Tools", url: "https://jobs.ashbyhq.com/meridian" },
+      async () => new Response("x".repeat(16_000_001))
+    )).rejects.toThrow("too large");
   });
 });

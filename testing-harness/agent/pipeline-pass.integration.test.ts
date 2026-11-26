@@ -5,9 +5,11 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { addCompanySource, readDoorbellState, savePostSubmitEvidence } from "@internship-agent/agent";
 import {
-  closeProfileDatabase, createDatabase, listDiscoverySources, persistNormalizedPosting, resolveProfileDatabasePath, resolveProfileDataDirectory,
+  addCompanySource, discoveryTimeBudgetLine, discoveryTimeBudgetMs, readDoorbellState, savePostSubmitEvidence, startDiscoveryTimeBudget
+} from "@internship-agent/agent";
+import {
+  closeProfileDatabase, createDatabase, getJobMatch, listDiscoverySources, persistNormalizedPosting, resolveProfileDatabasePath, resolveProfileDataDirectory,
   saveApplicationPackage, saveBrowserRun, setJobStatus, updateBrowserRun
 } from "@internship-agent/db";
 import type { BrowserPage } from "@internship-agent/browser";
@@ -25,7 +27,7 @@ import type { PipelineReport } from "../../packages/agent/src/pipeline-orchestra
 const LIST_URL = "https://github.com/SimplifyJobs/Summer2027-Internships";
 const sha = (digit: string) => digit.repeat(40);
 const pipelineEnv = ["INTERNSHIP_AGENT_AUTO_APPLY", "INTERNSHIP_AGENT_AUTO_SUBMIT", "INTERNSHIP_AGENT_TARGET_TERM", "GITHUB_TOKEN",
-  "INTERNSHIP_AGENT_DISCORD_BOT_TOKEN", "INTERNSHIP_AGENT_DISCORD_USER_ID"];
+  "INTERNSHIP_AGENT_DISCORD_BOT_TOKEN", "INTERNSHIP_AGENT_DISCORD_USER_ID", "MODEL_API_KEY", "INTERNSHIP_AGENT_DISCOVERY_BUDGET_MS"];
 
 let directory = "";
 let saved: Record<string, string | undefined> = {};
@@ -319,6 +321,105 @@ describe("pipeline watcher pass", () => {
     expect(sources.get(flaky!)?.failureCount).toBe(2);
     expect(Math.abs(Date.parse(sources.get(flaky!)!.retryAfter!) - (retriedAt + 24 * 3_600_000))).toBeLessThan(60_000);
     expect(sources.get(gone!)?.failureCount).toBe(1);
+  });
+
+  it("reads the discovery time budget setting and honors it on a fake clock", () => {
+    expect(discoveryTimeBudgetMs({})).toBe(900_000);
+    expect(discoveryTimeBudgetMs({ INTERNSHIP_AGENT_DISCOVERY_BUDGET_MS: "120000" })).toBe(120_000);
+    expect(discoveryTimeBudgetMs({ INTERNSHIP_AGENT_DISCOVERY_BUDGET_MS: " 300000 " })).toBe(300_000);
+    expect(discoveryTimeBudgetMs({ INTERNSHIP_AGENT_DISCOVERY_BUDGET_MS: "5" })).toBe(60_000);
+    expect(discoveryTimeBudgetMs({ INTERNSHIP_AGENT_DISCOVERY_BUDGET_MS: "99999999999" })).toBe(21_600_000);
+    expect(discoveryTimeBudgetMs({ INTERNSHIP_AGENT_DISCOVERY_BUDGET_MS: "abc" })).toBe(900_000);
+    expect(discoveryTimeBudgetMs({ INTERNSHIP_AGENT_DISCOVERY_BUDGET_MS: "-5" })).toBe(900_000);
+
+    let t = 1_000;
+    const budget = startDiscoveryTimeBudget(60_000, () => t);
+    t = 60_999;
+    expect(budget.spent()).toBe(false);
+    t = 61_000;
+    expect(budget.spent()).toBe(true);
+    expect(discoveryTimeBudgetLine(budget)).toBeNull();
+    budget.deferBoard();
+    budget.deferBoard();
+    budget.deferPosting();
+    expect(discoveryTimeBudgetLine(budget)).toBe("discovery: 2 boards and 1 posting left for the next pass (budget).");
+  });
+
+  it("a pass past its discovery time budget defers the rest, still runs the application step, and the next pass resumes them oldest first", async () => {
+    const seed = createDatabase(resolveProfileDatabasePath("real"));
+    const boards = [
+      addCompanySource("Alpha Freight", "https://boards.greenhouse.io/alpha", 6, seed),
+      addCompanySource("Bravo Analytics", "https://jobs.lever.co/bravo", 6, seed),
+      addCompanySource("Charlie Robotics", "https://jobs.ashbyhq.com/charlie", 6, seed)
+    ];
+    seed.close();
+    const posting = (title: string, id: number) => ({
+      title, companyName: "Kestrel Freight", sourceUrl: `https://boards.greenhouse.io/kestrel/jobs/${id}`,
+      text: `${title} - Kestrel Freight\nLocation: Seattle, WA\n` +
+        "Kestrel Freight builds fictional logistics software for this project's synthetic fixtures.\n" +
+        "Requirements:\n- Experience with Python or TypeScript\n- Enrolled in a Bachelor's degree program in Computer Science"
+    });
+    const titles = ["S1", "V1", "V2", "V3", "V4"].map((suffix) => `Software Engineering Intern ${suffix}`);
+    const items = titles.map((title, index) => posting(title, 101 + index));
+    const fetched: string[] = [];
+    let listCalls = 0;
+    const fetchBatch = async (source: { label: string; url: string }) => {
+      fetched.push(source.url);
+      if (source.url !== LIST_URL) return [];
+      listCalls += 1;
+      return listCalls === 1 ? { items, notes: [] } : { items: [], notes: ["Nothing new on the list."] };
+    };
+    // One read starts the budget and one per spent() check: the default 15 minutes allows two checks, then it is spent.
+    let reads = 0;
+    const discoveryClock = () => (reads += 1) * 400_000;
+    const withDatabase = <T>(read: (database: ReturnType<typeof createDatabase>) => T): T => {
+      const database = createDatabase(resolveProfileDatabasePath("real"));
+      try { return read(database); } finally { database.close(); }
+    };
+    const state = () => withDatabase((database) => {
+      const rows = database.prepare("SELECT id, title, status FROM jobs").all() as Array<{ id: string; title: string; status: string }>;
+      return new Map(rows.map((row) => [row.title, { status: row.status, matched: Boolean(getJobMatch(database, row.id)) }]));
+    });
+    const boardFetches = () => withDatabase((database) => listDiscoverySources(database)
+      .filter((source) => boards.some((board) => board.id === source.id)).map((source) => source.lastFetchedAt));
+
+    reads = 0;
+    const first: string[] = [];
+    await runPipelinePass({ profile: "real", sourceIds: "all", log: (line) => first.push(line), fetchBatch, discoveryClock });
+    let jobs = state();
+    expect(jobs.get(titles[0]!)?.matched, first.join("\n")).toBe(true);
+    expect(jobs.get(titles[1]!)?.matched).toBe(true);
+    for (const title of titles.slice(2)) expect(jobs.get(title)).toEqual({ status: "DISCOVERED", matched: false });
+    expect(fetched).toEqual([LIST_URL]);
+    expect(boardFetches()).toEqual([null, null, null]);
+    expect(first).toContainEqual(expect.stringMatching(/^Simplify Summer 2027: fetched 5, duplicates 0, new 5, prepared \d+\. 3 left for the next pass \(budget\)\./));
+    expect(first).toContain("Public boards: checked 0 (0 failed), not due 0, backed off 0, left for a later pass 0, left by the time budget 3.");
+    const firstDeferred = first.indexOf("discovery: 3 boards and 3 postings left for the next pass (budget).");
+    expect(firstDeferred).toBeGreaterThanOrEqual(0);
+    expect(first.findIndex((line) => /^Analyzed 0 left over;/.test(line))).toBeGreaterThan(firstDeferred);
+
+    // V4 is now the oldest, then V2, then V3; the list's rate limit is an hour behind.
+    withDatabase((database) => {
+      const age = database.prepare("UPDATE jobs SET created_at = ? WHERE title = ?");
+      age.run("2026-01-01T00:00:00.000Z", titles[4]!);
+      age.run("2026-01-02T00:00:00.000Z", titles[2]!);
+      age.run("2026-01-03T00:00:00.000Z", titles[3]!);
+      database.prepare("UPDATE discovery_sources SET last_fetched_at = ? WHERE url = ?")
+        .run(new Date(Date.now() - 3_600_000).toISOString(), LIST_URL);
+    });
+
+    reads = 0;
+    const second: string[] = [];
+    await runPipelinePass({ profile: "real", sourceIds: "all", log: (line) => second.push(line), fetchBatch, discoveryClock });
+    jobs = state();
+    expect(jobs.get(titles[4]!)?.matched, second.join("\n")).toBe(true);
+    expect(jobs.get(titles[2]!)?.matched).toBe(true);
+    expect(jobs.get(titles[3]!)).toEqual({ status: "DISCOVERED", matched: false });
+    expect(second).toContainEqual(expect.stringMatching(/^Deferred postings: 3 from earlier passes; analyzed 2, prepared \d+, still waiting 1\./));
+    expect(second).toContain("discovery: 3 boards and 1 posting left for the next pass (budget).");
+    expect(second).toContainEqual(expect.stringMatching(/^Analyzed 0 left over;/));
+    expect(fetched).toEqual([LIST_URL, LIST_URL]);
+    expect(boardFetches()).toEqual([null, null, null]);
   });
 });
 

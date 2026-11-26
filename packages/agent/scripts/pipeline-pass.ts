@@ -6,7 +6,8 @@ import { closeProfileDatabase, getJobPosting, getProfileDatabase, listBrowserRun
 import { applicationRecordPdfPath } from "@internship-agent/browser";
 import type { WorkspaceProfile } from "@internship-agent/domain";
 
-import { checkPublicBoards, fetchCompanySource, type FetchBatch } from "../src/discovery-orchestrator";
+import { checkPublicBoards, fetchCompanySource, resumeDeferredAnalysis, type FetchBatch } from "../src/discovery-orchestrator";
+import { discoveryTimeBudgetLine, discoveryTimeBudgetMs, startDiscoveryTimeBudget } from "../src/discovery-time-budget";
 import { isPublicBoardSource } from "../src/board-polling";
 import { advancePipeline, pipelineSettings, type PipelineReport } from "../src/pipeline-orchestrator";
 import { unverifiedRequirements } from "../src/fit-pursuit";
@@ -38,6 +39,8 @@ export async function runPipelinePass(options: {
   advance?: typeof advancePipeline;
   /** Tests inject the Discord transport (fetch, the 429 wait, the timeout). */
   notify?: DiscordTransport;
+  /** Tests inject the discovery time budget's clock; production uses Date.now. */
+  discoveryClock?: () => number;
 }): Promise<PipelineReport> {
   const { profile, log } = options;
   const dataDir = resolveProfileDataDirectory(profile);
@@ -63,18 +66,32 @@ export async function runPipelinePass(options: {
     log(`Workspace ${profile}; model ${process.env.MODEL_API_KEY ? "configured" : "not configured"}; min fit ${settings.minFit}; ` +
       `auto-apply ${settings.autoApply ? "on" : "off"}; target ${settings.target ? `${settings.target.season} ${settings.target.year}` : "none"}; ` +
       `auto-submit ${autoSubmit ? `on (AI ${autoSubmit.minFit}+, ${dailyCapLabel})` : "off"}.`);
+    const budget = startDiscoveryTimeBudget(discoveryTimeBudgetMs(), options.discoveryClock);
     const sources = listDiscoverySources(database).filter((entry) => entry.enabled && entry.url &&
       (options.sourceIds === "all" || options.sourceIds.includes(entry.id)));
     // Lists are checked one after another; public boards afterwards, only when due and a few at a time.
     const lists = sources.filter((source) => !isPublicBoardSource(source));
     const boards = sources.filter(isPublicBoardSource);
     let checked: string[] = [];
+    // A pass that checks sources first resumes the postings earlier passes left unanalyzed, oldest first, within the budget.
+    if (options.sourceIds === "all" || options.sourceIds.length > 0) {
+      try {
+        const resumed = await resumeDeferredAnalysis(database, { budget });
+        if (resumed.waiting) {
+          log(`Deferred postings: ${resumed.waiting} from earlier passes; analyzed ${resumed.analyzed}, prepared ${resumed.prepared}, still waiting ${resumed.deferred}.` +
+            (resumed.errors.length ? ` ${resumed.errors.length} error(s).` : ""));
+        }
+      } catch (error) {
+        log(`Deferred postings: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     for (const source of lists) {
       try {
-        const { run, sourceNotes, errors, traceError } = await fetchCompanySource(source.id, {
-          database, fetchBatch: options.fetchBatch, traceDirectory: dataDir
+        const { run, sourceNotes, errors, traceError, deferredJobIds } = await fetchCompanySource(source.id, {
+          database, fetchBatch: options.fetchBatch, traceDirectory: dataDir, budget
         });
         log(`${source.label}: fetched ${run.fetched}, duplicates ${run.deduped}, new ${run.ingested}, prepared ${run.promoted}.` +
+          (deferredJobIds.length ? ` ${deferredJobIds.length} left for the next pass (budget).` : "") +
           (sourceNotes.length ? " " + sourceNotes.join(" ") : "") + (errors.length ? ` ${errors.length} error(s).` : ""));
         if (traceError) log(`${source.label}: discovery trace not written (${traceError}).`);
       } catch (error) {
@@ -83,10 +100,12 @@ export async function runPipelinePass(options: {
     }
     if (boards.length) {
       checked = (await checkPublicBoards(database, boards, {
-        log, traceDirectory: dataDir, fetchBatch: options.fetchBatch, fetcher: options.boardFetcher
+        log, traceDirectory: dataDir, fetchBatch: options.fetchBatch, fetcher: options.boardFetcher, budget
       })).checked;
     }
-    const report = await (options.advance ?? advancePipeline)({ database, dataDir, settings, retryStopped: options.retryStopped });
+    const deferredLine = discoveryTimeBudgetLine(budget);
+    if (deferredLine) log(deferredLine);
+    const report = await (options.advance ?? advancePipeline)({ database, dataDir, settings, retryStopped: options.retryStopped, analyzeLeftovers: false });
     const name = (jobId: string) => describe(database, jobId);
     log(`Analyzed ${report.analyzed.length} left over; prepared ${report.prepared.length}; browser runs started ${report.started.length}; ` +
       `submitted ${report.submitted.length}; held for you ${report.held.length}; ruled out ${report.skipped.length}; stopped ${report.stopped.length}.`);
