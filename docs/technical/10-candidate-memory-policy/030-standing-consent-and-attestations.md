@@ -12,3 +12,4 @@ Each decision records basis `standing_consent` (setting, group, the label as rea
 The legal name stays in local SQLite (events and run decisions) and is never written to console output, errors, reports, or notices.
 These decisions do not block the auto-submit policy (the candidate's opt-in, 2026-11-20: `autoSubmitBlockers` does not count them); its approval event adds "consent and attestation statements were accepted under your standing settings".
 With either setting on, a marketing opt-in asked as a Yes/No list or radio set takes its one "No" (declined, even when the label was clipped); a statement about the application itself ("text messages about your application status") is not declined; texts follow the text-message rule below.
+A modal dialog over the form is agreed to only under the same classifier and settings (Track 40, `09-resumes-and-browser-sessions/137-standing-consent-dialogs.md`).

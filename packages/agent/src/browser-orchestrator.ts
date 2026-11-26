@@ -135,7 +135,7 @@ import { postingLocationNames, postingQuestionContext, savedSelfIdentification }
 import { saveCoveringDialogEvidenceQuietly, saveIcimsEvidenceQuietly, savePostSubmitEvidenceQuietly, saveWorkdayEvidenceQuietly } from "./submit-evidence";
 import { ensureIcimsAccount, type IcimsAccountRuntime } from "./icims-account-service";
 import { getIcimsAccount } from "./icims-account-store";
-import { acceptJobviteConsentStep, logStandingAcceptances, standingPlannerInputs } from "./standing-consent";
+import { acceptJobviteConsentStep, logStandingAcceptances, logStandingDialogAcceptance, logStandingDialogLeft, standingPlannerInputs } from "./standing-consent";
 import {
   answerForPause,
   answeredPauseDecision,
@@ -307,10 +307,25 @@ function pauseUnfilled(
 /**
  * applyDecisions' options for a run: the first field a modal dialog over the
  * form leaves unfilled saves one capture of it for the run (Track 39), while
- * the dialog is still up; nothing in it is clicked.
+ * the dialog is still up. A dialog the candidate's standing settings accept is
+ * agreed to with its one agree button and logged with its exact text; a
+ * covering dialog left to the candidate is logged with the reason (Track 40).
  */
-function coveringDialogCapture(database: DatabaseSync, dataDir: string, run: { id: string; jobId: string }, page: BrowserPage): ApplyDecisionsOptions {
-  return { onCoveringDialog: (evidence) => saveCoveringDialogEvidenceQuietly({ database, dataDir, run, page, evidence }) };
+function coveringDialogCapture(
+  database: DatabaseSync,
+  dataDir: string,
+  run: { id: string; jobId: string },
+  page: BrowserPage,
+  standing: StandingConsentSettings
+): ApplyDecisionsOptions {
+  return {
+    onCoveringDialog: (evidence) => saveCoveringDialogEvidenceQuietly({ database, dataDir, run, page, evidence }),
+    standingDialogs: {
+      settings: standing,
+      onAccepted: (acceptance) => logStandingDialogAcceptance(database, run.jobId, acceptance),
+      onLeft: (left) => logStandingDialogLeft(database, run.jobId, left)
+    }
+  };
 }
 
 /** The uploaded resume a run's decisions send, if any. */
@@ -941,7 +956,7 @@ export async function startBrowserRun(
         : "Browser run started from the approved package.");
     // The run's id is chosen first, so a covering dialog's capture is saved for it while the dialog is still up.
     const runId = randomUUID();
-    const { applied, unfilled } = await applyDecisions(page, form, decisions, uploadPathFor, coveringDialogCapture(database, dataDir, { id: runId, jobId }, page));
+    const { applied, unfilled } = await applyDecisions(page, form, decisions, uploadPathFor, coveringDialogCapture(database, dataDir, { id: runId, jobId }, page, standing));
     const filled = pauseUnfilled(form, decisions, plan.pauses, unfilled, runId);
     // Each statement accepted or signed under the standing settings, with its exact text (unfilled ones are pauses now).
     logStandingAcceptances(database, jobId, filled.decisions);
@@ -1351,7 +1366,7 @@ export async function continueBrowserRun(
       decisions,
       options.renderPdf ?? renderHtmlToPdf
     );
-    const { applied, unfilled } = await applyDecisions(page, form, decisions, uploadPathFor, coveringDialogCapture(database, dataDir, { id: runId, jobId: run.jobId }, page));
+    const { applied, unfilled } = await applyDecisions(page, form, decisions, uploadPathFor, coveringDialogCapture(database, dataDir, { id: runId, jobId: run.jobId }, page, standing));
     const filled = pauseUnfilled(form, decisions, pauses, unfilled, runId);
     const stillOpen = filled.pauses.filter((entry) => entry.status === "open").length;
     // Nothing filled and nothing left to ask: the reopened page is not the run's form, so the run stays paused.
@@ -1597,7 +1612,7 @@ export async function submitBrowserRun(
       run.decisions,
       options.renderPdf ?? renderHtmlToPdf
     );
-    const { unfilled } = await applyDecisions(page, form, run.decisions, uploadPathFor, coveringDialogCapture(database, dataDir, { id: runId, jobId: run.jobId }, page));
+    const { unfilled } = await applyDecisions(page, form, run.decisions, uploadPathFor, coveringDialogCapture(database, dataDir, { id: runId, jobId: run.jobId }, page, standing));
     if (unfilled.length > 0) {
       // Nothing is clicked: the approval covered a form that is no longer filled as shown.
       const filled = pauseUnfilled(form, run.decisions, run.pauses, unfilled, runId);

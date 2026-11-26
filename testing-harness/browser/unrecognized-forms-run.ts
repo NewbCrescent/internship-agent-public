@@ -43,6 +43,18 @@
  *     unknown site, never Workday; with the banner shown, dismissed (hidden, box kept), or absent, no
  *     submit control is found, so the banner's typeless Accept and the step's explicit-submit "Next" are
  *     never clicked as submit; the walk denies the banner, and the page is held as not at its last step.
+ * Track 40 (2026-11-25), the Eightfold form with a consent dialog once a resume
+ * is chosen (`?blocked=privacy|marketing|attest|clipped`):
+ * (j) a privacy notice and system-use dialog (derived from a live run's
+ *     capture) is agreed to with its one "I Agree" button right after the
+ *     upload, under both standing settings, before any list is chosen, and
+ *     handed over with its exact statement and full text (its closed sections
+ *     included); on a covered list it is agreed to and the list chosen on the
+ *     second try. With the settings off, with only data consent on, and for a
+ *     marketing, a citizenship, a clipped, or the session dialog, nothing in
+ *     it is clicked, the list is left with "a dialog covers the form", the
+ *     Track 39 capture is taken, and (settings on) the reason it was left is
+ *     handed over once.
  *
  * Usage: pnpm test:browser:unrecognized-forms
  */
@@ -67,7 +79,9 @@ import {
   recognizeCurrentForm,
   submitTargetHoldReason,
   type FieldResolution,
-  type PostSubmitEvidence
+  type PostSubmitEvidence,
+  type StandingDialogAcceptance,
+  type StandingDialogLeaveReason
 } from "@internship-agent/browser";
 
 const PREFIX = "internship-agent-unrecognized-forms-";
@@ -101,7 +115,7 @@ const EXPECTED: Record<string, string> = {
   "input-27": "Job Board"
 };
 
-type FixtureState = { chosen: Record<string, string>; opened: number; dialogClicks?: number };
+type FixtureState = { chosen: Record<string, string>; opened: number; dialogClicks?: number; agreed?: number; chosenAtAgree?: number };
 
 async function main(): Promise<void> {
   const temp = mkdtempSync(join(tmpdir(), PREFIX));
@@ -454,6 +468,87 @@ async function main(): Promise<void> {
       check(!(await stepsState(bare)).next, "(i) the step's Next was clicked as submit with no banner");
       await bare.close();
     }
+
+    // (j) Track 40: a consent dialog the resume upload opens, under the standing settings.
+    {
+      const BOTH = { acceptDataConsent: true, signAttestations: true };
+      const AGREE = "By clicking I Agree, you acknowledge that you have read and understand this notice and the Job Applicant Privacy Notice and consent to the collection and processing of your personal information as described above and in our Job Applicant Privacy Notice.";
+      const choose19 = { fieldId: "input-19", action: "choose" as const, value: "Yes", basis: null, reason: "fixture", pause: null };
+      const choose22 = { fieldId: "input-22", action: "choose" as const, value: "No", basis: null, reason: "fixture", pause: null };
+      const consentRun = async (
+        mode: string,
+        settings: { acceptDataConsent: boolean; signAttestations: boolean },
+        decisions: Parameters<typeof applyDecisions>[2],
+        uploadInDecisions: boolean
+      ) => {
+        const tab = await open(`${EIGHTFOLD_URL}&welcome=0&blocked=${mode}`);
+        const page = createPlaywrightPage(tab);
+        const form = await recognizeCurrentForm(page);
+        if (!uploadInDecisions) await tab.locator("#Resume_CV_resume").setInputFiles(resumePath);
+        const captures: PostSubmitEvidence[] = [];
+        const accepted: StandingDialogAcceptance[] = [];
+        const left: Array<{ label: string; reason: StandingDialogLeaveReason }> = [];
+        const applied = await applyDecisions(page, form, decisions, (decision) => decision.action === "upload" ? resumePath : null, {
+          onCoveringDialog: async (evidence) => { captures.push(evidence); },
+          standingDialogs: { settings, onAccepted: (acceptance) => { accepted.push(acceptance); }, onLeft: (entry) => { left.push(entry); } }
+        });
+        const state = await fixtureState(tab);
+        const shown = await shownValues(tab, ["input-19", "input-22"]);
+        const dialogShown = await tab.locator(".consent, .expired").isVisible();
+        await tab.close();
+        return { applied, captures, accepted, left, state, shown, dialogShown };
+      };
+
+      // j1: agreed right after the upload, before any list is chosen.
+      {
+        const upload = { fieldId: "Resume_CV_resume", action: "upload" as const, value: null, basis: null, reason: "fixture", pause: null };
+        const run = await consentRun("privacy", BOTH, [upload, choose19, choose22], true);
+        check(run.applied.unfilled.length === 0, `(j1) unfilled: ${JSON.stringify(run.applied.unfilled)}`);
+        const acceptance = run.accepted.length === 1 ? run.accepted[0]! : null;
+        check(acceptance !== null && acceptance.button === "I Agree" && acceptance.setting === "both" && acceptance.outcome === "accepted"
+          && JSON.stringify(acceptance.statements) === JSON.stringify([AGREE])
+          && acceptance.text.includes("System Use Acknowledgment") && acceptance.text.includes("Fixture Aero reads your resume/CV")
+          && acceptance.label === "Privacy Notice and Security Agreement",
+          `(j1) acceptances: ${JSON.stringify(run.accepted)}`);
+        check(run.state.agreed === 1 && run.state.dialogClicks === 1 && run.state.chosenAtAgree === 0,
+          `(j1) fixture: agreed ${run.state.agreed}, clicks ${run.state.dialogClicks}, lists chosen before agreeing ${run.state.chosenAtAgree}`);
+        check(run.state.chosen["input-19"] === "Yes" && run.state.chosen["input-22"] === "No" && run.shown["input-19"] === "Yes" && run.shown["input-22"] === "No",
+          `(j1) lists: ${JSON.stringify({ chosen: run.state.chosen, shown: run.shown })}`);
+        check(!run.dialogShown, "(j1) the privacy dialog was still shown");
+        check(run.captures.length === 0 && run.left.length === 0, `(j1) captures ${run.captures.length}, left ${JSON.stringify(run.left)}`);
+      }
+
+      // j2: agreed when it leaves a list unfilled; the list is chosen on the second try.
+      {
+        const run = await consentRun("privacy", BOTH, [choose19, choose22], false);
+        check(run.applied.unfilled.length === 0, `(j2) unfilled: ${JSON.stringify(run.applied.unfilled)}`);
+        check(run.accepted.length === 1 && run.state.agreed === 1 && run.state.dialogClicks === 1,
+          `(j2) acceptances ${run.accepted.length}, agreed ${run.state.agreed}, clicks ${run.state.dialogClicks}`);
+        check(run.state.chosen["input-19"] === "Yes" && run.state.chosen["input-22"] === "No", `(j2) lists chosen: ${JSON.stringify(run.state.chosen)}`);
+        check(run.captures.length === 0, `(j2) captures: ${run.captures.length}`);
+      }
+
+      // j3–i8: left to the candidate; nothing in the dialog is clicked.
+      const leftCases: Array<{ name: string; mode: string; settings: { acceptDataConsent: boolean; signAttestations: boolean }; reason: StandingDialogLeaveReason | null }> = [
+        { name: "j3 settings off", mode: "privacy", settings: { acceptDataConsent: false, signAttestations: false }, reason: null },
+        { name: "j4 marketing", mode: "marketing", settings: BOTH, reason: "marketing" },
+        { name: "j5 citizenship attestation", mode: "attest", settings: BOTH, reason: "fact" },
+        { name: "j6 clipped", mode: "clipped", settings: BOTH, reason: "clipped" },
+        { name: "j7 session dialog", mode: "dialog", settings: BOTH, reason: "safeguard" },
+        { name: "j8 data consent only", mode: "privacy", settings: { acceptDataConsent: true, signAttestations: false }, reason: "needs-setting" }
+      ];
+      for (const entry of leftCases) {
+        const run = await consentRun(entry.mode, entry.settings, [choose19], false);
+        check(run.applied.unfilled.length === 1 && run.applied.unfilled[0]!.fieldId === "input-19" && run.applied.unfilled[0]!.reason === COVERING_DIALOG_REASON,
+          `(${entry.name}) unfilled: ${JSON.stringify(run.applied.unfilled)}`);
+        check(run.state.dialogClicks === 0, `(${entry.name}) the dialog's buttons were clicked ${run.state.dialogClicks} time(s)`);
+        check(run.dialogShown, `(${entry.name}) the dialog was closed`);
+        check(run.accepted.length === 0, `(${entry.name}) acceptances: ${JSON.stringify(run.accepted)}`);
+        check(run.captures.length === 1, `(${entry.name}) covering-dialog captures: ${run.captures.length}, expected 1`);
+        const expectedLeft = entry.reason === null ? [] : [entry.reason];
+        check(JSON.stringify(run.left.map((item) => item.reason)) === JSON.stringify(expectedLeft), `(${entry.name}) left: ${JSON.stringify(run.left)}`);
+      }
+    }
     await context.close();
   } finally {
     await browser.close();
@@ -463,7 +558,7 @@ async function main(): Promise<void> {
     console.error(`UNRECOGNIZED_FORMS_REPORT {"status":"failed","failures":${JSON.stringify(failures)}}`);
     process.exit(1);
   }
-  console.log(`UNRECOGNIZED_FORMS_REPORT {"status":"passed","scenarios":9}`);
+  console.log(`UNRECOGNIZED_FORMS_REPORT {"status":"passed","scenarios":10}`);
 }
 
 main().catch((error) => {

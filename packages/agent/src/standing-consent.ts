@@ -1,14 +1,24 @@
 import type { DatabaseSync } from "node:sqlite";
 
 import { getJobPosting, logApplicationEvent } from "@internship-agent/db";
-import { chooseResidenceOption, type BrowserPage, type JobviteConsentOutcome, type StandingInputs } from "@internship-agent/browser";
+import {
+  chooseResidenceOption,
+  STANDING_DIALOG_LEAVE_TEXT,
+  type BrowserPage,
+  type JobviteConsentOutcome,
+  type StandingDialogAcceptance,
+  type StandingDialogLeaveReason,
+  type StandingInputs
+} from "@internship-agent/browser";
 import type { FillDecision, StandingConsentSettings } from "@internship-agent/domain";
 
 /**
  * The orchestrator's side of the candidate's standing consent and
  * attestation settings (packages/domain standing-consent.ts): the planner
  * inputs for a run, the timeline entries for every statement accepted or
- * signed, and Jobvite's Data Consent step. The legal name a signature types
+ * signed, and Jobvite's Data Consent step. A modal dialog over the form
+ * agreed to under the same settings, or left to the candidate, is logged here
+ * too (Track 40). The legal name a signature types
  * appears only in local SQLite rows (events and run decisions), never in
  * console output, errors, reports, or notices.
  */
@@ -66,6 +76,26 @@ export function logStandingAcceptances(database: DatabaseSync, jobId: string, de
     const status = getJobPosting(database, jobId)?.status ?? "APPLYING";
     logApplicationEvent(database, { jobId, fromStatus: status, toStatus: status, detail: text.slice(0, 1_000) });
   }
+}
+
+/** The timeline text for a click on a dialog's agree button under the standing settings (Track 40). */
+export function standingDialogEventText(acceptance: StandingDialogAcceptance): string {
+  const where = acceptance.label ? `the dialog "${acceptance.label}"` : "a dialog";
+  const stayed = acceptance.outcome === "still-shown" ? " The dialog was still shown after the click." : "";
+  return `${SETTING_WORDS[acceptance.setting]}: '${acceptance.statements.join(" ")}' — clicked "${acceptance.button}" on ${where} over the form. Dialog text: '${acceptance.text}'.${stayed}`;
+}
+
+/** One timeline event (status unchanged) for a dialog agreed to under the standing settings, with its exact text (Track 40). */
+export function logStandingDialogAcceptance(database: DatabaseSync, jobId: string, acceptance: StandingDialogAcceptance): void {
+  const status = getJobPosting(database, jobId)?.status ?? "APPLYING";
+  logApplicationEvent(database, { jobId, fromStatus: status, toStatus: status, detail: standingDialogEventText(acceptance) });
+}
+
+/** One timeline event (status unchanged) for a covering dialog left to the candidate, and why (Track 40). */
+export function logStandingDialogLeft(database: DatabaseSync, jobId: string, left: { label: string; reason: StandingDialogLeaveReason }): void {
+  const status = getJobPosting(database, jobId)?.status ?? "APPLYING";
+  const where = left.label ? `the dialog "${left.label}"` : "a dialog";
+  logApplicationEvent(database, { jobId, fromStatus: status, toStatus: status, detail: `Left ${where} over the form for you: ${STANDING_DIALOG_LEAVE_TEXT[left.reason]}.` });
 }
 
 function hostOf(url: string): string {

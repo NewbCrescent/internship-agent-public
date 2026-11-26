@@ -4,14 +4,22 @@ import type { BrowserField, RecognizedForm } from "@internship-agent/domain";
 import {
   applicationWallKind,
   applicationWallReason,
+  applyDecisions,
   chooseResidenceOption,
   CONSENT_QUESTION,
+  COVERING_DIALOG_REASON,
+  FieldUnfillable,
   icimsHostOf,
   MARKETING_QUESTION,
   planAutofill,
   SIGNATURE_QUESTION,
+  standingDialogDecision,
+  STANDING_DIALOG_TEXT_LIMIT,
   TEXT_MESSAGE_QUESTION,
+  type BrowserPage,
   type FieldResolution,
+  type StandingDialogAcceptance,
+  type StandingDialogCandidate,
   type StandingInputs
 } from "@internship-agent/browser";
 
@@ -264,5 +272,171 @@ describe("\"Have you read the privacy policy?\" lists in the planner (littelfuse
       basis: { kind: "standing_consent", setting: "accept_data_consent", group: "privacy-policy", statement: `${label} — ${consenting}` }
     });
     for (const standing of [undefined, ALL_OFF, ATTEST_ON]) expect(decisionOf(form(privacy), "privacy", standing).action).toBe("pause");
+  });
+});
+
+describe("standing consent dialogs over the form (Track 40)", () => {
+  // Fictional: the fixture's privacy dialog, its lines as readStandingDialogsIn reads them (the closed sections' bodies included).
+  const AGREE_SENTENCE = "By clicking I Agree, you acknowledge that you have read and understand this notice and the Job Applicant Privacy Notice and consent to the collection and processing of your personal information as described above and in our Job Applicant Privacy Notice.";
+  const PRIVACY_LINES = [
+    "Privacy Notice and Security Agreement",
+    "System Use Acknowledgment: Use of this system is subject to monitoring for security purposes. Unauthorized use is prohibited and may result in denial of access or legal action.",
+    "How we use your resume/CV:",
+    "Fixture Aero reads your resume/CV to consider you for the position you applied for.",
+    "Your rights:",
+    "You may ask Fixture Aero to see, correct, or delete your personal information.",
+    "For full details, please review:",
+    "Fixture Aero Job Applicant Privacy Notice",
+    AGREE_SENTENCE
+  ];
+  const AGREE_BUTTONS: StandingDialogCandidate["buttons"] = [
+    { tag: "0-0", text: "×", ariaLabel: "Close", title: "", disabled: false },
+    { tag: "0-1", text: "Cancel", ariaLabel: "", title: "", disabled: false },
+    { tag: "0-2", text: "I Agree", ariaLabel: "", title: "", disabled: false }
+  ];
+  const dialog = (overrides: Partial<StandingDialogCandidate> = {}): StandingDialogCandidate => ({
+    index: 0,
+    label: "Privacy Notice and Security Agreement",
+    text: PRIVACY_LINES.join("\n"),
+    overLimit: false,
+    formControls: 0,
+    frames: 0,
+    expanders: 0,
+    buttons: AGREE_BUTTONS,
+    ...overrides
+  });
+  const privacyDialog = dialog();
+  const BOTH = { acceptDataConsent: true, signAttestations: true };
+  const DATA_ONLY = { acceptDataConsent: true, signAttestations: false };
+  const ATTEST_ONLY = { acceptDataConsent: false, signAttestations: true };
+  const OFF = { acceptDataConsent: false, signAttestations: false };
+  const leave = (candidate: StandingDialogCandidate, settings = BOTH) => {
+    const choice = standingDialogDecision([candidate], settings);
+    return choice.verdict === "leave" ? choice.reason : choice.verdict;
+  };
+  const button = (tag: string, text: string, disabled = false) => ({ tag, text, ariaLabel: "", title: "", disabled });
+
+  it("agrees to a privacy notice and system-use dialog under both settings, with its one statement", () => {
+    expect(standingDialogDecision([privacyDialog], BOTH)).toEqual({
+      verdict: "accept",
+      tag: "0-2",
+      button: "I Agree",
+      label: "Privacy Notice and Security Agreement",
+      text: PRIVACY_LINES.join(" "),
+      statements: [AGREE_SENTENCE],
+      setting: "both",
+      groups: ["data-processing", "privacy-policy", "acknowledgment"]
+    });
+  });
+
+  it("leaves it when a setting it needs is off", () => {
+    expect(leave(privacyDialog, DATA_ONLY)).toBe("needs-setting");
+    expect(leave(privacyDialog, ATTEST_ONLY)).toBe("needs-setting");
+    expect(leave(privacyDialog, OFF)).toBe("settings-off");
+  });
+
+  it("never agrees to marketing, a fact about the candidate, texts, cookies, or a sign-in or session dialog", () => {
+    expect(leave(dialog({ label: "Stay in touch", text: "Stay in touch\nBy clicking I Agree, you agree to receive the Fixture Aero newsletter and marketing emails about future opportunities." }))).toBe("marketing");
+    expect(leave(dialog({ label: "Citizenship Certification", text: "Citizenship Certification\nBy clicking I Agree, I certify that I am a U.S. citizen." }))).toBe("fact");
+    // "Text messages" and "SMS" are marketing words already; texts named another way are the text-message rule's.
+    expect(leave(dialog({ label: "Text updates", text: "Text updates\nBy clicking I Agree, you agree that Fixture Aero may text you about your application status." }))).toBe("text-messages");
+    expect(leave(dialog({ label: "Your privacy choices", text: "Your privacy choices\nWe use cookies to improve your experience. By clicking I Agree, you consent to the processing of your personal information." }))).toBe("cookies");
+    expect(leave(dialog({ label: "Your session has expired", text: "Your session has expired\nReload the page to continue." }))).toBe("safeguard");
+    expect(leave(dialog({ label: "Sign in", text: "Sign in\nBy clicking I Agree, you consent to the processing of your personal information." }))).toBe("safeguard");
+  });
+
+  it("leaves clipped or hidden text to the candidate", () => {
+    expect(leave(dialog({ text: "Privacy Notice\nBy clicking I Agree, you consent to the collection and processing of your personal information as described in our Applicant Privacy Notice and…" }))).toBe("clipped");
+    expect(leave(dialog({ expanders: 1 }))).toBe("clipped");
+    expect(leave(dialog({ overLimit: true, text: "x".repeat(STANDING_DIALOG_TEXT_LIMIT) }))).toBe("clipped");
+    // The Lockheed dialog's visible-only lines: its section headings with nothing under them.
+    const visibleOnly = PRIVACY_LINES.filter((line) => !line.startsWith("Fixture Aero reads") && !line.startsWith("You may ask"));
+    expect(leave(dialog({ text: visibleOnly.join("\n") }))).toBe("clipped");
+  });
+
+  it("needs exactly one enabled agree button beside cancel or close", () => {
+    expect(leave(dialog({ buttons: [button("0-0", "Accept all"), button("0-1", "Manage preferences")] }))).toBe("buttons");
+    expect(leave(dialog({ buttons: [button("0-0", "Cancel"), button("0-1", "I Agree"), button("0-2", "I Agree")] }))).toBe("buttons");
+    expect(leave(dialog({ buttons: [button("0-0", "Cancel"), button("0-1", "I Agree", true)] }))).toBe("buttons");
+    expect(leave(dialog({ buttons: [button("0-0", "Close"), button("0-1", "Cancel")] }))).toBe("buttons");
+  });
+
+  it("leaves several dialogs, a field or frame inside, no operative sentence, and an uncovered statement", () => {
+    expect(standingDialogDecision([privacyDialog, dialog({ index: 1 })], BOTH)).toEqual({ verdict: "leave", reason: "several-dialogs" });
+    expect(standingDialogDecision([], BOTH)).toEqual({ verdict: "leave", reason: "no-dialog" });
+    expect(leave(dialog({ formControls: 1 }))).toBe("form-field");
+    expect(leave(dialog({ frames: 1 }))).toBe("frame");
+    expect(leave(dialog({ text: "Welcome\nOur new careers site makes it easier to apply." }))).toBe("no-statement");
+    expect(leave(dialog({ text: "Relocation\nBy clicking I Agree, you agree to relocate at your own expense." }))).toBe("not-covered");
+  });
+
+  it("does not count a closed section's rights sentence as something the button agrees to", () => {
+    const choice = standingDialogDecision([privacyDialog], BOTH);
+    expect(choice.verdict === "accept" ? choice.statements : []).not.toContain("You may ask Fixture Aero to see, correct, or delete your personal information.");
+  });
+
+  describe("in applyDecisions", () => {
+    const field = (id: string, label: string, kind: BrowserField["kind"] = "select"): BrowserField => ({ id, label, kind, required: true });
+    const shape = form(field("resume", "Upload your resume/CV", "file"), field("pronoun", "Preferred Pronoun"));
+    const choose = { fieldId: "pronoun", action: "choose" as const, value: "She/Her/Hers", basis: null, reason: "Fixture." };
+    const upload = { fieldId: "resume", action: "upload" as const, value: null, basis: null, reason: "Fixture." };
+    /** A page a privacy dialog covers until its agree button is clicked; every call is recorded in order. */
+    const coveredPage = (calls: string[]): BrowserPage => {
+      let covered = true;
+      return {
+        url: () => "https://careers.fixtureaero.example/apply/2002",
+        title: async () => "Apply",
+        collectControls: async () => [],
+        bodyText: async () => "",
+        fillField: async () => undefined,
+        chooseOption: async (target) => {
+          calls.push(`choose:${target.id}`);
+          if (covered) throw new FieldUnfillable(COVERING_DIALOG_REASON);
+        },
+        setChecked: async () => undefined,
+        uploadFile: async (target) => { calls.push(`upload:${target.id}`); },
+        clickSubmit: async () => { throw new Error("never clicked"); },
+        screenshot: async () => undefined,
+        close: async () => undefined,
+        standingDialogs: async () => (covered ? [privacyDialog] : []),
+        clickDialogButton: async (tag, name) => {
+          calls.push(`click:${tag}:${name}`);
+          covered = false;
+          return "hidden";
+        }
+      };
+    };
+
+    it("agrees on a covered field, logs it once, and fills the field on the second try", async () => {
+      const calls: string[] = [];
+      const accepted: StandingDialogAcceptance[] = [];
+      const result = await applyDecisions(coveredPage(calls), shape, [choose], undefined, { standingDialogs: { settings: BOTH, onAccepted: (acceptance) => { accepted.push(acceptance); } } });
+      expect(result.unfilled).toEqual([]);
+      expect(result.applied).toBe(1);
+      expect(calls).toEqual(["choose:pronoun", "click:0-2:I Agree", "choose:pronoun"]);
+      expect(accepted).toEqual([expect.objectContaining({ button: "I Agree", setting: "both", outcome: "accepted", statements: [AGREE_SENTENCE] })]);
+    });
+
+    it("never clicks with the settings off: the field stays unfilled with the covering reason", async () => {
+      const calls: string[] = [];
+      const left: unknown[] = [];
+      const result = await applyDecisions(coveredPage(calls), shape, [choose], undefined, {
+        standingDialogs: { settings: OFF, onAccepted: () => { throw new Error("never accepted"); }, onLeft: (entry) => { left.push(entry); } }
+      });
+      expect(result.unfilled).toEqual([{ fieldId: "pronoun", reason: COVERING_DIALOG_REASON }]);
+      expect(calls).toEqual(["choose:pronoun"]);
+      expect(left).toEqual([]);
+    });
+
+    it("agrees right after an upload, before the next field", async () => {
+      const calls: string[] = [];
+      const accepted: StandingDialogAcceptance[] = [];
+      const result = await applyDecisions(coveredPage(calls), shape, [upload, choose], () => "/tmp/fixture-resume.pdf", {
+        standingDialogs: { settings: BOTH, onAccepted: (acceptance) => { accepted.push(acceptance); } }
+      });
+      expect(result.unfilled).toEqual([]);
+      expect(calls).toEqual(["upload:resume", "click:0-2:I Agree", "choose:pronoun"]);
+      expect(accepted).toHaveLength(1);
+    });
   });
 });

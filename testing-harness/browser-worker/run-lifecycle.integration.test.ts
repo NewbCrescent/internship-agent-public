@@ -42,6 +42,7 @@ import {
   type BrowserPage,
   type CoveringDialog,
   type InvalidField,
+  type StandingDialogCandidate,
   type WorkdayAccountOutcome,
   type WorkdayCredentials,
   type WorkdayPageError
@@ -77,6 +78,7 @@ import {
   prepareApplication,
   printResumeVariant,
   runEvidenceCommand,
+  standingDialogEventText,
   startBrowserRun,
   storeBaseResume,
   storeCandidateDocument,
@@ -507,6 +509,126 @@ describe("browser run lifecycle", () => {
     expect(reads).toBe(0);
     expect(existsSync(submitEvidenceRoot(dataDir, jobId))).toBe(false);
     database.close();
+  });
+
+  describe("a consent dialog over the form under the standing settings (Track 40)", () => {
+    // Fictional: a privacy notice and system-use dialog, as readStandingDialogsIn reads it.
+    const AGREE = "By clicking I Agree, you acknowledge that you have read and understand this notice and the Job Applicant Privacy Notice and consent to the collection and processing of your personal information as described above and in our Job Applicant Privacy Notice.";
+    const PRIVACY_TEXT = [
+      "Privacy Notice and Security Agreement",
+      "System Use Acknowledgment: Use of this system is subject to monitoring for security purposes.",
+      "How we use your resume/CV:",
+      "Fixture Aero reads your resume/CV to consider you for the position you applied for.",
+      AGREE
+    ];
+    const privacy: StandingDialogCandidate = {
+      index: 0, label: "Privacy Notice and Security Agreement", text: PRIVACY_TEXT.join("\n"), overLimit: false, formControls: 0, frames: 0, expanders: 0,
+      buttons: [
+        { tag: "0-0", text: "×", ariaLabel: "Close", title: "", disabled: false },
+        { tag: "0-1", text: "Cancel", ariaLabel: "", title: "", disabled: false },
+        { tag: "0-2", text: "I Agree", ariaLabel: "", title: "", disabled: false }
+      ]
+    };
+    const marketing: StandingDialogCandidate = {
+      ...privacy, label: "Stay in touch",
+      text: "Stay in touch\nBy clicking I Agree, you agree to receive the Fixture Aero newsletter and marketing emails about future opportunities.",
+      buttons: [{ tag: "0-0", text: "Cancel", ariaLabel: "", title: "", disabled: false }, { tag: "0-1", text: "I Agree", ariaLabel: "", title: "", disabled: false }]
+    };
+    const BOTH = { acceptDataConsent: true, signAttestations: true };
+    const OFF = { acceptDataConsent: false, signAttestations: false };
+    const EXPECTED_EVENT = `Accepted data consent and attestation: '${AGREE}' — clicked "I Agree" on the dialog "Privacy Notice and Security Agreement" over the form. Dialog text: '${PRIVACY_TEXT.join(" ")}'.`;
+    /** A page a dialog covers until its agree button is clicked; the clicks are counted. */
+    const coveredBy = (candidate: StandingDialogCandidate, clicks: Array<[string, string]>, submitted?: { clicked: boolean }): BrowserPage => {
+      let covered = true;
+      return {
+        ...fakePage({ submitted }),
+        fillField: async () => { if (covered) throw new FieldUnfillable(COVERING_DIALOG_REASON); },
+        standingDialogs: async () => (covered ? [candidate] : []),
+        clickDialogButton: async (tag: string, name: string) => {
+          clicks.push([tag, name]);
+          covered = false;
+          return "hidden" as const;
+        },
+        screenshot: async (path: string) => { writeFileSync(path, "fictional png"); }
+      };
+    };
+    const events = (database: DatabaseSync, jobId: string) => (database.prepare("SELECT detail FROM application_events WHERE job_id = ? ORDER BY rowid").all(jobId) as Array<{ detail: string }>).map((row) => row.detail);
+    const accepted = (database: DatabaseSync, jobId: string) => events(database, jobId).filter((detail) => detail.startsWith("Accepted data consent and attestation:"));
+
+    it("agrees to it at the start, logs the exact text once, and pauses nothing", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDataDir();
+      const jobId = approvedJobId(database);
+      const clicks: Array<[string, string]> = [];
+      const started = await startBrowserRun(jobId, "https://app.joinhandshake.com/apply/900001", { database, dataDir, standingConsent: BOTH, openPage: async () => coveredBy(privacy, clicks) });
+      expect(started.run.status).toBe("awaiting-approval");
+      expect(started.run.pauses).toEqual([]);
+      expect(clicks).toEqual([["0-2", "I Agree"]]);
+      expect(accepted(database, jobId)).toEqual([EXPECTED_EVENT]);
+      expect(EXPECTED_EVENT).toBe(standingDialogEventText({
+        label: privacy.label, text: PRIVACY_TEXT.join(" "), statements: [AGREE], button: "I Agree", setting: "both",
+        groups: ["data-processing", "privacy-policy", "acknowledgment"], outcome: "accepted"
+      }));
+      expect(existsSync(submitEvidenceRoot(dataDir, jobId))).toBe(false);
+      expect(events(database, jobId).some((detail) => detail.startsWith("Covering dialog evidence"))).toBe(false);
+      database.close();
+    });
+
+    it("leaves it with the settings off (pauses and one capture, as Track 39), then agrees on continue once they are on", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDataDir();
+      const jobId = approvedJobId(database);
+      const clicks: Array<[string, string]> = [];
+      const started = await startBrowserRun(jobId, "https://app.joinhandshake.com/apply/900001", { database, dataDir, standingConsent: OFF, openPage: async () => coveredBy(privacy, clicks) });
+      expect(started.run.status).toBe("paused-needs-input");
+      expect(started.run.pauses).toEqual([expect.objectContaining({ fieldId: "q1", status: "open" })]);
+      expect(started.run.pauses[0]!.question).toContain("a dialog covers the form");
+      expect(clicks).toEqual([]);
+      expect(readdirSync(submitEvidenceRoot(dataDir, jobId))).toHaveLength(1);
+      expect(accepted(database, jobId)).toEqual([]);
+      expect(events(database, jobId).some((detail) => detail.startsWith("Left "))).toBe(false);
+
+      const continued = await continueBrowserRun(started.run.id, { database, dataDir, standingConsent: BOTH, openPage: async () => coveredBy(privacy, clicks) });
+      expect(clicks).toEqual([["0-2", "I Agree"]]);
+      expect(accepted(database, jobId)).toEqual([EXPECTED_EVENT]);
+      expect(continued.run.status).toBe("awaiting-approval");
+      expect(continued.run.decisions.find((decision) => decision.fieldId === "q1")?.action).toBe("fill");
+      database.close();
+    });
+
+    it("never agrees to a marketing dialog: logs why it was left, captures it, and pauses as today", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDataDir();
+      const jobId = approvedJobId(database);
+      const clicks: Array<[string, string]> = [];
+      const started = await startBrowserRun(jobId, "https://app.joinhandshake.com/apply/900001", { database, dataDir, standingConsent: BOTH, openPage: async () => coveredBy(marketing, clicks) });
+      expect(started.run.status).toBe("paused-needs-input");
+      expect(started.run.pauses).toEqual([expect.objectContaining({ fieldId: "q1", status: "open" })]);
+      expect(clicks).toEqual([]);
+      expect(accepted(database, jobId)).toEqual([]);
+      expect(events(database, jobId).filter((detail) => detail.startsWith("Left "))).toEqual([
+        "Left the dialog \"Stay in touch\" over the form for you: it includes a marketing, newsletter, or job-alert opt-in."
+      ]);
+      expect(readdirSync(submitEvidenceRoot(dataDir, jobId))).toHaveLength(1);
+      database.close();
+    });
+
+    it("agrees to it when the approved answers are applied again before the submit click, and submits", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDataDir();
+      const jobId = approvedJobId(database);
+      const started = await startBrowserRun(jobId, "https://app.joinhandshake.com/apply/900001", { database, dataDir, standingConsent: BOTH, openPage: async () => fakePage() });
+      expect(started.run.status).toBe("awaiting-approval");
+      approveRunSubmission(started.run.id, undefined, { database });
+      const clicks: Array<[string, string]> = [];
+      const flag = { clicked: false };
+      const submitted = await submitBrowserRun(started.run.id, { database, dataDir, standingConsent: BOTH, openPage: async () => coveredBy(privacy, clicks, flag) });
+      expect(clicks).toEqual([["0-2", "I Agree"]]);
+      expect(flag.clicked).toBe(true);
+      expect(submitted.status).toBe("submitted");
+      expect(accepted(database, jobId)).toEqual([EXPECTED_EVENT]);
+      database.close();
+    });
   });
 
   it("holds a run whose field will not fill right before the submit click: nothing is clicked and the approval is withdrawn", async () => {

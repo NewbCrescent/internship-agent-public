@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright-core";
 
-import { promptSearchTerms, type AtsKind, type BrowserField, type FillDecision, type PauseRecord, type RecognizedForm } from "@internship-agent/domain";
+import { promptSearchTerms, type AtsKind, type BrowserField, type FillDecision, type PauseRecord, type RecognizedForm, type StandingConsentSettings } from "@internship-agent/domain";
 
 import { dismissAnnouncementDialog, readCoveringDialogsIn, visibleModalDialogIn, type CoveringDialog } from "./announcement-dialog";
 import { chooseApplyEntry, clickApplyEntry, dismissCookieBanner, embedSourcesOf, greenhouseEmbedTarget, type ApplyEntryCandidate } from "./apply-entry";
@@ -66,6 +66,14 @@ import {
   type SecurityCodeLookup,
   type SecurityCodeLookupResult
 } from "./submission-outcome";
+import {
+  clickStandingDialogButton,
+  readStandingDialogsIn,
+  standingDialogDecision,
+  type StandingDialogAcceptance,
+  type StandingDialogCandidate,
+  type StandingDialogLeaveReason
+} from "./standing-dialog";
 
 /**
  * The minimal page surface the executor needs. Production passes a Playwright
@@ -114,6 +122,10 @@ export type BrowserPage = {
    * when none (Track 39).
    */
   coveringDialogs?(): Promise<CoveringDialog[]>;
+  /** Visible modal dialogs with their full text and tagged buttons (standing-dialog.ts readStandingDialogsIn); [] when none (Track 40). */
+  standingDialogs?(): Promise<StandingDialogCandidate[]>;
+  /** Clicks a dialog button standingDialogs tagged, after checking its name (Track 40). */
+  clickDialogButton?(tag: string, name: string): Promise<"hidden" | "still-shown" | "failed">;
   /** Visible error or alert text, read after a submit that showed no confirmation. */
   alertText?(): Promise<string>;
   /**
@@ -333,7 +345,24 @@ export type ApplyDecisionsOptions = {
    * still up (Track 39). Awaited; an error it throws is ignored.
    */
   onCoveringDialog?: (evidence: PostSubmitEvidence) => Promise<void>;
+  /**
+   * Track 40: the candidate's standing settings. A modal dialog over the form that
+   * standingDialogDecision accepts is agreed to with its one agree button, right after
+   * an upload (up to 1 s for it to appear) or when it leaves a field unfilled with
+   * COVERING_DIALOG_REASON (the field is then tried once more). onAccepted gets every
+   * click; onLeft gets, once per call, why a covering dialog was left. Errors they throw are ignored.
+   */
+  standingDialogs?: {
+    settings: StandingConsentSettings;
+    onAccepted: (acceptance: StandingDialogAcceptance) => Promise<void> | void;
+    onLeft?: (left: { label: string; reason: StandingDialogLeaveReason }) => Promise<void> | void;
+  };
 };
+
+/** How long applyDecisions looks for a consent dialog after an upload (Track 40). */
+const STANDING_DIALOG_UPLOAD_WAIT_MS = 1_000;
+/** The most agree buttons applyDecisions clicks in one call (Track 40). */
+const MAX_STANDING_DIALOG_CLICKS = 3;
 
 /**
  * Applies the planned decisions. A page action that fails (a timeout, a
@@ -341,7 +370,9 @@ export type ApplyDecisionsOptions = {
  * is reported in `unfilled` instead of stopping the run; callers turn each
  * into a pause. An upload with no resolved file is a broken invariant and
  * still throws. The first field a covering dialog leaves unfilled hands its
- * evidence to `options.onCoveringDialog`.
+ * evidence to `options.onCoveringDialog`. Under `options.standingDialogs`, a
+ * dialog the candidate's standing settings accept is agreed to after an upload
+ * or on a covered field, which is then tried once more (Track 40).
  */
 export async function applyDecisions(
   page: BrowserPage,
@@ -355,12 +386,73 @@ export async function applyDecisions(
   let skipped = 0;
   const unfilled: UnfilledField[] = [];
   let dialogReported = false;
-  const attempt = async (field: BrowserField, action: () => Promise<void>): Promise<void> => {
+  let standingClicks = 0;
+  let leftReported = false;
+  // Track 40: agrees to a covering dialog the standing settings accept; true once it hid after the click.
+  const tryStandingDialog = async (waitMs: number, reportLeft: boolean): Promise<boolean> => {
+    const standing = options.standingDialogs;
+    if (!standing || (!standing.settings.acceptDataConsent && !standing.settings.signAttestations)) return false;
+    if (!page.standingDialogs || !page.clickDialogButton || standingClicks >= MAX_STANDING_DIALOG_CLICKS) return false;
+    try {
+      const deadline = Date.now() + waitMs;
+      let candidates = await page.standingDialogs();
+      while (candidates.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        candidates = await page.standingDialogs();
+      }
+      if (candidates.length === 0) return false;
+      // A CAPTCHA on the page is never clicked through.
+      if (page.visibleChallenge && (await page.visibleChallenge())) return false;
+      const choice = standingDialogDecision(candidates, standing.settings);
+      if (choice.verdict === "leave") {
+        if (reportLeft && standing.onLeft && !leftReported && choice.reason !== "settings-off" && choice.reason !== "no-dialog") {
+          leftReported = true;
+          try {
+            await standing.onLeft({ label: candidates[0]?.label ?? "", reason: choice.reason });
+          } catch {
+            // The timeline entry never changes the fill's outcome.
+          }
+        }
+        return false;
+      }
+      standingClicks += 1;
+      const outcome = await page.clickDialogButton(choice.tag, choice.button).catch(() => "failed" as const);
+      if (outcome === "failed") return false;
+      try {
+        await standing.onAccepted({
+          label: choice.label,
+          text: choice.text,
+          statements: choice.statements,
+          button: choice.button,
+          setting: choice.setting,
+          groups: choice.groups,
+          outcome: outcome === "hidden" ? "accepted" : "still-shown"
+        });
+      } catch {
+        // The timeline entry never changes the fill's outcome.
+      }
+      return outcome === "hidden";
+    } catch {
+      return false;
+    }
+  };
+  const attempt = async (field: BrowserField, action: () => Promise<void>): Promise<boolean> => {
     try {
       await action();
       applied += 1;
+      return true;
     } catch (error) {
-      const reason = unfilledReason(error);
+      let reason = unfilledReason(error);
+      if (reason === COVERING_DIALOG_REASON && (await tryStandingDialog(0, true))) {
+        // The dialog was agreed to: the field is tried once more.
+        try {
+          await action();
+          applied += 1;
+          return true;
+        } catch (retryError) {
+          reason = unfilledReason(retryError);
+        }
+      }
       unfilled.push({ fieldId: field.id, reason });
       if (reason === COVERING_DIALOG_REASON && !dialogReported && options.onCoveringDialog) {
         dialogReported = true;
@@ -370,6 +462,7 @@ export async function applyDecisions(
           // The capture never changes the fill's outcome.
         }
       }
+      return false;
     }
   };
   for (const decision of decisions) {
@@ -397,7 +490,8 @@ export async function applyDecisions(
       case "upload": {
         const path = uploadPathFor?.(decision) ?? null;
         if (!path) throw new Error(`Upload decision for ${field.id} has no resolved file.`);
-        await attempt(field, () => page.uploadFile(field, path));
+        // A consent dialog the upload opens is agreed to before the next field when the standing settings accept it.
+        if (await attempt(field, () => page.uploadFile(field, path))) await tryStandingDialog(STANDING_DIALOG_UPLOAD_WAIT_MS, false);
         break;
       }
       case "keep":
@@ -973,6 +1067,16 @@ export function createPlaywrightPage(page: Page): BrowserPage {
         return [];
       }
     },
+    standingDialogs: async () => {
+      // The top document, like the covering-dialog read.
+      try {
+        await ensureNameShim(page);
+        return await page.evaluate(readStandingDialogsIn);
+      } catch {
+        return [];
+      }
+    },
+    clickDialogButton: (tag, name) => clickStandingDialogButton(page, tag, name),
     alertText: async () => {
       try {
         await ensureNameShim(page);

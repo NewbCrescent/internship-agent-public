@@ -56,6 +56,8 @@ Employer publication metadata is typed in `packages/domain/src/posting-publicati
 
 The candidate-owned graduate-internship exclusion is typed in `packages/domain`, stored per workspace by `packages/db`, edited through the profile action and form, and evaluated in `packages/matching` as an explainable hard preference.
 
+`packages/browser/src/standing-dialog.ts` reads a modal dialog over the form with its full text and decides, with the standing-consent classifier, whether its one agree button may be clicked under the candidate's standing settings (Track 40); `applyDecisions` tries it after an upload and on a covered field, and `packages/agent/src/standing-consent.ts` logs each click and each dialog left.
+
 ## `testing-harness`
 
 Manifest-driven agent verification. Pure tests, temporary-SQLite integration, browser workflows, runner support, and workflow self-tests are separated by tier and feature.
