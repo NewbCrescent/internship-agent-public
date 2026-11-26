@@ -5,6 +5,7 @@ import {
   candidateFactSchema,
   exportControlCategoriesOf,
   exportControlCategory,
+  isStandardAnswerKey,
   matchExportControlOption,
   postingPayAnswer,
   restrictiveCovenantActive,
@@ -216,5 +217,11 @@ describe("standard fact scopes", () => {
     expect(fact("f1_optional_practical_training", { kind: "global" }, false).success).toBe(true);
     expect(fact("salary_expectation", { kind: "global" }, "$45/hour", "text").success).toBe(true);
     expect(fact("us_person_export_controls", { kind: "global" }, "Something else", "text").success).toBe(false);
+  });
+
+  it("parses the unrestricted right to work as a global resolve-time key only (Track 43)", () => {
+    expect(fact("unrestricted_us_work_authorization", { kind: "global" }, true).success).toBe(true);
+    expect(fact("unrestricted_us_work_authorization", { kind: "country", code: "US" }, true).success).toBe(false);
+    expect(isStandardAnswerKey("unrestricted_us_work_authorization")).toBe(true);
   });
 });

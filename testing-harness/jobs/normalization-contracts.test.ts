@@ -288,6 +288,16 @@ describe("location and pay formats seen on real boards", () => {
     expect(locationsOf("Our team works closely with colleagues in Berlin every week.")).toEqual([]);
   });
 
+  it("reads a work-mode lead-in before a place as that place with its work mode (Track 43)", () => {
+    const opensesame = locationsOf("Job list location: Remote in USA\n\nLocation: Remote\n\nThis role can be based anywhere in the U.S.");
+    expect(opensesame).toHaveLength(1);
+    expect(opensesame[0]).toMatchObject({ city: null, region: null, countryCode: "US", workMode: "REMOTE" });
+    expect(locationsOf("Location: Remote within the United States")).toMatchObject([{ countryCode: "US", workMode: "REMOTE" }]);
+    expect(locationsOf("Location: Hybrid in Canada")).toMatchObject([{ countryCode: "CA", workMode: "HYBRID" }]);
+    expect(locationsOf("Location: Remote")).toMatchObject([{ countryCode: null, workMode: "REMOTE" }]);
+    expect(locationCountryCodes("Remote in USA")).toEqual(["US"]);
+  });
+
   it("reads the countries one ATS location string names", () => {
     expect(locationCountryCodes("Berlin, Germany")).toEqual(["DE"]);
     expect(locationCountryCodes("Seattle, WA")).toEqual(["US"]);

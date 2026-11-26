@@ -2517,3 +2517,69 @@ describe("live unrecognized forms (Track 37)", () => {
     });
   });
 });
+
+describe("known answers on Veeva's Lever and OpenSesame's Greenhouse forms (Track 43, synthetic profile values)", () => {
+  type Inputs = Parameters<typeof planAutofill>[1];
+  const plan = (controls: RawControl[], extra: Partial<Inputs> = {}) =>
+    planAutofill(recognizeForm("https://jobs.lever.co/fixture/00000000-0000-0000-0000-000000000000/apply", "Apply", controls), {
+      profile: {}, resolutions: new Map(), packageAnswers: [], variantId: null, ...extra
+    });
+  const actions = (result: ReturnType<typeof planAutofill>) =>
+    Object.fromEntries(result.decisions.map((decision) => [decision.fieldId, [decision.action, decision.value]]));
+  const GPA_RANGES = ["3.7 - 4.0", "3.3 - 3.69", "3.0 - 3.29", "2.7 - 2.99", "< 2.7"];
+  const gpaRadio = (label = "Please specify the overall average grade (GPA) for your last/current degree:*") =>
+    control({ tag: "input", type: "radio", id: "gpa", label, required: true, options: GPA_RANGES });
+
+  it("answers a sentence-style GPA label, reading a GPA between two ranges to the options' own decimals", () => {
+    expect(actions(plan([gpaRadio()], { profile: { gpa: "3.295" } }))).toEqual({ gpa: ["choose", "3.0 - 3.29"] });
+    expect(actions(plan([gpaRadio()], { profile: { gpa: "2.995" } }))).toEqual({ gpa: ["choose", "2.7 - 2.99"] });
+    expect(actions(plan([gpaRadio()], { profile: { gpa: "3.5" } }))).toEqual({ gpa: ["choose", "3.3 - 3.69"] });
+    expect(plan([gpaRadio()], { profile: { gpa: "3.295" } }).decisions[0]!.basis).toEqual({ kind: "profile", field: "gpa" });
+    expect(actions(plan([gpaRadio("Please specify your major GPA:*")], { profile: { gpa: "3.5" } }))).toEqual({ gpa: ["pause", null] });
+    const box = control({ tag: "input", type: "text", id: "gpa_text", label: "Please enter your GPA*", required: true });
+    expect(actions(plan([box], { profile: { gpa: "3.295" } }))).toEqual({ gpa_text: ["fill", "3.29"] });
+  });
+
+  it("chooses the field-of-study category naming the profile's field, never the negated one", () => {
+    const study = control({
+      tag: "select", id: "study", label: "Please select your field of study:*", required: true,
+      options: [
+        "Select...", "Business & Management", "Engineering (Non-Computer Science)", "Engineering – Computer Science & Technology",
+        "Physical Sciences", "Mathematics & Statistics", "Other"
+      ]
+    });
+    const chosen = plan([study], { profile: { fieldOfStudy: "Computer Science" } });
+    expect(actions(chosen)).toEqual({ study: ["choose", "Engineering – Computer Science & Technology"] });
+    expect(chosen.decisions[0]!.basis).toEqual({ kind: "profile", field: "fieldOfStudy" });
+    expect(actions(plan([study], { profile: { fieldOfStudy: "Physics" } }))).toEqual({ study: ["pause", null] });
+  });
+
+  it("chooses the graduation term holding the resolved graduation date", () => {
+    const terms = control({
+      tag: "input", type: "radio", id: "term", label: "What is Your Expected Graduation Date?*", required: true,
+      options: ["December 2028 or later", "Spring 2028", "December 2027", "Spring 2027", "December 2026", "Spring 2026 or earlier"]
+    });
+    const resolution = { status: "RESOLVED", key: "graduation_date", scope: "global", display: "2027-05-15", value: "2027-05-15" } as const;
+    const result = plan([terms], { resolutions: new Map([["term", resolution]]) });
+    expect(actions(result)).toEqual({ term: ["choose", "Spring 2027"] });
+    expect(result.decisions[0]!.basis).toEqual({ kind: "fact", key: "graduation_date", scope: "global" });
+  });
+
+  it("answers a country list for \"Where are you currently located?\" from the profile address's country only", () => {
+    const where = control({
+      tag: "select", id: "where", label: "Where are you currently located?*", required: true, options: ["United States of America", "Other (International)"]
+    });
+    const place = { addressCity: "Springfield", addressRegion: "IL" };
+    const chosen = plan([where], { profile: { ...place, addressCountry: "United States" } });
+    expect(actions(chosen)).toEqual({ where: ["choose", "United States of America"] });
+    expect(chosen.decisions[0]!.basis).toEqual({ kind: "profile", field: "addressCountry" });
+    expect(actions(plan([where], { profile: { ...place, addressCountry: "Canada" } }))).toEqual({ where: ["pause", null] });
+    expect(actions(plan([where], { profile: place }))).toEqual({ where: ["pause", null] });
+  });
+
+  it("chooses Yes for a resolved unrestricted right to work", () => {
+    const radio = control({ tag: "input", type: "radio", id: "unrestricted", label: "Do you have the unrestricted right to work in the United States?*", required: true, options: ["Yes", "No"] });
+    const resolution = { status: "RESOLVED", key: "unrestricted_us_work_authorization", scope: "global", display: "Yes", value: true } as const;
+    expect(actions(plan([radio], { resolutions: new Map([["unrestricted", resolution]]) }))).toEqual({ unrestricted: ["choose", "Yes"] });
+  });
+});

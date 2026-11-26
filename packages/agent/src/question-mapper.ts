@@ -34,6 +34,12 @@ const OWN_EXPENSE = /\b(?:at )?(?:my|your) own (?:expense|cost)\b|\bown expense\
 const BACKGROUND_CHECK = /\bbackground (?:check|screening|investigation)s?\b/i;
 const WILLING_TO_UNDERGO = /\b(?:willing|prepared|open)\b[^?]{0,40}\b(?:undergo|submit to|complete|go through|participate in|take)\b|\bwould you (?:undergo|submit to|complete)\b/i;
 const NOT_WILLINGNESS = /\bpass\w*|\bclear(?:ed)?\b|\bconvict\w*|\barrest\w*|\bfelon\w*|\bdrug\w*|\bcredit\b|\bfingerprint\w*|\bclearances?\b|\bresults?\b|\bconsent\w*|\bauthori[sz]\w*|\bagree\w*|\bpermit\b|\ballow\w*|\bdisclos\w*|\bexplain\b|\bdescribe\b/i;
+// "Do you have the unrestricted right to work in the United States?" (Veeva on Lever, 2026-11-26): built from saved citizenship or export-control status, never from work authorization alone.
+const UNRESTRICTED_WORK = /\bunrestricted\s+(?:right|authori[sz]ation|eligibility|permission)\s+to\s+work\b|\bunrestricted\s+(?:work|employment)\s+authori[sz]ation\b/i;
+// "Are you a current student enrolled in a college/university program or have graduated within the past 12 months?" (OpenSesame, 2026-11-26).
+const CURRENT_STUDENT = /\bare you (?:a |an )?(?:current(?:ly)?|presently) (?:a |an )?(?:enrolled )?(?:college |university |undergraduate )?student\b|\bare you (?:currently|presently) enrolled (?:as a student )?(?:in|at) (?:a|an|any) (?:college|university|accredited)\b/i;
+// A level, major, country, schedule, or timing narrows the question beyond enrollment; it stays with the candidate.
+const NOT_CURRENT_STUDENT = /\b(?:master'?s|ph\.?\s?d|doctoral|mba|graduate (?:student|program|degree|school)|law school|medical school|high school|bootcamp|part[- ]?time|major\w*|studying|degree in|pursuing|returning|remaining|graduating|semesters?|quarters?|international|f-?1|visa|united states|america\w*|canada|in-state|after the internship)\b|\bu\.s\./i;
 const EMPLOYER_REFERENCE = /\b(?:here|for us|with us|(?:this|our|the)\s+(?:company|organization|organisation|firm|employer))\b/i;
 
 export class DeterministicQuestionMapper implements SemanticQuestionMapper {
@@ -106,6 +112,27 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
         confidence: 0.95,
         method: "deterministic",
         explanation: `General relocation question for ${country}${suffix}.`
+      };
+    }
+
+    if (UNRESTRICTED_WORK.test(normalized)) {
+      if (SPONSORSHIP.test(normalized) || NOT_WORK_AUTHORIZATION.test(normalized)) {
+        return { status: "AMBIGUOUS", reason: "The unrestricted right-to-work question also asks about sponsorship, citizenship, government, or export-control matters; answer it directly." };
+      }
+      const country = inferCountryCode(normalized, context);
+      // The posting's country stands in only when the question names no place of its own
+      // ("… to work in the United Kingdom?" must not become a United States question).
+      const namesOwnPlace = /\bto work\s+(?:in|within|inside)\b/.test(normalized);
+      if (country?.code !== "US" || (country.fromPosting && namesOwnPlace)) {
+        return { status: "AMBIGUOUS", reason: "An unrestricted right to work is built from saved answers only for the United States, and the question or posting names no other country it can be scoped to." };
+      }
+      return {
+        status: "MAPPED",
+        key: "unrestricted_us_work_authorization",
+        scope: { kind: "global" },
+        confidence: 0.95,
+        method: "deterministic",
+        explanation: `Unrestricted right to work in the United States${country.fromPosting ? " (the posting's country)" : ""}; built from your saved citizenship or export-control status.`
       };
     }
 
@@ -183,6 +210,19 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
         confidence: 0.95,
         method: "deterministic",
         explanation: "Full-time student enrollment question."
+      };
+    }
+
+    // Less than full-time enrollment: only a saved Yes answers it (broader); a saved No could be part-time study.
+    if (CURRENT_STUDENT.test(normalized) && !NOT_CURRENT_STUDENT.test(normalized)) {
+      return {
+        status: "MAPPED",
+        key: "enrolled_full_time",
+        scope: { kind: "global" },
+        confidence: 0.9,
+        method: "deterministic",
+        explanation: "Current-student question; only a saved Yes to full-time enrollment answers it.",
+        broader: true
       };
     }
 

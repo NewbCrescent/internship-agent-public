@@ -5,7 +5,7 @@ import type {
   RecognizedForm
 } from "@internship-agent/domain";
 import { factOption, FACT_OPTION_KEYS, samePlace, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
-import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, isStandardAnswerKey, matchOfferedOption, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption } from "@internship-agent/domain";
+import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, fieldOfStudyCategoryOption, isStandardAnswerKey, matchOfferedOption, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption } from "@internship-agent/domain";
 
 import { classifyFieldRole, classifyUploadRole, isSensitiveRole } from "./ats/field-roles";
 import { isHearAboutQuestion, pickHearAboutOption } from "./ats/hear-about";
@@ -223,6 +223,8 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
     if (match) {
       return { fieldId: field.id, action: "choose", value: match, basis: { kind: "profile", field: contact.key }, reason: "Contact details from your profile.", pause: null };
     }
+    const listed = profileListDecision(field, contact, inputs.profile);
+    if (listed) return listed;
     return pauseDecision(field, {
       question: `Your profile says "${contact.value}" for "${field.label}", which is not one of its options. Which option should be chosen?`,
       key: null,
@@ -983,11 +985,13 @@ function educationDecision(field: BrowserField, education: EducationInputs | und
 
 /**
  * A whole GPA label on a 4.0 scale ("GPA", "Undergraduate GPA", "Cumulative GPA",
- * "What is your GPA?", "GPA (out of 4.0)"). A major, departmental, high-school,
- * weighted, term, or other-scale GPA never matches, so it is never answered
- * with the profile GPA.
+ * "What is your GPA?", "GPA (out of 4.0)"), or a sentence asking for it
+ * (GPA_SENTENCE_LABEL). A major, departmental, high-school, weighted, term, or
+ * other-scale GPA never matches, so it is never answered with the profile GPA.
  */
 const GPA_LABEL = /^(?:what is your )?(?:(?:undergraduate|cumulative|current|overall|college|university)\s+)*(?:gpa|grade point average)(?:\s*\(?(?:out of|on a)\s+4(?:\.0+)?(?:\s+scale)?\)?)?(?:\s*\(?(?:if applicable)\)?)?\??$/;
+/** "Please specify the overall average grade (GPA) for your last/current degree:" (Veeva on Lever, 2026-11-26), "Please enter your GPA". */
+const GPA_SENTENCE_LABEL = /^(?:please )?(?:specify|enter|select|provide|indicate|state)(?: your| the)?(?: overall| cumulative| current)?(?: average)?(?: grade(?: point average)?)? \(?gpa\)?(?: for your (?:last\/current|current\/last|current|most recent|last or current|current or most recent) degree)?[:?]?$/;
 const PROFILE_GPA = /^[0-4]\.\d{1,3}$/;
 const GPA_NUMBER = String.raw`(\d(?:\.\d+)?)`;
 
@@ -995,6 +999,19 @@ const GPA_NUMBER = String.raw`(\d(?:\.\d+)?)`;
 function twoDecimalGpa(gpa: string): string {
   const [whole, fraction = ""] = gpa.split(".");
   return `${whole}.${fraction.padEnd(2, "0").slice(0, 2)}`;
+}
+
+/** The most decimals any number in the option has ("3.3 - 3.69" is 2); null when it names no number. */
+function optionDecimals(option: string): number | null {
+  const numbers = option.match(/\d+(?:\.\d+)?/g);
+  if (!numbers) return null;
+  return Math.max(...numbers.map((number) => number.split(".")[1]?.length ?? 0));
+}
+
+/** "3.695" truncated to `decimals` places as a number (never rounded up). */
+function truncatedGpa(gpa: string, decimals: number): number {
+  const [whole, fraction = ""] = gpa.split(".");
+  return decimals > 0 ? Number(`${whole}.${fraction.slice(0, decimals) || "0"}`) : Number(whole);
 }
 
 /** Whether a GPA list option's range holds the GPA; null when the option names no range it can read. */
@@ -1020,7 +1037,7 @@ function gpaOptionContains(option: string, gpa: number, twoDecimals: string): bo
  */
 function gpaDecision(field: BrowserField, gpa: string | undefined): FillDecision | null {
   const label = normalizedLabel(field.label);
-  if (!GPA_LABEL.test(label) || field.widget === "autocomplete") return null;
+  if (!(GPA_LABEL.test(label) || GPA_SENTENCE_LABEL.test(label)) || field.widget === "autocomplete") return null;
   const saved = gpa?.trim();
   if (!saved || !PROFILE_GPA.test(saved)) return null;
   const basis = { kind: "profile" as const, field: "gpa" };
@@ -1033,6 +1050,17 @@ function gpaDecision(field: BrowserField, gpa: string | undefined): FillDecision
     const matches = field.options.filter((option) => gpaOptionContains(option, value, twoDecimals) === true);
     if (matches.length === 1) {
       return { fieldId: field.id, action: "choose", value: matches[0]!, basis, reason: "The GPA on your profile falls in this option's range.", pause: null };
+    }
+    if (matches.length === 0) {
+      // Ranges written to two decimals ("3.0 - 3.29", "3.3 - 3.69") leave a three-decimal GPA between them:
+      // read it truncated to each option's own decimals, which never moves it up a range.
+      const truncated = field.options.filter((option) => {
+        const decimals = optionDecimals(option);
+        return decimals !== null && gpaOptionContains(option, truncatedGpa(saved, decimals), twoDecimals) === true;
+      });
+      if (truncated.length === 1) {
+        return { fieldId: field.id, action: "choose", value: truncated[0]!, basis, reason: "The GPA on your profile, read to this option's decimals, falls in its range.", pause: null };
+      }
     }
     return pauseDecision(field, {
       question: `Your profile GPA fits none or several of the options for "${field.label}". Which option should be chosen?`.slice(0, 500),
@@ -1201,8 +1229,30 @@ const CONTACT_LABELS: Array<{ key: ContactKey; pattern: RegExp }> = [
   { key: "addressPostalCode", pattern: /^(postal|zip)( code)?$|^zip\/postal code$|^postal\/zip code$/ },
   { key: "addressCountry", pattern: /^country$|^country \/ territory$|^country\/territory$|^(?:phone )?country(?: phone| dialing)? code(?: picker)?$/ },
   { key: "phoneType", pattern: /^phone (device )?type$|^type of phone$|^phone number type$/ },
-  { key: "fieldOfStudy", pattern: /^(field|area) of study$|^major$|^discipline$/ }
+  { key: "fieldOfStudy", pattern: /^(field|area) of study$|^major$|^discipline$|^(?:please )?(?:select|choose|enter|indicate|specify|provide) your (?:field|area) of study:?$|^what is your (?:field|area) of study\??$/ }
 ];
+
+/**
+ * A profile value on a list whose options name it differently: the category
+ * naming the field of study, or the country of the profile address for a
+ * "Where are you currently located?" list of countries. Null otherwise.
+ */
+function profileListDecision(field: BrowserField, contact: { key: ContactKey; value: string }, profile: PlannerInputs["profile"]): FillDecision | null {
+  if (contact.key === "fieldOfStudy") {
+    const option = fieldOfStudyCategoryOption(contact.value, field.options ?? []);
+    return option
+      ? { fieldId: field.id, action: "choose", value: option, basis: { kind: "profile", field: "fieldOfStudy" }, reason: "The option on this list that names the field of study on your profile.", pause: null }
+      : null;
+  }
+  if (contact.key === "currentLocation") {
+    const country = profile.addressCountry?.trim();
+    const option = country ? matchCountryOption(country, field.options ?? []) : null;
+    return option
+      ? { fieldId: field.id, action: "choose", value: option, basis: { kind: "profile", field: "addressCountry" }, reason: "This list asks only for a country: the country of the address on your profile.", pause: null }
+      : null;
+  }
+  return null;
+}
 
 /** A label compared whole: lowercase, no "(optional)", no required marker, single spaces. */
 function normalizedLabel(label: string): string {

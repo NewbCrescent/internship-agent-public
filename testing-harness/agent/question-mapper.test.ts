@@ -567,3 +567,45 @@ describe("known-answer gaps from the 2026-11-25 pass (posting wordings, no candi
     expect(await mapper.map(neros, { fieldKind: "select" })).toMatchObject({ status: "MAPPED", key: "us_person_export_controls" });
   });
 });
+
+describe("known-answer gaps from the 2026-11-26 pass (Track 43)", () => {
+  it("maps an unrestricted right to work in the United States to its derived key, never another country", async () => {
+    expect(await mapper.map("Do you have the unrestricted right to work in the United States?")).toMatchObject({
+      status: "MAPPED", key: "unrestricted_us_work_authorization", scope: { kind: "global" }
+    });
+    expect(await mapper.map("Do you have the unrestricted right to work?", { postingCountryCode: "US" })).toMatchObject({
+      status: "MAPPED", key: "unrestricted_us_work_authorization", scope: { kind: "global" }, explanation: expect.stringContaining("the posting's country")
+    });
+    expect(await mapper.map("Do you have the unrestricted right to work in Canada?")).toMatchObject({ status: "AMBIGUOUS" });
+    expect(await mapper.map("Do you have the unrestricted right to work?")).toMatchObject({ status: "AMBIGUOUS" });
+    expect(await mapper.map("Do you have the unrestricted right to work in the United Kingdom?", { postingCountryCode: "US" })).toMatchObject({ status: "AMBIGUOUS" });
+    expect(await mapper.map("Do you have the unrestricted right to work in the United States without requiring visa sponsorship?")).toMatchObject({ status: "AMBIGUOUS" });
+    expect(await mapper.map("Are you legally authorized to work in the United States?")).toMatchObject({
+      status: "MAPPED", key: "authorized_to_work", scope: { kind: "country", code: "US" }
+    });
+  });
+
+  it("maps a current-student question to full-time enrollment as a broader question, never a narrower student question", async () => {
+    const opensesame = "Are you a current student enrolled in a college/university program or have graduated within the past 12 months? Undergraduate, postgraduate, or associate programs accepted.";
+    expect(await mapper.map(opensesame)).toMatchObject({ status: "MAPPED", key: "enrolled_full_time", scope: { kind: "global" }, broader: true });
+    const fullTime = await mapper.map("Are you a current full-time student?");
+    expect(fullTime).toMatchObject({ status: "MAPPED", key: "enrolled_full_time" });
+    expect(fullTime).not.toHaveProperty("broader");
+    for (const question of [
+      "Are you currently enrolled in a master's program?",
+      "Are you a current student majoring in computer science?",
+      "Are you a current student at a U.S. university?",
+      "Are you currently a part-time student?"
+    ]) {
+      expect(await mapper.map(question), question).not.toMatchObject({ key: "enrolled_full_time", broader: true });
+    }
+  });
+
+  it("scopes OpenSesame's sponsorship question to the posting's country, and leaves it ambiguous without one", async () => {
+    const question = "Do you currently require or will you need sponsorship for employment visa status now or in the future?";
+    expect(await mapper.map(question, { postingCountryCode: "US" })).toMatchObject({
+      status: "MAPPED", key: "requires_sponsorship", scope: { kind: "country", code: "US" }
+    });
+    expect(await mapper.map(question)).toMatchObject({ status: "AMBIGUOUS" });
+  });
+});

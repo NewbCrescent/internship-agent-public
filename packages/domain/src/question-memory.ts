@@ -29,7 +29,9 @@ export const mappedQuestionSchema = z.object({
   method: z.enum(["deterministic", "classifier"]),
   explanation: z.string(),
   /** The question asks about a subset of the saved fact; only a saved No answers it. */
-  narrower: z.boolean().optional()
+  narrower: z.boolean().optional(),
+  /** The question asks about more than the saved fact (a current student, for full-time enrollment); only a saved Yes answers it, and an answer to it is never saved as the fact. */
+  broader: z.boolean().optional()
 });
 
 export const questionMappingSchema = z.discriminatedUnion("status", [

@@ -131,7 +131,10 @@ export async function resolveCandidateQuestion(
   }, mapping);
 }
 
-/** A question narrower than its saved fact ("a felony" for "a conviction") is answered only by a saved No. */
+/**
+ * A question narrower than its saved fact ("a felony" for "a conviction") is answered only by a saved No;
+ * a question broader than it ("a current student" for full-time enrollment) only by a saved Yes.
+ */
 function narrowed(resolution: QuestionResolution, mapping: MappedQuestion): QuestionResolution {
   if (resolution.status === "RESOLVED" && mapping.narrower && resolution.fact.value === true) {
     return {
@@ -139,6 +142,14 @@ function narrowed(resolution: QuestionResolution, mapping: MappedQuestion): Ques
       question: resolution.question,
       mapping,
       reason: "Your saved Yes covers more than this question asks; answer it directly."
+    };
+  }
+  if (resolution.status === "RESOLVED" && mapping.broader && resolution.fact.value === false) {
+    return {
+      status: "NEEDS_INPUT",
+      question: resolution.question,
+      mapping,
+      reason: "Your saved No covers less than this question asks; answer it directly."
     };
   }
   return resolution;
@@ -183,6 +194,15 @@ export async function answerCandidateQuestion(
       mapping,
       displayAnswer: formatFactValue(value),
       reason: "Legal and background answers are saved only with pnpm profile:facts; this answer was used once."
+    };
+  }
+  if (mapping.broader) {
+    return {
+      status: "ANSWERED_ONCE",
+      question: parsed.question,
+      mapping,
+      displayAnswer: formatFactValue(value),
+      reason: "The question asks more than the saved fact; this answer was used once."
     };
   }
   if (!parsed.remember) {

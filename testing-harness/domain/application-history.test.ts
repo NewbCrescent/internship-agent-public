@@ -4,6 +4,7 @@ import {
   bachelorKind,
   campusOption,
   chooseDegreeOption,
+  fieldOfStudyCategoryOption,
   matchFieldOfStudyOption,
   matchPromptOption,
   planApplicationHistory,
@@ -156,5 +157,28 @@ describe("application history", () => {
     expect(matchFieldOfStudyOption("Computer Science", ["Computer and Information Science"])).toBe("Computer and Information Science");
     expect(matchFieldOfStudyOption("Economics", ["Economic Development", "Business"])).toBeNull();
     expect(matchFieldOfStudyOption("Business", ["Busines", "Business Administration"])).toBe("Business Administration");
+  });
+});
+
+describe("field-of-study category lists (Track 43)", () => {
+  // Veeva's Lever list (2026-11-26).
+  const VEEVA = [
+    "Select...", "Business & Management", "Engineering (Non-Computer Science)", "Engineering – Computer Science & Technology",
+    "Life Sciences & Health", "Physical Sciences", "Mathematics & Statistics", "Social Sciences", "Humanities & Liberal Arts",
+    "Arts & Design", "Education", "Communications & Media", "Agriculture & Environmental Studies", "Law, Policy & Public Service", "Other"
+  ];
+
+  it("picks the category naming the field, never the option that negates it", () => {
+    expect(fieldOfStudyCategoryOption("Computer Science", VEEVA)).toBe("Engineering – Computer Science & Technology");
+    expect(fieldOfStudyCategoryOption("Mathematics", VEEVA)).toBe("Mathematics & Statistics");
+    expect(fieldOfStudyCategoryOption("Physics", VEEVA)).toBeNull();
+    // The containing rule this replaces picks the negated option.
+    expect(matchPromptOption("Computer Science", VEEVA)).toBe("Engineering (Non-Computer Science)");
+  });
+
+  it("never picks Other, pauses on two options naming it, and prefers an exact option", () => {
+    expect(fieldOfStudyCategoryOption("Computer Science", ["Other (Computer Science)", "Other than Computer Science", "Business"])).toBeNull();
+    expect(fieldOfStudyCategoryOption("Computer Science", ["Computer Science & Engineering", "Applied Computer Science"])).toBeNull();
+    expect(fieldOfStudyCategoryOption("Computer Science", ["Computer Science & Engineering", "Computer Science"])).toBe("Computer Science");
   });
 });

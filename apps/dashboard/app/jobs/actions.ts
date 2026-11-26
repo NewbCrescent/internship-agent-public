@@ -127,14 +127,15 @@ export async function pollDiscoverySourceAction(
   formData: FormData
 ): Promise<JobActionState> {
   try {
-    const running = readPipelineLock(await getActiveDataDirectory());
+    const dataDir = await getActiveDataDirectory();
+    const running = readPipelineLock(dataDir);
     if (running) {
       throw new Error(`A pipeline run is in progress (started ${new Date(running.startedAt).toLocaleString("en-US")}). Check board is disabled until it finishes.`);
     }
     const database = await getActiveDatabase();
     const sourceId = requiredText(formData, "sourceId");
     assertUuid(sourceId);
-    const report = await fetchCompanySource(sourceId, { database });
+    const report = await fetchCompanySource(sourceId, { database, traceDirectory: dataDir });
     revalidatePath("/jobs");
     revalidatePath("/review");
     const notes = report.sourceNotes.length > 0 ? ` ${report.sourceNotes.join(" ")}` : "";

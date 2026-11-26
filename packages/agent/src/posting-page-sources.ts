@@ -359,9 +359,10 @@ async function fetchJson(url: string, fetcher: Fetcher): Promise<unknown> {
   return JSON.parse(await boundedText(response)) as unknown;
 }
 
-/** Same-host redirects only, at most three; HTML only. */
+/** Same-host redirects, plus one move to another public host on the same path; at most three; HTML only. */
 async function fetchHtml(url: string, fetcher: Fetcher, options: { followRedirects: boolean }): Promise<string> {
   let current = url;
+  let movedHost = false;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
     const response = await fetcher(current, {
       redirect: options.followRedirects ? "manual" : "error", signal: AbortSignal.timeout(TIMEOUT_MS), headers: HTML_HEADERS
@@ -371,9 +372,15 @@ async function fetchHtml(url: string, fetcher: Fetcher, options: { followRedirec
       await response.body?.cancel();
       let next: URL;
       try { next = new URL(location ?? "", current); } catch { throw new PostingUnavailable("redirected away from the posting's site"); }
-      if (!location || next.protocol !== "https:" || next.username || next.password || next.port || next.hostname !== new URL(current).hostname) {
+      const from = new URL(current);
+      const sameHost = next.hostname === from.hostname;
+      // An Avature site (tql.avature.net) answers with a 301 to the employer's own career domain on the same path.
+      const samePathMove = !sameHost && !movedHost && next.pathname === from.pathname &&
+        isPublicPageHost(next.hostname) && !isExcludedPageHost(next.hostname);
+      if (!location || next.protocol !== "https:" || next.username || next.password || next.port || !(sameHost || samePathMove)) {
         throw new PostingUnavailable("redirected away from the posting's site");
       }
+      if (samePathMove) movedHost = true;
       current = next.toString();
       continue;
     }

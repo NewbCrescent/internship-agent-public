@@ -253,3 +253,37 @@ export function matchFieldOfStudyOption(value: string, options: string[]): strin
   if (folded.length > 1) return null;
   return matchPromptOption(value, options);
 }
+
+const FIELD_NEGATORS = new Set(["non", "not", "no", "except", "excluding", "without"]);
+
+/**
+ * The option of a broad field-of-study list ("Engineering – Computer Science
+ * & Technology") for the saved field: an option with the same words or the
+ * one differing only by plural endings (matchFieldOfStudyOption's first two
+ * rules), else the one option naming the saved field as a whole phrase.
+ * Never an option that negates it ("Engineering (Non-Computer Science)"),
+ * never "Other", and never matchPromptOption's containing match, which could
+ * pick the negated option. Null when none or several (Veeva on Lever,
+ * 2026-11-26).
+ */
+export function fieldOfStudyCategoryOption(value: string, options: string[]): string | null {
+  const words = tokens(value);
+  if (words.length === 0) return null;
+  const same = options.find((option) => tokens(option).join(" ") === words.join(" "));
+  if (same) return same;
+  const wanted = words.map(singular);
+  const key = wanted.join(" ");
+  const folded = [...new Set(options.filter((option) => tokens(option).map(singular).join(" ") === key))];
+  if (folded.length === 1) return folded[0]!;
+  if (folded.length > 1) return null;
+  const naming = [...new Set(options.filter((option) => {
+    if (/^\s*other\b/i.test(option) || /\bother than\b/i.test(option)) return false;
+    const have = tokens(option).map(singular);
+    for (let index = 0; index + wanted.length <= have.length; index += 1) {
+      if (have.slice(index, index + wanted.length).join(" ") !== key) continue;
+      return !have.slice(0, index).some((token) => FIELD_NEGATORS.has(token));
+    }
+    return false;
+  }))];
+  return naming.length === 1 ? naming[0]! : null;
+}

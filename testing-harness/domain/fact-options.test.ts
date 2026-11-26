@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { agreeOption, factOption, relocationOption, samePlace, startBucketOption, startWindowDays } from "@internship-agent/domain";
+import { agreeOption, factOption, graduationTermMonths, graduationTermOption, relocationOption, samePlace, startBucketOption, startWindowDays } from "@internship-agent/domain";
 
 /** Deterministic option rules for saved facts (2026-11-24); fictional option lists and places. */
 const BUCKETS = ["Immediately", "2 weeks", "2–4 weeks", "4–6 weeks", "6+ weeks"];
@@ -124,5 +124,41 @@ describe("factOption dispatch", () => {
     expect(factOption("willing_to_relocate_at_own_expense", true, ["Yes, I am located in or near the city", "Yes, I will relocate at my own cost", "No"], { nearPosting: false })?.reason)
       .toBe("You are willing to relocate at your own expense (your saved answer).");
     expect(factOption("how_heard", "LinkedIn", ["LinkedIn"], { nearPosting: false })).toBeNull();
+  });
+});
+
+describe("graduation term options (Track 43)", () => {
+  // Veeva's Lever list (2026-11-26); the dates are fictional.
+  const TERMS = ["December 2028 or later", "Spring 2028", "December 2027", "Spring 2027", "December 2026", "Spring 2026 or earlier"];
+
+  it("picks the one term holding the date's month", () => {
+    expect(graduationTermOption(TERMS, "2027-05-15")).toBe("Spring 2027");
+    expect(graduationTermOption(TERMS, "2029-05-15")).toBe("December 2028 or later");
+    expect(graduationTermOption(TERMS, "2026-05-10")).toBe("Spring 2026 or earlier");
+    expect(graduationTermOption(TERMS, "2027-12-15")).toBe("December 2027");
+  });
+
+  it("pauses when no term, several terms, or fewer than two readable terms hold it", () => {
+    expect(graduationTermOption(TERMS, "2027-08-10")).toBeNull();
+    expect(graduationTermOption(["Fall 2027", "December 2027", "Spring 2028"], "2027-12-15")).toBeNull();
+    expect(graduationTermOption(["Winter 2027", "Spring 2027"], "2027-01-15")).toBeNull();
+    expect(graduationTermOption(["Spring 2027", "Not sure"], "2027-05-15")).toBeNull();
+    expect(graduationTermOption(TERMS, "2027-13-01")).toBeNull();
+  });
+
+  it("reads month abbreviations and open ends", () => {
+    expect(graduationTermMonths("Dec 2027")).toEqual({ from: 2027 * 12 + 11, to: 2027 * 12 + 11 });
+    expect(graduationTermMonths("May 2027")).toEqual({ from: 2027 * 12 + 4, to: 2027 * 12 + 4 });
+    expect(graduationTermMonths("Spring 2026 or earlier")).toEqual({ from: -Infinity, to: 2026 * 12 + 5 });
+    expect(graduationTermMonths("December 2028 or later")).toEqual({ from: 2028 * 12 + 11, to: Infinity });
+    expect(graduationTermMonths("Winter 2027")).toBeNull();
+    expect(graduationTermOption(["Dec 2027", "May 2027"], "2027-05-01")).toBe("May 2027");
+  });
+
+  it("answers a saved graduation date through factOption with a reason naming the option, not the date", () => {
+    const picked = factOption("graduation_date", "2027-05-15", TERMS, { nearPosting: false });
+    expect(picked?.option).toBe("Spring 2027");
+    expect(picked?.reason).toContain("Spring 2027");
+    expect(picked?.reason).not.toContain("2027-05-15");
   });
 });

@@ -51,6 +51,7 @@ export async function planPauseMemory(
   const mapper = input.mapper ?? new DeterministicQuestionMapper();
   const mapping = await mapper.map(pause.question, input.context);
   if (mapping.status === "MAPPED" && mapping.key === COURSEWORK_FACT_KEY) return { path: "once", reason: "coursework" };
+  if (mapping.status === "MAPPED" && mapping.broader) return { path: "once", reason: "fact_rule" };
   if (mapping.status === "MAPPED") return { path: "fact", key: mapping.key };
   if (mapping.status === "BLOCKED") {
     return { path: "once", reason: mapping.policy === "attestation" ? "blocked_attestation" : "blocked_protected" };

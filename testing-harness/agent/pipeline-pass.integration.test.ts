@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -75,6 +75,13 @@ describe("pipeline watcher pass", () => {
     }
     // The first pass fetched the list; the second, a minute's rate limit later, still opened the workspace and finished.
     expect(fetched).toEqual([LIST_URL]);
+    // The checked source wrote its discovery trace in the workspace's data directory.
+    const traceFiles = readdirSync(join(dataDir, "discovery-traces"));
+    expect(traceFiles).toHaveLength(1);
+    expect(traceFiles[0]).toMatch(/^\d{4}-\d{2}-\d{2}\.jsonl$/);
+    const traceLines = readFileSync(join(dataDir, "discovery-traces", traceFiles[0]!), "utf8").trim().split("\n").map((line) => JSON.parse(line) as { type: string; list: string });
+    expect(traceLines.some((line) => line.type === "pass" && line.list === LIST_URL)).toBe(true);
+    expect(traceLines.some((line) => line.type === "end" && line.list === LIST_URL)).toBe(true);
   });
 
   it("releases the pipeline lock when the pass fails early", async () => {

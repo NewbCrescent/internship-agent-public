@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { canonicalGitHubJobListUrl, discoveryBudget, discoveryListFilter, fetchGitHubJobList, parseGitHubJobListUrl, plainText, postingLinkKey, fetchEmployerPublication } from "@internship-agent/agent";
+import type { DiscoveryRowEvent } from "@internship-agent/agent";
 import { extractDeterministically, normalizePostingText } from "@internship-agent/jobs";
 
 const description = [
@@ -562,5 +563,102 @@ describe("structured ATS location fields", () => {
       : undefined);
     expect(items[0]!.text.startsWith("Location: HQ\nOffice: Austin, Texas, United States\n\n")).toBe(true);
     expect(countries(items[0]!.text)).toEqual(["US"]);
+  });
+});
+
+describe("one trace decision per listed row", () => {
+  const now = Date.parse("2026-11-17T12:00:00.000Z");
+  const greenhouse = (id: number) => "https://job-boards.greenhouse.io/aurora/jobs/" + id;
+  const api = (id: number) => "https://boards-api.greenhouse.io/v1/boards/aurora/jobs/" + id + "?content=true";
+  const simplifyRow = (company: string, title: string, link: string | null, age = "0d") =>
+    "<tr><td>" + company + "</td><td>" + title + "</td><td>Remote</td><td>" +
+    (link ? '<a href="' + link + '">Apply</a>' : "🔒") + "</td><td>" + age + "</td></tr>";
+  const boardResponse = (url: string) => {
+    const id = /jobs\/(\d+)/.exec(url)![1]!;
+    if (id === "5008") return new Response("{}", { status: 404 });
+    return new Response(JSON.stringify({ title: "SWE Intern " + id, absolute_url: greenhouse(Number(id)), content: description }));
+  };
+
+  it("reports one decision per listed row", async () => {
+    const index = [
+      simplifyRow("Aurora", "SWE Intern A", greenhouse(5001)),
+      simplifyRow("Aurora", "SWE Intern B", null),
+      simplifyRow("Aurora", "Software Engineer", greenhouse(5003)),
+      simplifyRow("Aurora", "SWE Intern C", greenhouse(5004), "9d"),
+      simplifyRow("Aurora", "SWE Intern A (listed again)", greenhouse(5001) + "?utm_source=Simplify"),
+      simplifyRow("Aurora", "SWE Intern D", greenhouse(5006)),
+      simplifyRow("Kestrel", "SWE Intern E", "https://kestrel.applytojob.com/apply/x"),
+      simplifyRow("Aurora", "SWE Intern F", greenhouse(5008))
+    ].join("\n");
+    const requests: string[] = [];
+    const events: DiscoveryRowEvent[] = [];
+    const fetched = await fetchGitHubJobList(
+      { url: "https://github.com/SimplifyJobs/Summer2027-Internships" },
+      async (url) => {
+        if (url.includes("raw.githubusercontent.com")) return new Response(index);
+        requests.push(url);
+        return boardResponse(url);
+      },
+      {
+        delayMs: 0, now, filter: { maxAgeDays: 3, season: null },
+        knownLinkKeys: new Set([postingLinkKey(greenhouse(5006))!]), onRow: (event) => events.push(event)
+      }
+    );
+    // Today's behaviour is unchanged: one posting resolved, two posting requests.
+    expect(requests).toEqual([api(5001), api(5008)]);
+    expect(fetched.items.map((item) => item.sourceUrl)).toEqual([greenhouse(5001)]);
+    expect(events.map((event) => event.row).sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    const byRow = new Map(events.map((event) => [event.row, event]));
+    expect([...byRow.keys()].sort((a, b) => a - b).map((row) => byRow.get(row)!.decision)).toEqual([
+      "resolved", "closed", "not-internship", "stale", "duplicate-row", "already-known", "unsupported", "unavailable"
+    ]);
+    expect(byRow.get(1)).toMatchObject({ company: "Aurora", title: "SWE Intern A", host: "job-boards.greenhouse.io", postingUrl: greenhouse(5001) });
+    expect(byRow.get(2)!.reason).toBe("no apply link on the list (closed)");
+    expect(byRow.get(4)!.reason).toBe("listed 9 days ago, past the age limit of 3 days");
+    expect(byRow.get(7)).toMatchObject({ host: "kestrel.applytojob.com", reason: "no supported full-posting source for kestrel.applytojob.com" });
+    expect(byRow.get(8)!.reason).toBe("HTTP 404");
+  });
+
+  it("marks rows past this check's posting limit as not reached", async () => {
+    const index = [simplifyRow("Aurora", "SWE Intern A", greenhouse(5101)), simplifyRow("Aurora", "SWE Intern B", greenhouse(5102))].join("\n");
+    const events: DiscoveryRowEvent[] = [];
+    const fetched = await fetchGitHubJobList(
+      { url: "https://github.com/SimplifyJobs/Summer2027-Internships" },
+      async (url) => (url.includes("raw.githubusercontent.com") ? new Response(index) : boardResponse(url)),
+      { delayMs: 0, now, maxItems: 1, filter: { maxAgeDays: 3, season: null }, onRow: (event) => events.push(event) }
+    );
+    expect(fetched.items).toHaveLength(1);
+    expect(events.map((event) => [event.row, event.decision, event.reason])).toEqual([
+      [1, "resolved", "full posting read"],
+      [2, "not-reached", "this check's posting limit of 1 was reached; tried again on the next check"]
+    ]);
+  });
+
+  it("reads the valid Vansh rows when one row is malformed", async () => {
+    const seconds = (daysAgo: number) => Math.floor((now - daysAgo * 86_400_000) / 1000);
+    const index = JSON.stringify([
+      { company_name: "Beacon Systems", title: "Software Intern", url: "https://jobs.lever.co/beacon/123", active: true, date_posted: seconds(0) },
+      { company_name: "Broken Row Co", url: "https://jobs.lever.co/broken/456", active: true, date_posted: seconds(0) },
+      { company_name: "Inactive Co", title: "Software Intern", url: "https://jobs.lever.co/inactive/1", active: false, date_posted: seconds(0) }
+    ]);
+    const events: DiscoveryRowEvent[] = [];
+    const fetched = await fetchGitHubJobList(
+      { url: "https://github.com/vanshb03/Summer2027-Internships" },
+      async (url) => {
+        if (url.includes("raw.githubusercontent.com")) return new Response(index);
+        if (url === "https://api.lever.co/v0/postings/beacon/123") {
+          return new Response(JSON.stringify({ text: "Software Intern", hostedUrl: "https://jobs.lever.co/beacon/123", descriptionPlain: description }));
+        }
+        throw new Error("Unexpected network request: " + url);
+      },
+      { delayMs: 0, now, filter: { maxAgeDays: 3, season: null }, onRow: (event) => events.push(event) }
+    );
+    expect(fetched.items.map((item) => item.companyName)).toEqual(["Beacon Systems"]);
+    const decisions = new Map(events.map((event) => [event.company, event.decision]));
+    expect(decisions.get("Beacon Systems")).toBe("resolved");
+    expect(decisions.get("Broken Row Co")).toBe("failed-to-parse");
+    expect(decisions.get("Inactive Co")).toBe("closed");
+    expect(events).toHaveLength(3);
+    expect(fetched.notes).toContain("1 listed row could not be read and was skipped.");
   });
 });

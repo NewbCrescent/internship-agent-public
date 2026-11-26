@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -304,6 +304,62 @@ describe("bulk discovery run", () => {
     expect(report.sourceNotes).toHaveLength(1);
     const posting = getJobPosting(database, report.jobIds[0]!);
     expect(posting?.snapshot?.normalizedText).toContain("Experience with Python or TypeScript");
+    database.close();
+  });
+
+  it("writes the discovery trace for a checked source", async () => {
+    const database = qualifiedDatabase();
+    const traceDirectory = mkdtempSync(join(tmpdir(), "internship-agent-trace-"));
+    temporaryDirectories.push(traceDirectory);
+    const primer = addCompanySource("SWE 2027", "https://github.com/speedyapply/2027-SWE-College-Jobs", 60, database);
+    const meridian = { companyName: "Meridian Tools", title: "Software Engineering Intern", text: STRONG_POSTING };
+    await fetchCompanySource(primer.id, {
+      database,
+      fetchBatch: async () => ({ items: [{ ...meridian, sourceUrl: "https://job-boards.greenhouse.io/meridian/jobs/123" }], notes: [] })
+    });
+    const listUrl = "https://github.com/SimplifyJobs/Summer2027-Internships";
+    const source = addCompanySource("Summer 2027", listUrl, 60, database);
+    const harborUrl = "https://job-boards.greenhouse.io/harbor/jobs/456";
+    const report = await fetchCompanySource(source.id, {
+      database,
+      traceDirectory,
+      fetchBatch: async (_source, context) => {
+        context.onRow?.({
+          row: 1, company: "Harbor Goods", title: "Marketing Intern", url: harborUrl, host: "job-boards.greenhouse.io",
+          decision: "resolved", reason: "full posting read", postingUrl: harborUrl
+        });
+        return {
+          items: [
+            { companyName: "Harbor Goods", title: "Marketing Intern", text: WEAK_POSTING, sourceUrl: harborUrl },
+            { ...meridian, sourceUrl: "https://jobs.ashbyhq.com/meridian/abc" }
+          ],
+          notes: ["1 listed link was read."]
+        };
+      }
+    });
+    expect(report.traceError).toBeNull();
+    expect(report.run.ingested).toBe(1);
+    const traceFolder = join(traceDirectory, "discovery-traces");
+    const files = readdirSync(traceFolder);
+    expect(files).toHaveLength(1);
+    expect(files[0]).toMatch(/^\d{4}-\d{2}-\d{2}\.jsonl$/);
+    const lines = readFileSync(join(traceFolder, files[0]!), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(lines.map((line) => [line.type, line.decision ?? null])).toEqual([
+      ["pass", null], ["row", "resolved"], ["ingest", "stored-new"], ["ingest", "duplicate"], ["end", null]
+    ]);
+    expect(lines.every((line) => line.list === listUrl)).toBe(true);
+    expect(lines[2]).toMatchObject({ company: "Harbor Goods", postingUrl: harborUrl, jobId: report.jobIds[0] });
+    expect(lines[3]).toMatchObject({ company: "Meridian Tools", reason: "the same posting (company, title, and text) is already stored" });
+    expect(lines[4]!.counts).toEqual({ "stored-new": 1, duplicate: 1 });
+
+    const failing = addCompanySource("Vansh 2027", "https://github.com/vanshb03/Summer2027-Internships", 60, database);
+    await expect(fetchCompanySource(failing.id, {
+      database,
+      traceDirectory,
+      fetchBatch: async () => { throw new Error("The GitHub job list answered 503."); }
+    })).rejects.toThrow("The GitHub job list answered 503.");
+    const after = readFileSync(join(traceFolder, files[0]!), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(after.at(-1)).toMatchObject({ type: "end", list: "https://github.com/vanshb03/Summer2027-Internships", error: "The GitHub job list answered 503." });
     database.close();
   });
 

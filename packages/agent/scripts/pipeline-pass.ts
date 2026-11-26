@@ -64,9 +64,12 @@ export async function runPipelinePass(options: {
       (options.sourceIds === "all" || options.sourceIds.includes(entry.id)));
     for (const source of sources) {
       try {
-        const { run, sourceNotes, errors } = await fetchCompanySource(source.id, { database, fetchBatch: options.fetchBatch });
+        const { run, sourceNotes, errors, traceError } = await fetchCompanySource(source.id, {
+          database, fetchBatch: options.fetchBatch, traceDirectory: dataDir
+        });
         log(`${source.label}: fetched ${run.fetched}, duplicates ${run.deduped}, new ${run.ingested}, prepared ${run.promoted}.` +
           (sourceNotes.length ? " " + sourceNotes.join(" ") : "") + (errors.length ? ` ${errors.length} error(s).` : ""));
+        if (traceError) log(`${source.label}: discovery trace not written (${traceError}).`);
       } catch (error) {
         log(`${source.label}: ${error instanceof Error ? error.message : String(error)}`);
       }

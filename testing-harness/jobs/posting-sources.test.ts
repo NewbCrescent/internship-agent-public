@@ -125,6 +125,53 @@ describe("posting-page sources", () => {
     expect(notes).toContain("2 public postings were unavailable");
   });
 
+  it("follows an Avature site's same-path move to the employer's career domain", async () => {
+    const avature = "https://kestrelfreight.avature.net/en_US/KFexternalcareers/JobDetail/";
+    const careers = "https://careers.kestrelfreight.example.com/en_US/KFexternalcareers/JobDetail/";
+    const tracking = "?utm_source=Simplify&ref=Simplify";
+    const simplifyRow = (title: string, url: string) =>
+      "<tr><td><strong>Kestrel Freight</strong></td><td>" + title + "</td><td>Dayton, OH</td><td><a href=\"" + url + "\">Apply</a></td><td>0d</td></tr>";
+    const readme = [
+      simplifyRow("Software Development Intern", avature + "1234" + tracking),
+      simplifyRow("Data Analytics Intern", avature + "1235" + tracking),
+      simplifyRow("Operations Intern", avature + "1236" + tracking),
+      simplifyRow("Sales Intern", avature + "1237" + tracking),
+      simplifyRow("Finance Intern", avature + "1238" + tracking)
+    ].join("\n");
+    const moved = (location: string) => new Response(null, { status: 301, headers: { location } });
+    const requests: string[] = [];
+    const result = await fetchGitHubJobList({ url: "https://github.com/SimplifyJobs/Summer2027-Internships" }, async (url) => {
+      if (isIndex(url)) return new Response(readme);
+      requests.push(url);
+      if (url === avature + "1234") return moved(careers + "1234" + tracking);
+      if (url === careers + "1234" + tracking) return html(fixture("avature-job.html"));
+      // A move that changes the path (a sign-in bounce) is refused.
+      if (url === avature + "1235") return moved("https://careers.kestrelfreight.example.com/login");
+      // A same-path move to an excluded ATS host or a reserved name is refused.
+      if (url === avature + "1236") return moved("https://kestrelfreight.wd1.myworkdayjobs.com/en_US/KFexternalcareers/JobDetail/1236");
+      if (url === avature + "1237") return moved("https://careers.kestrelfreight.internal/en_US/KFexternalcareers/JobDetail/1237");
+      // Only one move to another host is followed.
+      if (url === avature + "1238") return moved(careers + "1238");
+      if (url === careers + "1238") return moved("https://jobs.kestrelfreight.example.com/en_US/KFexternalcareers/JobDetail/1238");
+      return unexpected(url);
+    }, { delayMs: 0, now, filter: fresh });
+    expect(requests).toEqual([
+      avature + "1234", careers + "1234" + tracking,
+      avature + "1235", avature + "1236", avature + "1237",
+      avature + "1238", careers + "1238"
+    ]);
+    expect(result.items).toHaveLength(1);
+    const item = result.items[0]!;
+    expect(item.sourceUrl).toBe(avature + "1234");
+    expect(postingLinkKey(avature + "1234" + tracking)).toBe(postingLinkKey(item.sourceUrl!));
+    expect(item.title).toBe("Software Development Intern (Summer 2027)");
+    expect(item.text).toContain("Kestrel Freight moves regional shipments for small manufacturers");
+    expect(item.text.split("\n", 1)[0]).toMatch(/^Location: Dayton\b/);
+    const notes = result.notes.join(" ");
+    expect(notes).toContain("redirected away from the posting's site 4");
+    expect(notes).toContain("4 public postings were unavailable");
+  });
+
   it("resolves Workable links through the public v2 job endpoint", async () => {
     const listing = "https://apply.workable.com/nimbus-labs/j/17F965FBBB/";
     const result = await run(row("Nimbus Labs", "Data Engineering Intern", listing), (url) =>

@@ -123,7 +123,7 @@ export const suiteManifest = [
   },
   {
     id: "pipeline-pass",
-    features: ["browser", "jobs"],
+    features: ["browser", "jobs", "discovery"],
     tier: "local",
     script: "test:agent:pass",
     requires: ["node", "pnpm", "node-sqlite"],
@@ -131,7 +131,7 @@ export const suiteManifest = [
     mutation: "local-temporary",
     timeoutMs: 45_000,
     reportPrefixes: [],
-    description: "Watcher tick and pipeline pass against a disposable workspace (injected GitHub and source fetches): the pass runs after the tick's own sources read, tick after tick in one process, and the pipeline lock is released on every path, including an early failure, and the pass's Discord notice is sent once per item after the lock is released, while a failed notice or pass never leaves the lock held. Internal failures and already-approved runs stay out of candidate DMs, while a later manual field correction keeps its original Q number. Pursued-on-fit postings are logged and written to pipeline-status.json."
+    description: "Watcher tick and pipeline pass against a disposable workspace (injected GitHub and source fetches): the pass runs after the tick's own sources read, tick after tick in one process, and the pipeline lock is released on every path, including an early failure, and the pass's Discord notice is sent once per item after the lock is released, while a failed notice or pass never leaves the lock held. Internal failures and already-approved runs stay out of candidate DMs, while a later manual field correction keeps its original Q number. Pursued-on-fit postings are logged and written to pipeline-status.json. Each checked source writes its discovery trace in the workspace's data directory."
   },
   {
     id: "discord-notify",
@@ -362,6 +362,18 @@ export const suiteManifest = [
     description: "Explicit read-only command, never selected by a gate: prints a run's stored post-submit evidence (outcome, query-stripped URL, invalid fields with the site's error text, site error text, screenshot path, redacted visible text)."
   },
   {
+    id: "discovery-trace-cli",
+    features: ["discovery"],
+    tier: "benchmark",
+    script: "discovery:trace",
+    requires: ["node", "pnpm"],
+    network: "none",
+    mutation: "none",
+    timeoutMs: 30_000,
+    reportPrefixes: [],
+    description: "Explicit read-only command, never selected by a gate: summarizes the workspace's discovery traces (counts by decision and reason, dropped hosts per pass) and finds a listing by company, title, or link."
+  },
+  {
     id: "profile-answers-cli",
     features: ["profile"],
     tier: "benchmark",
@@ -491,7 +503,7 @@ export const suiteManifest = [
     mutation: "none",
     timeoutMs: 30_000,
     reportPrefixes: [],
-    description: "Bulk batch parsing, full-posting duplicate keys, distinct same-title requisitions, qualified-only promotion, and bounded parsing of the five selected GitHub job lists with public posting resolution (list age and season filters, Vansh short links followed one hop, the list's location labelled when the board gives none or names no place; Ashby postal addresses, Lever's posting country, and Greenhouse offices joined to the location), plus the shared model rate limiter (90% pacing, token reservations, 429 pause and retry) and bounded-concurrency mapping; Dover, iCIMS, Workable, Rippling, Lever EU, Greenhouse gh_jid employer links, and schema.org JobPosting career pages resolved from synthetic fixtures (rows past the age limit never fetched, unsupported hosts left for manual review with reasons, per-host request pacing, the project user agent, structured locations with country codes named in full)."
+    description: "Bulk batch parsing, full-posting duplicate keys, distinct same-title requisitions, qualified-only promotion, and bounded parsing of the five selected GitHub job lists with public posting resolution (list age and season filters, Vansh short links followed one hop, the list's location labelled when the board gives none or names no place; Ashby postal addresses, Lever's posting country, and Greenhouse offices joined to the location), plus the shared model rate limiter (90% pacing, token reservations, 429 pause and retry) and bounded-concurrency mapping; Dover, iCIMS, Workable, Rippling, Lever EU, Greenhouse gh_jid employer links, and schema.org JobPosting career pages resolved from synthetic fixtures (rows past the age limit never fetched, unsupported hosts left for manual review with reasons, per-host request pacing, the project user agent, structured locations with country codes named in full). Avature-style same-path moves to the employer's career domain followed once (path changes, excluded or reserved hosts, and a second move refused) and one trace decision per listed row (closed, non-internship, stale, listed twice, known, unsupported, unavailable, not reached), with a malformed Vansh row skipped instead of failing the list."
   },
   {
     id: "bulk-discovery-run",
@@ -503,7 +515,7 @@ export const suiteManifest = [
     mutation: "local-temporary",
     timeoutMs: 60_000,
     reportPrefixes: [],
-    description: "Batch and cross-source duplicate skipping, distinct same-title requisitions, ingest, analysis, promotion, and rate-limited source fetch against disposable SQLite."
+    description: "Batch and cross-source duplicate skipping, distinct same-title requisitions, ingest, analysis, promotion, and rate-limited source fetch against disposable SQLite. The per-listing discovery trace (discovery-traces/<date>.jsonl: incremental lines, owner-only modes, quiet rows once per day per list, final counts by decision, 14-day pruning, the pnpm discovery:trace summary and --find) and its ingest outcomes for a checked source."
   },
   {
     id: "outcome-contracts",

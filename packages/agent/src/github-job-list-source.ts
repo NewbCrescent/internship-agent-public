@@ -8,14 +8,22 @@ import {
 } from "./posting-page-sources";
 import { pacePerHost, waitFor, type Sleep } from "./host-pacer";
 import { countryName, greenhouseOfficeLine, joinPlaceParts, withLocation } from "./place-text";
+import type { DiscoveryListDecision, DiscoveryRowEvent } from "./discovery-trace";
 
 type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
 /**
  * A list row. `ageDays` is how long the row has been listed (the list's Age
  * column, or Vansh's date_posted), null when the list states none; `location`
- * is the list's location column; `season` is Vansh's stated season.
+ * is the list's location column; `season` is Vansh's stated season. `row` is
+ * the 1-based position in the parse output (file order for Simplify and
+ * Speedy; for Vansh the valid rows newest first, then the malformed ones).
+ * `rejected` marks a row the parser already rules out, with its reason.
  */
-type Listing = { companyName: string; title: string; url: string; ageDays: number | null; location: string | null; season: string | null };
+type Listing = {
+  companyName: string; title: string; url: string; ageDays: number | null; location: string | null; season: string | null;
+  row: number; rejected?: { decision: "closed" | "not-internship" | "failed-to-parse"; reason: string };
+};
+type ParsedListing = Omit<Listing, "row">;
 type BoardTarget =
   | { kind: "greenhouse"; slug: string; id: string }
   | { kind: "lever"; slug: string; id: string; eu: boolean }
@@ -200,7 +208,9 @@ export function canonicalGitHubJobListUrl(raw: string): string {
  * Greenhouse, Lever (including Lever EU), Ashby, Workday, SmartRecruiters,
  * Oracle Cloud, Dover, iCIMS, Workable, and Rippling links, Greenhouse gh_jid
  * links on employer domains, and career pages carrying one schema.org
- * JobPosting to full descriptions before matching.
+ * JobPosting to full descriptions before matching. `onRow` receives one
+ * decision for every parsed row (the discovery trace); a failing callback
+ * never stops the check.
  */
 export async function fetchGitHubJobList(
   source: { url: string },
@@ -217,6 +227,8 @@ export async function fetchGitHubJobList(
     /** Overrides discoveryListFilter() (from the environment). */
     filter?: DiscoveryListFilter;
     now?: number;
+    /** One decision per parsed row, as it is made. */
+    onRow?: (event: DiscoveryRowEvent) => void;
   } = {}
 ): Promise<GitHubListResult> {
   const config = SOURCES[parseGitHubJobListUrl(source.url)];
@@ -240,25 +252,61 @@ export async function fetchGitHubJobList(
     if (!response.ok) throw new Error("The GitHub job list answered " + response.status + ".");
     files.push(await boundedText(response, MAX_INDEX_BYTES));
   }
-  const listings = config.format === "simplify" ? parseSimplify(files[0]!) :
+  const parsed: ParsedListing[] = config.format === "simplify" ? parseSimplify(files[0]!) :
     config.format === "vansh" ? parseVansh(files[0]!, now) :
     config.format === "quant" ? parseQuant(files[0]!) :
     files.flatMap((file, index) => parseSpeedy(file, index > 0));
+  const listings: Listing[] = parsed.map((listing, index) => ({ ...listing, row: index + 1 }));
+  const emit = (listing: Listing, decision: DiscoveryListDecision, reason: string, link = listing.url, postingUrl?: string) => {
+    if (!options.onRow) return;
+    let host = "";
+    try { host = new URL(link).hostname; } catch { /* no host */ }
+    try {
+      options.onRow({
+        row: listing.row, company: listing.companyName.slice(0, 200), title: listing.title.slice(0, 200),
+        url: link.slice(0, 500), host, decision, reason: reason.slice(0, 300),
+        ...(postingUrl !== undefined ? { postingUrl: postingUrl.slice(0, 500) } : {})
+      });
+    } catch { /* the trace never stops discovery */ }
+  };
   const unique = new Set<string>();
   let known = 0;
   let stale = 0;
   let offSeason = 0;
+  let unreadable = 0;
   // Known, stale, and off-season rows are dropped before the scan cap, so each check reaches new postings.
-  const candidates = listings.filter((row) => {
-    if (!row.companyName || !row.title || !validHttpsUrl(row.url)) return false;
-    if (filter.maxAgeDays !== null && (row.ageDays === null || row.ageDays > filter.maxAgeDays)) { stale += 1; return false; }
-    if (filter.season && row.season && row.season.toLocaleLowerCase("en-US") !== filter.season) { offSeason += 1; return false; }
+  const filtered: Listing[] = [];
+  for (const row of listings) {
+    if (row.rejected) {
+      if (row.rejected.decision === "failed-to-parse") unreadable += 1;
+      emit(row, row.rejected.decision, row.rejected.reason);
+      continue;
+    }
+    if (!row.companyName || !row.title) { unreadable += 1; emit(row, "failed-to-parse", "the row names no company or title"); continue; }
+    if (!validHttpsUrl(row.url)) { emit(row, "invalid-link", "the apply link is not a plain https link"); continue; }
+    if (filter.maxAgeDays !== null && (row.ageDays === null || row.ageDays > filter.maxAgeDays)) {
+      stale += 1;
+      const limit = filter.maxAgeDays + " " + (filter.maxAgeDays === 1 ? "day" : "days");
+      emit(row, "stale", row.ageDays === null
+        ? "the list states no date while the age limit of " + limit + " is set"
+        : "listed " + row.ageDays + " " + (row.ageDays === 1 ? "day" : "days") + " ago, past the age limit of " + limit);
+      continue;
+    }
+    if (filter.season && row.season && row.season.toLocaleLowerCase("en-US") !== filter.season) {
+      offSeason += 1;
+      emit(row, "off-season", "listed for " + row.season + ", not the target's " + filter.season);
+      continue;
+    }
     const key = postingLinkKey(row.url);
-    if (unique.has(key ?? row.url)) return false;
+    if (unique.has(key ?? row.url)) { emit(row, "duplicate-row", "the same posting is listed earlier in the list"); continue; }
     unique.add(key ?? row.url);
-    if (key && options.knownLinkKeys?.has(key)) { known += 1; return false; }
-    return true;
-  }).slice(0, budget.maxListingsScanned);
+    if (key && options.knownLinkKeys?.has(key)) { known += 1; emit(row, "already-known", "already in the workspace; not fetched again"); continue; }
+    filtered.push(row);
+  }
+  const candidates = filtered.slice(0, budget.maxListingsScanned);
+  for (const row of filtered.slice(budget.maxListingsScanned)) {
+    emit(row, "not-reached", "past this check's scan limit of " + budget.maxListingsScanned + " links; tried again on the next check");
+  }
 
   const ashbyBoards = new Map<string, z.infer<typeof ashbyJobSchema>[]>();
   const items: DiscoveredItem[] = [];
@@ -269,33 +317,58 @@ export async function fetchGitHubJobList(
   let requests = 0;
   let scanned = 0;
   let stoppedForTime = false;
-  for (const listing of candidates) {
-    if (items.length >= maxItems || requests >= maxPostingRequests) break;
-    if (Date.now() >= deadline) { stoppedForTime = true; break; }
+  const itemsLimitReason = "this check's posting limit of " + maxItems + " was reached; tried again on the next check";
+  const requestsReason = "this check's posting-request budget of " + maxPostingRequests + " was reached; tried again on the next check";
+  const timeReason = "this check's time limit was reached; tried again on the next check";
+  let stopIndex = candidates.length;
+  let stopReason = "";
+  for (let index = 0; index < candidates.length; index += 1) {
+    const listing = candidates[index]!;
+    if (items.length >= maxItems) { stopIndex = index; stopReason = itemsLimitReason; break; }
+    if (requests >= maxPostingRequests) { stopIndex = index; stopReason = requestsReason; break; }
+    if (Date.now() >= deadline) { stoppedForTime = true; stopIndex = index; stopReason = timeReason; break; }
     scanned += 1;
     let link = listing.url;
     if (new URL(link).hostname === VANSH_SHORT_HOST) {
-      if (requests >= maxPostingRequests) break;
+      if (requests >= maxPostingRequests) { stopIndex = index; stopReason = requestsReason; break; }
       requests += 1;
       const resolved = await followShortLink(link, postingFetcher);
-      if (!resolved) { unavailable += 1; tally(unavailableReasons, "the list's short link did not resolve"); continue; }
+      if (!resolved) {
+        unavailable += 1;
+        tally(unavailableReasons, "the list's short link did not resolve");
+        emit(listing, "unavailable", "the list's short link did not resolve");
+        continue;
+      }
       link = resolved;
       const key = postingLinkKey(link);
-      if (key && (options.knownLinkKeys?.has(key) || unique.has(key))) { known += 1; continue; }
+      if (key && (options.knownLinkKeys?.has(key) || unique.has(key))) {
+        known += 1;
+        if (options.knownLinkKeys?.has(key)) emit(listing, "already-known", "already in the workspace; not fetched again", link);
+        else emit(listing, "duplicate-row", "the same posting is listed earlier in the list", link);
+        continue;
+      }
       if (key) unique.add(key);
     }
     const target = identifyBoard(link);
-    if (!target) { unsupported += 1; tally(unsupportedHosts, new URL(link).hostname); continue; }
-    if (requests >= maxPostingRequests) break;
+    if (!target) {
+      unsupported += 1;
+      const host = new URL(link).hostname;
+      tally(unsupportedHosts, host);
+      emit(listing, "unsupported", "no supported full-posting source for " + host, link);
+      continue;
+    }
+    if (requests >= maxPostingRequests) { stopIndex = index; stopReason = requestsReason; break; }
     if (requests > 0 && delayMs > 0) await pause(delayMs);
     requests += 1;
     try {
       const posting = await resolvePosting(target, postingFetcher, ashbyBoards, { companyName: listing.companyName });
       if (!posting || !validHttpsUrl(posting.url) || posting.text.length < 200 || posting.text.length > 60_000) {
         unavailable += 1;
-        tally(unavailableReasons, !posting ? "closed, unlisted, or without a description" :
+        const reason = !posting ? "closed, unlisted, or without a description" :
           !validHttpsUrl(posting.url) ? "no usable posting URL" :
-          posting.text.length < 200 ? "description too short" : "description too long");
+          posting.text.length < 200 ? "description too short" : "description too long";
+        tally(unavailableReasons, reason);
+        emit(listing, "unavailable", reason, link);
         continue;
       }
       // The board's own location wins; the list's column fills in, labelled as such, only when the
@@ -312,11 +385,15 @@ export async function fetchGitHubJobList(
         sourceUrl: posting.url,
         publication: posting.publication ?? null
       }));
+      emit(listing, "resolved", "full posting read", link, posting.url);
     } catch (error) {
       unavailable += 1;
-      tally(unavailableReasons, unavailableReason(error));
+      const reason = unavailableReason(error);
+      tally(unavailableReasons, reason);
+      emit(listing, "unavailable", reason, link);
     }
   }
+  for (const listing of candidates.slice(stopIndex)) emit(listing, "not-reached", stopReason);
   const notes = [
     known + " listed " + (known === 1 ? "link was" : "links were") + " already in the workspace and not fetched again.",
     "Scanned " + scanned + " listed internship links from " + config.repository + ".",
@@ -330,6 +407,10 @@ export async function fetchGitHubJobList(
       " " + (filter.maxAgeDays === 1 ? "day" : "days") + " or undated and skipped.");
   }
   if (offSeason > 0) notes.push(offSeason + " listed " + (offSeason === 1 ? "row was" : "rows were") + " for another season and skipped.");
+  if (unreadable > 0) {
+    notes.push(unreadable + " listed " + (unreadable === 1 ? "row" : "rows") + " could not be read and " +
+      (unreadable === 1 ? "was" : "were") + " skipped.");
+  }
   if (stoppedForTime) notes.push("The check stopped at its " + Math.round(budget.maxFetchTimeMs / 1000) + "-second time limit.");
   if (unsupportedHosts.size > 0) notes.push("Manual review, no supported full-posting source: " + top(unsupportedHosts, 8) + ".");
   if (unavailableReasons.size > 0) notes.push("Unavailable postings stay for manual review: " + top(unavailableReasons, 6) + ".");
@@ -401,8 +482,10 @@ async function followShortLink(url: string, fetcher: Fetcher): Promise<string | 
   } catch { return null; }
 }
 
-function parseSimplify(readme: string): Listing[] {
-  const rows: Listing[] = [];
+const CLOSED_ON_LIST = "no apply link on the list (closed)";
+
+function parseSimplify(readme: string): ParsedListing[] {
+  const rows: ParsedListing[] = [];
   let companyName = "";
   for (const match of readme.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)) {
     const cells = [...match[1]!.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map((cell) => cell[1]!);
@@ -411,28 +494,51 @@ function parseSimplify(readme: string): Listing[] {
     if (company && company !== "↳") companyName = company.replace(/^🔥\s*/, "");
     const title = stripMarkup(cells[1]!);
     const url = firstLink(cells[3]!);
-    if (companyName && isInternshipTitle(title) && url) {
-      rows.push({ companyName, title, url, ageDays: listedAgeDays(cells[4]), location: stripMarkup(cells[2]!) || null, season: null });
-    }
+    if (!companyName && !title) continue;
+    const row = { companyName, title, url: url ?? "", ageDays: listedAgeDays(cells[4]), location: stripMarkup(cells[2]!) || null, season: null };
+    if (!companyName) rows.push({ ...row, rejected: { decision: "failed-to-parse", reason: "the row names no company" } });
+    else if (!url) rows.push({ ...row, rejected: { decision: "closed", reason: CLOSED_ON_LIST } });
+    else if (!isInternshipTitle(title)) rows.push({ ...row, rejected: { decision: "not-internship", reason: "the title is not an internship" } });
+    else rows.push(row);
   }
   return rows;
 }
 
-function parseVansh(raw: string, now: number): Listing[] {
-  const rows = z.array(vanshRowSchema).max(10_000).parse(JSON.parse(raw) as unknown);
-  return rows.filter((row) => row.active !== false && row.is_visible !== false && isInternshipTitle(row.title))
-    .sort((a, b) => (b.date_posted ?? 0) - (a.date_posted ?? 0))
-    .map((row) => ({
-      companyName: row.company_name, title: row.title, url: row.url,
-      // date_posted is in seconds; a future stamp counts as listed today.
-      ageDays: row.date_posted ? Math.max(0, Math.floor((now - row.date_posted * 1000) / 86_400_000)) : null,
-      location: row.locations?.length ? row.locations.join("; ") : null,
-      season: row.season?.trim() || null
-    }));
+/** One malformed row is skipped with its reason; it no longer discards the whole list. */
+function parseVansh(raw: string, now: number): ParsedListing[] {
+  const entries = z.array(z.unknown()).max(10_000).parse(JSON.parse(raw) as unknown);
+  const valid: Array<z.infer<typeof vanshRowSchema>> = [];
+  const failed: ParsedListing[] = [];
+  for (const entry of entries) {
+    const parsed = vanshRowSchema.safeParse(entry);
+    if (parsed.success) { valid.push(parsed.data); continue; }
+    const fields = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
+    const field = (name: string) => typeof fields[name] === "string" ? fields[name] : "";
+    failed.push({
+      companyName: field("company_name"), title: field("title"), url: field("url"), ageDays: null, location: null, season: null,
+      rejected: { decision: "failed-to-parse", reason: "the row does not match the list's format" }
+    });
+  }
+  const rows = valid.sort((a, b) => (b.date_posted ?? 0) - (a.date_posted ?? 0))
+    .map((row): ParsedListing => {
+      const listing: ParsedListing = {
+        companyName: row.company_name, title: row.title, url: row.url,
+        // date_posted is in seconds; a future stamp counts as listed today.
+        ageDays: row.date_posted ? Math.max(0, Math.floor((now - row.date_posted * 1000) / 86_400_000)) : null,
+        location: row.locations?.length ? row.locations.join("; ") : null,
+        season: row.season?.trim() || null
+      };
+      if (row.active === false || row.is_visible === false) {
+        return { ...listing, rejected: { decision: "closed", reason: "marked inactive or hidden on the list" } };
+      }
+      if (!isInternshipTitle(row.title)) return { ...listing, rejected: { decision: "not-internship", reason: "the title is not an internship" } };
+      return listing;
+    });
+  return [...rows, ...failed];
 }
 
-function parseSpeedy(readme: string, internshipOnlyFile: boolean): Listing[] {
-  const rows: Listing[] = [];
+function parseSpeedy(readme: string, internshipOnlyFile: boolean): ParsedListing[] {
+  const rows: ParsedListing[] = [];
   for (const line of readme.split(/\r?\n/)) {
     if (!line.startsWith("|") || /^\|\s*:?-{3,}/.test(line)) continue;
     const cells = line.split("|").slice(1, -1);
@@ -440,15 +546,21 @@ function parseSpeedy(readme: string, internshipOnlyFile: boolean): Listing[] {
     const companyName = stripMarkup(cells[0]!);
     const title = stripMarkup(cells[1]!);
     const url = firstLink(cells[4]!) ?? firstLink(cells[cells.length - 2]!);
-    if (companyName && title && url && (internshipOnlyFile || isInternshipTitle(title))) {
-      rows.push({ companyName, title, url, ageDays: listedAgeDays(cells[cells.length - 1]), location: stripMarkup(cells[2]!) || null, season: null });
+    const row = { companyName, title, url: url ?? "", ageDays: listedAgeDays(cells[cells.length - 1]), location: stripMarkup(cells[2]!) || null, season: null };
+    if (!url) {
+      if (internshipOnlyFile || isInternshipTitle(title)) rows.push({ ...row, rejected: { decision: "closed", reason: CLOSED_ON_LIST } });
+      continue;
     }
+    if (!companyName || !title) rows.push({ ...row, rejected: { decision: "failed-to-parse", reason: "the row names no company or title" } });
+    else if (!internshipOnlyFile && !isInternshipTitle(title)) {
+      rows.push({ ...row, rejected: { decision: "not-internship", reason: "the title is not an internship" } });
+    } else rows.push(row);
   }
   return rows;
 }
 
-function parseQuant(readme: string): Listing[] {
-  const rows: Listing[] = [];
+function parseQuant(readme: string): ParsedListing[] {
+  const rows: ParsedListing[] = [];
   let companyName = "";
   for (const line of readme.split(/\r?\n/)) {
     if (line.startsWith("## ") && !line.startsWith("## Contributing") && !line.startsWith("## Using")) {

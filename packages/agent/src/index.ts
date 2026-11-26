@@ -5,6 +5,7 @@ export * from "./application-orchestrator";
 export * from "./browser-orchestrator";
 export * from "./application-record";
 export * from "./discovery-orchestrator";
+export * from "./discovery-trace";
 export * from "./public-board-source";
 export * from "./github-job-list-source";
 export * from "./host-pacer";

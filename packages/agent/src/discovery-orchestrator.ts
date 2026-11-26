@@ -42,6 +42,7 @@ import { pipelineSettings } from "./pipeline-orchestrator";
 import { fitTargetDecision, postingTargetDecision, targetTerm } from "./application-target";
 import { mapWithConcurrency, modelConcurrency } from "./concurrency";
 import { labelsPendingNotice } from "./requirement-relabel";
+import { openDiscoveryTrace, type DiscoveryRowEvent, type DiscoveryTrace } from "./discovery-trace";
 import type { ModelProvider } from "./model/provider";
 
 export const MAX_BATCH_ITEMS = 100;
@@ -54,6 +55,8 @@ export type BatchReport = {
   feedbackSkippedJobIds: string[];
   errors: string[];
   sourceNotes: string[];
+  /** Why the source check's discovery trace could not be written, if it could not. */
+  traceError?: string | null;
 };
 
 /** Postings past the approval gate belong to the live pipeline, not to discovery. */
@@ -68,7 +71,7 @@ const LIVE_STATUSES: ReadonlySet<JobPostingStatus> = new Set([
 ]);
 
 type FetchedBatch = { items: DiscoveredItem[]; notes: string[] };
-type FetchContext = { knownLinkKeys: ReadonlySet<string> };
+type FetchContext = { knownLinkKeys: ReadonlySet<string>; onRow?: (event: DiscoveryRowEvent) => void };
 export type FetchBatch = (
   source: { label: string; url: string },
   context: FetchContext
@@ -76,7 +79,7 @@ export type FetchBatch = (
 
 async function defaultFetchBatch(source: { label: string; url: string }, context: FetchContext): Promise<FetchedBatch> {
   if (new URL(source.url).hostname === "github.com") {
-    return fetchGitHubJobList(source, fetch, { knownLinkKeys: context.knownLinkKeys });
+    return fetchGitHubJobList(source, fetch, { knownLinkKeys: context.knownLinkKeys, onRow: context.onRow });
   }
   return { items: await fetchPublicBoard(source), notes: [] };
 }
@@ -111,18 +114,37 @@ export async function fetchCompanySource(
     fetchBatch?: FetchBatch;
     /** Tests inject a model; production uses the configured provider. */
     provider?: ModelProvider;
+    /** The workspace data directory; when given, the check writes its discovery trace there. */
+    traceDirectory?: string;
   } = {}
 ): Promise<BatchReport> {
   const database = options.database ?? getDatabase();
   const source = reserveDiscoveryFetch(database, sourceId);
   if (!source.url) throw new Error("The company source has no URL to fetch.");
-  const fetchBatch = options.fetchBatch ?? defaultFetchBatch;
-  // Every current posting, whatever its status, is known; its link is not re-fetched.
-  const knownLinkKeys = new Set(listCurrentPostingIdentities(database)
-    .flatMap((posting) => postingLinkKey(posting.sourceUrl) ?? []));
-  const fetched = await fetchBatch({ label: source.label, url: source.url }, { knownLinkKeys });
-  const { items, notes } = Array.isArray(fetched) ? { items: fetched, notes: [] } : fetched;
-  return processDiscoveredItems(database, sourceId, items.slice(0, MAX_BATCH_ITEMS), [], options, notes);
+  const trace = options.traceDirectory ? openDiscoveryTrace(options.traceDirectory, { label: source.label, url: source.url }) : null;
+  try {
+    const fetchBatch = options.fetchBatch ?? defaultFetchBatch;
+    // Every current posting, whatever its status, is known; its link is not re-fetched.
+    const knownLinkKeys = new Set(listCurrentPostingIdentities(database)
+      .flatMap((posting) => postingLinkKey(posting.sourceUrl) ?? []));
+    const fetched = await fetchBatch(
+      { label: source.label, url: source.url },
+      { knownLinkKeys, ...(trace ? { onRow: (event: DiscoveryRowEvent) => trace.row(event) } : {}) }
+    );
+    const { items, notes } = Array.isArray(fetched) ? { items: fetched, notes: [] } : fetched;
+    for (const item of items.slice(MAX_BATCH_ITEMS)) {
+      trace?.ingest({
+        company: item.companyName, title: item.title, postingUrl: item.sourceUrl ?? "",
+        decision: "not-reached", reason: "past this check's batch limit of " + MAX_BATCH_ITEMS + " postings"
+      });
+    }
+    const report = await processDiscoveredItems(database, sourceId, items.slice(0, MAX_BATCH_ITEMS), [], { ...options, trace }, notes);
+    trace?.end();
+    return { ...report, traceError: trace?.writeError ?? null };
+  } catch (error) {
+    trace?.end({ error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
 }
 
 export function addCompanySource(
@@ -174,7 +196,7 @@ async function processDiscoveredItems(
   sourceId: string | null,
   items: DiscoveredItem[],
   errors: string[],
-  options: { candidateId?: string; threshold?: number; limit?: number; provider?: ModelProvider },
+  options: { candidateId?: string; threshold?: number; limit?: number; provider?: ModelProvider; trace?: DiscoveryTrace | null },
   sourceNotes: string[] = []
 ): Promise<BatchReport> {
   const candidateId = options.candidateId ?? LOCAL_CANDIDATE_ID;
@@ -196,9 +218,24 @@ async function processDiscoveredItems(
   );
   const knownUrls = new Map(currentPostings.map((posting) => [posting.sourceUrl, posting]));
   let existingDuplicates = 0;
+  const trace = options.trace ?? null;
+  // A pasted item without a source URL needs a stable identity that
+  // includes company and title, not just text shared by another employer.
+  const itemSourceUrl = (item: DiscoveredItem) => item.sourceUrl
+    ?? `manual-batch://${contentDedupeKey(postingDedupeKey(item.companyName, item.title, item.text)).slice(0, 16)}`;
+  if (trace) {
+    const kept = new Set(unique);
+    for (const item of items) {
+      if (kept.has(item)) continue;
+      trace.ingest({
+        company: item.companyName, title: item.title, postingUrl: itemSourceUrl(item),
+        decision: "duplicate", reason: "the same posting appears twice in this check"
+      });
+    }
+  }
 
   type Outcome =
-    | { kind: "ingested"; jobId: string }
+    | { kind: "ingested"; jobId: string; updated: boolean }
     | { kind: "skipped" | "feedback-skipped"; jobId: string; duplicate: boolean }
     | { kind: "duplicate" }
     | { kind: "error"; message: string };
@@ -206,10 +243,7 @@ async function processDiscoveredItems(
   // SQLite write stay synchronous, so writes never interleave.
   const outcomes = await mapWithConcurrency(unique, modelConcurrency(), async (item): Promise<Outcome> => {
     try {
-      // A pasted item without a source URL needs a stable identity that
-      // includes company and title, not just text shared by another employer.
-      const sourceUrl = item.sourceUrl
-        ?? `manual-batch://${contentDedupeKey(postingDedupeKey(item.companyName, item.title, item.text)).slice(0, 16)}`;
+      const sourceUrl = itemSourceUrl(item);
       const existing = findJobBySourceUrl(database, sourceUrl);
       const mirrored = knownPostings.get(postingDedupeKey(item.companyName, item.title, item.text));
       const byUrl = knownUrls.get(sourceUrl);
@@ -226,7 +260,7 @@ async function processDiscoveredItems(
         sourceUrl,
         publication: item.publication ?? null
       }, { database, provider: options.provider, protectedStatuses: LIVE_STATUSES });
-      return { kind: "ingested", jobId };
+      return { kind: "ingested", jobId, updated: Boolean(existing) };
     } catch (error) {
       if (error instanceof ProtectedJobError) return { kind: "skipped", jobId: error.jobId, duplicate: false };
       return { kind: "error", message: `${item.companyName} — ${item.title}: ${error instanceof Error ? error.message : String(error)}` };
@@ -244,6 +278,26 @@ async function processDiscoveredItems(
       (outcome.kind === "skipped" ? skippedJobIds : feedbackSkippedJobIds).push(outcome.jobId);
       if (outcome.duplicate) existingDuplicates += 1;
     }
+  }
+
+  if (trace) {
+    unique.forEach((item, index) => {
+      const outcome = outcomes[index]!;
+      const base = { company: item.companyName, title: item.title, postingUrl: itemSourceUrl(item) };
+      if (outcome.kind === "ingested") {
+        trace.ingest(outcome.updated
+          ? { ...base, decision: "updated", reason: "stored a new revision of the job at this URL", jobId: outcome.jobId }
+          : { ...base, decision: "stored-new", reason: "stored as a new job", jobId: outcome.jobId });
+      } else if (outcome.kind === "duplicate") {
+        trace.ingest({ ...base, decision: "duplicate", reason: "the same posting (company, title, and text) is already stored" });
+      } else if (outcome.kind === "error") {
+        trace.ingest({ ...base, decision: "ingest-error", reason: outcome.message });
+      } else if (outcome.kind === "skipped") {
+        trace.ingest({ ...base, decision: "live-posting", reason: "the stored job is already past the approval gate", jobId: outcome.jobId });
+      } else {
+        trace.ingest({ ...base, decision: "feedback-skipped", reason: "skipped by your discovery feedback", jobId: outcome.jobId });
+      }
+    });
   }
 
   const ranked: Array<{ jobId: string; verdict: string; fitScore: number }> = [];

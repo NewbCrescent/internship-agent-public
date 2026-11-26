@@ -10,10 +10,12 @@ import {
   postingPayAnswer,
   restrictiveCovenantActive,
   SAN_FRANCISCO,
+  scopeKey,
   type CandidateFact,
   type CandidateFactKey,
   type CandidateFactValue,
   type ExportControlCategory,
+  type FactScope,
   type MappedQuestion,
   type QuestionContext,
   type QuestionResolution,
@@ -24,10 +26,13 @@ import type { FactFile } from "./profile-facts";
 
 /**
  * Resolve-time rules for the candidate's standard legal and background
- * answers: the five answers built from saved facts (U.S. person, U.S. citizen
+ * answers: the six answers built from saved facts (U.S. person, U.S. citizen
  * or national, U.S. citizen or permanent resident, F-1 OPT (only ever No, from
  * a saved U.S. citizenship or citizen/national or permanent-resident status),
- * and the salary rule), the
+ * the unrestricted right to work in the United States (Yes from a saved U.S.
+ * citizenship or citizen/national or permanent-resident status, No from a saved
+ * No to U.S. work authorization, never from work authorization alone), and the
+ * salary rule), the
  * non-solicitation agreement's end date (after it, the agreement answers No
  * and its explanation is not used), and the guard that never lets the
  * explanation name a former employer. Every answer comes from the
@@ -97,10 +102,11 @@ export function resolveStandardAnswer(
   today: string
 ): QuestionResolution | null {
   const lookup: Lookup = { question, mapping };
-  const read = new Map<CandidateFactKey, CandidateFact | null>();
-  const get = (key: CandidateFactKey): CandidateFact | null => {
-    if (!read.has(key)) read.set(key, getCurrentFact(database, candidateId, key, { kind: "global" }));
-    return read.get(key) ?? null;
+  const read = new Map<string, CandidateFact | null>();
+  const get = (key: CandidateFactKey, scope: FactScope = { kind: "global" }): CandidateFact | null => {
+    const id = `${key}|${scopeKey(scope)}`;
+    if (!read.has(id)) read.set(id, getCurrentFact(database, candidateId, key, scope));
+    return read.get(id) ?? null;
   };
   const result = resolveRule(database, candidateId, lookup, context, today, get);
   if (!result) return null;
@@ -128,7 +134,7 @@ function resolveRule(
   lookup: Lookup,
   context: QuestionContext,
   today: string,
-  get: (key: CandidateFactKey) => CandidateFact | null
+  get: (key: CandidateFactKey, scope?: FactScope) => CandidateFact | null
 ): QuestionResolution | null {
   const key = lookup.mapping.key;
   const make = (value: CandidateFactValue, base: CandidateFact, note: string) => resolved(lookup, derived(candidateId, key, value, base, note));
@@ -175,6 +181,25 @@ function resolveRule(
       return make(false, status, "Built from your saved export-control status (OPT is for F-1 students).");
     }
     return needs(lookup, "Your saved answers do not say whether you are on or eligible for F-1 OPT; answer it directly.");
+  }
+
+  if (key === "unrestricted_us_work_authorization") {
+    // Citizens, nationals, and permanent residents may work in the United States without restriction; a saved No to U.S. work authorization is a No.
+    const citizen = get("us_citizen");
+    const status = get("us_person_export_controls");
+    const category = exportCategoryOf(status);
+    const unrestricted = citizen?.value === true ? citizen
+      : status && (category === "citizen_or_national" || category === "permanent_resident") ? status : null;
+    const authorized = get("authorized_to_work", { kind: "country", code: "US" });
+    if (authorized?.value === false) {
+      return unrestricted
+        ? needs(lookup, "Your saved answers disagree about working in the United States; answer it directly.")
+        : make(false, authorized, "Built from your saved U.S. work authorization answer.");
+    }
+    if (unrestricted) {
+      return make(true, unrestricted, unrestricted === citizen ? "Built from your saved U.S. citizenship answer." : "Built from your saved export-control status.");
+    }
+    return needs(lookup, "Your saved answers do not say whether your right to work in the United States is unrestricted; answer it directly.");
   }
 
   if (key === "salary_expectation") {

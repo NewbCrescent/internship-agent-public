@@ -430,8 +430,12 @@ function isPlaceLine(text: string): boolean {
  * those is stated does a well-known city decide ("Berlin" is Germany, "South
  * San Francisco" the US); an unknown bare city stays unread.
  */
+// "Remote in USA" (a GitHub list's location column), "Remote within the United States", "Hybrid in Canada": the place after the work mode (OpenSesame, 2026-11-26).
+const WORK_MODE_LEAD = /^(?:fully\s+)?(?:remote|hybrid)\s+(?:in|within|across|from|anywhere in)\s+(?:the\s+)?(?=\S)/i;
+
 function readPlaceGroup(text: string): Pick<JobLocation, "city" | "region" | "countryCode"> | null {
-  const segments = text.split(PLACE_SEGMENT_SEPARATOR).map((segment) => segment.trim());
+  const place = text.replace(WORK_MODE_LEAD, "");
+  const segments = place.split(PLACE_SEGMENT_SEPARATOR).map((segment) => segment.trim());
   const readings = segments.map((segment) => readPlace(segment));
   const last = (kind: "country" | "us-state" | "ca-province", fullName = false) => {
     for (let index = readings.length - 1; index >= 0; index--) {

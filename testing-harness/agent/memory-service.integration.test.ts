@@ -375,6 +375,88 @@ describe("standard legal and background answers (fictional answers)", () => {
     database.close();
   });
 
+  it("builds the unrestricted right to work in the United States from saved answers, never from work authorization alone (Track 43)", async () => {
+    const question = "Do you have the unrestricted right to work in the United States?";
+    const US: FactScope = { kind: "country", code: "US" };
+    const citizen = workspace();
+    save(citizen, "us_citizen", true);
+    expect(await resolve(citizen, question)).toMatchObject({
+      status: "RESOLVED", displayAnswer: "Yes", fact: { key: "unrestricted_us_work_authorization", id: "derived:unrestricted_us_work_authorization" }
+    });
+    expect(() => save(citizen, "unrestricted_us_work_authorization", true)).toThrow(/never stored/);
+    citizen.close();
+
+    const resident = workspace();
+    save(resident, "us_person_export_controls", "A lawful permanent resident of the United States");
+    expect(await resolve(resident, question)).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes", fact: { key: "unrestricted_us_work_authorization" } });
+    resident.close();
+
+    const notAuthorized = workspace();
+    save(notAuthorized, "us_citizen", false);
+    save(notAuthorized, "us_person_export_controls", "None of the above");
+    save(notAuthorized, "authorized_to_work", false, US);
+    expect(await resolve(notAuthorized, question)).toMatchObject({ status: "RESOLVED", displayAnswer: "No", fact: { key: "unrestricted_us_work_authorization" } });
+    notAuthorized.close();
+
+    // Authorized but neither a citizen nor a permanent resident (a visa holder): the candidate answers.
+    const authorizedOnly = workspace();
+    save(authorizedOnly, "us_citizen", false);
+    save(authorizedOnly, "us_person_export_controls", "None of the above");
+    save(authorizedOnly, "authorized_to_work", true, US);
+    expect(await resolve(authorizedOnly, question)).toMatchObject({ status: "NEEDS_INPUT" });
+    authorizedOnly.close();
+
+    const disagree = workspace();
+    save(disagree, "us_citizen", true);
+    save(disagree, "authorized_to_work", false, US);
+    expect(await resolve(disagree, question)).toMatchObject({ status: "NEEDS_INPUT" });
+    disagree.close();
+
+    const empty = workspace();
+    expect(await resolve(empty, question)).toMatchObject({ status: "NEEDS_INPUT" });
+    empty.close();
+  });
+
+  it("answers a broader current-student question only with a saved Yes to full-time enrollment, and never saves an answer to it (Track 43)", async () => {
+    const question = "Are you a current student enrolled in a college/university program or have graduated within the past 12 months? Undergraduate, postgraduate, or associate programs accepted.";
+    const enrolled = workspace();
+    save(enrolled, "enrolled_full_time", true);
+    expect(await resolve(enrolled, question)).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes", fact: { key: "enrolled_full_time" } });
+    enrolled.close();
+
+    const partTime = workspace();
+    save(partTime, "enrolled_full_time", false);
+    expect(await resolve(partTime, question)).toMatchObject({ status: "NEEDS_INPUT", mapping: { key: "enrolled_full_time", broader: true } });
+    partTime.close();
+
+    const empty = workspace();
+    expect(await resolve(empty, question)).toMatchObject({ status: "NEEDS_INPUT" });
+    const before = factCount(empty);
+    expect(await answerCandidateQuestion({ question, answer: "Yes", remember: true, context: {} }, { database: empty })).toMatchObject({
+      status: "ANSWERED_ONCE", displayAnswer: "Yes"
+    });
+    expect(factCount(empty)).toBe(before);
+    expect(empty.prepare("SELECT COUNT(*) AS count FROM candidate_facts WHERE key = 'enrolled_full_time'").get()).toMatchObject({ count: 0 });
+    empty.close();
+
+    const pause: PauseRecord = {
+      fieldId: "current-student",
+      label: question,
+      question: `How should "${question}" be answered?`,
+      suggestedKey: null,
+      suggestedScope: null,
+      safeguard: false,
+      sensitive: false,
+      upload: false,
+      status: "open",
+      answer: null,
+      draft: null,
+      fieldKind: "select",
+      options: ["Yes", "No"]
+    };
+    expect(await planPauseMemory(pause, { companyName: "Fixture Learning", context: {} })).toEqual({ path: "once", reason: "fact_rule" });
+  });
+
   it("states the posting's pay as an hourly figure, and holds without a number or a saved rule", async () => {
     const database = standardWorkspace();
     const question = "What are your salary expectations?";
