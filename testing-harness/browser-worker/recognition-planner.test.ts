@@ -677,6 +677,36 @@ describe("how did you hear about us", () => {
       ["source", "choose", "Job Board"], ["phone-type", "choose", "Mobile"], ["major", "fill", "Computer Science"]
     ]);
   });
+
+  it("reads \"How did you connect with us?\" as the same question and picks Other when no listed source is a job board (Track 67)", () => {
+    expect(isHearAboutQuestion("How did you connect with us?")).toBe(true);
+    expect(isHearAboutQuestion("Would you like to connect with us on LinkedIn?")).toBe(false);
+    const CONNECT = ["Fixture Fest", "Through a partnership (Fixture Club)", "On-campus event", "Virtual event", "Other"];
+    // Before the Other tier, the seed "connect-1" picked "On-campus event", an event the candidate never attended.
+    expect(pickHearAboutOption(CONNECT, "connect-1", "Online job board")).toBe("Other");
+    expect(pickHearAboutOption(["Job Board", "Other"], "connect-1")).toBe("Job Board");
+    expect(pickHearAboutOption(["N/A", "Other"], "connect-1")).toBe("N/A");
+    const result = planAutofill(recognizeForm("https://example.test/apply", "Apply", [
+      control({ tag: "select", id: "connect", label: "How did you connect with us?", required: true, options: CONNECT })
+    ]), {
+      profile: {},
+      resolutions: new Map([["connect", { status: "RESOLVED", key: "how_heard", scope: "global", display: "Online job board", value: "Online job board" }]]),
+      packageAnswers: [],
+      variantId: null
+    });
+    expect(result.decisions[0]).toMatchObject({ fieldId: "connect", action: "choose", value: "Other", basis: { kind: "fact", key: "how_heard", scope: "global" } });
+  });
+
+  it("fills a phone number box with the profile phone's digits only, and nothing from a number too short to be a phone (Track 67)", () => {
+    const phonePlan = (kind: "number" | "text", phone: string) => planAutofill(recognizeForm("https://example.test/apply", "Apply", [
+      control({ tag: "input", type: kind, id: "phone-number", label: "Phone", required: true })
+    ]), { profile: { phone }, resolutions: new Map(), packageAnswers: [], variantId: null }).decisions[0]!;
+    expect(phonePlan("number", "(555) 010-0199")).toMatchObject({ action: "fill", value: "5550100199", basis: { kind: "profile", field: "phone" } });
+    const short = phonePlan("number", "12345");
+    expect(short.action).toBe("pause");
+    expect(short.basis).toBeNull();
+    expect(phonePlan("text", "(555) 010-0199")).toMatchObject({ action: "fill", value: "(555) 010-0199", basis: { kind: "profile", field: "phone" } });
+  });
 });
 
 describe("CAPTCHA token fields and checkbox groups (Greenhouse's new board)", () => {

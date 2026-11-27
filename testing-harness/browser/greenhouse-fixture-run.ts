@@ -20,6 +20,10 @@
  * LinkedIn fill, the resume uploads, the optional cover letter stays empty,
  * and the "Start typing..." location picks the unique matching suggestion or,
  * with no match, comes back as an unfilled field (a pause), never a throw.
+ * Ashby's autofill box on a form with surveys (fixtures/ashby-survey-autofill.html,
+ * modelled from Ashby's public bundle, Track 67) is no question either: the
+ * resume goes only into Resume, the form is never redrawn, and the Location box
+ * keeps its data-ia-control tag and is picked.
  * Dover (fixtures/dover-application.html, reduced from the 2026-11-20
  * read-only jobs.dover.com captures, served at jobs.dover.com where
  * app.dover.io links redirect) takes each label from the sibling
@@ -178,6 +182,7 @@ const SMARTRECRUITERS_APPLY = "https://jobs.smartrecruiters.com/oneclick-ui/comp
 const ASHBY = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a1/application";
 const ASHBY_TEXTING = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a2/application";
 const ASHBY_VALUE_SELECT = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a3/application";
+const ASHBY_SURVEY = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a4/application";
 /** The Visa Support question's field path in fixtures/ashby-value-select.html (its field id; its entry id is "<render id>_<path>"). */
 const ASHBY_VISA_PATH = "9a0b1c2d-0000-4000-8000-0000000000d1";
 const LEVER = "https://jobs.lever.co/fixturerobotics/00000000-0000-4000-8000-0000000000b1/apply";
@@ -247,6 +252,7 @@ async function main(): Promise<void> {
       "jobs.jobvite.com/fixturerobotics/job/oFixture1/apply": fixture("jobvite-consent.html"),
       "jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a2/application": fixture("ashby-texting-consent.html"),
       "jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a3/application": fixture("ashby-value-select.html"),
+      "jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a4/application": fixture("ashby-survey-autofill.html"),
       // The cross-site reCAPTCHA frame of fixtures/ashby-value-select.html?network=frame-token (Track 27).
       "www.recaptcha.net/recaptcha/enterprise/anchor": RECAPTCHA_ANCHOR_FRAME,
       // Post-submit confirmation pages.
@@ -647,6 +653,27 @@ async function main(): Promise<void> {
       check(nowhere.unfilled.length === 1 && nowhere.unfilled[0]!.reason === 'no suggestion matched "Atlantis"', `Ashby no-match: ${JSON.stringify(nowhere.unfilled)}`);
       check(await ashbyTab.inputValue(".ashby-application-form-input-autocomplete") === "", "Ashby: the unmatched typed text was left in the box");
       await ashbyTab.close();
+    }
+
+    // Ashby's autofill box on a form with surveys (fixtures/ashby-survey-autofill.html, Track 67) is no question: the resume
+    // goes only into Resume, the form is never redrawn, and the Location box keeps its data-ia-control tag.
+    {
+      const surveyTab = await open(ASHBY_SURVEY);
+      const survey = createPlaywrightPage(surveyTab);
+      const surveyForm = await recognizeCurrentForm(survey);
+      const surveyLabels = surveyForm.fields.map((field) => field.label);
+      check(surveyLabels.join("|") === "Name|Resume|Location", `Ashby survey-form labels: ${surveyLabels.join("|")}`);
+      const surveyFiles = surveyForm.fields.filter((field) => field.kind === "file").map((field) => field.id);
+      check(surveyFiles.join("|") === "_systemfield_resume", `Ashby survey-form file fields: ${surveyFiles.join("|")}`);
+      const surveyPlan = planAutofill(surveyForm, { profile: PROFILE, resolutions: new Map(), packageAnswers: [], variantId: VARIANT_ID });
+      const surveyResult = await applyDecisions(survey, surveyForm, surveyPlan.decisions, (decision) => (decision.action === "upload" ? resumePdf : null));
+      check(surveyResult.unfilled.length === 0, `Ashby survey-form unfilled: ${JSON.stringify(surveyResult.unfilled)}`);
+      type SurveyState = { uploads: Record<string, string | null>; location: string | null; autofillUploads: number; redraws: number };
+      const surveyState = await surveyTab.evaluate(() => (window as unknown as { fixture: SurveyState }).fixture);
+      check(surveyState.autofillUploads === 0 && surveyState.redraws === 0, `Ashby survey-form autofill box used: ${JSON.stringify(surveyState)}`);
+      check(surveyState.uploads._systemfield_resume === "resume.pdf" && Object.keys(surveyState.uploads).length === 1, `Ashby survey-form uploads: ${JSON.stringify(surveyState.uploads)}`);
+      check(surveyState.location === "Berkeley, California, United States", `Ashby survey-form location picked: ${surveyState.location}`);
+      await surveyTab.close();
     }
 
     // Ashby's text-message consent (fixtures/ashby-texting-consent.html): the radios inside the phone field's entry take the

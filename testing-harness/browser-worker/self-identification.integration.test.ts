@@ -494,6 +494,7 @@ describe("race-only self-identification lists in browser runs (the candidate's r
 describe("continuing a held run plans its open pauses again (2026-11-24)", () => {
   const OFF = { acceptDataConsent: false, signAttestations: false };
   const DATA_ON = { acceptDataConsent: true, signAttestations: false };
+  const BOTH_ON = { acceptDataConsent: true, signAttestations: true };
   const decline = ["I prefer to self-describe", "I don't wish to answer"];
   // Fictional option list in Greenhouse's "mark all that apply" shape.
   const RACIAL: RawControl = {
@@ -572,6 +573,28 @@ describe("continuing a held run plans its open pauses again (2026-11-24)", () =>
     expect(continued.run.pauses).toEqual([expect.objectContaining({ fieldId: "terms", status: "answered", answer: "yes" })]);
     expect(continued.run.status).toBe("awaiting-approval");
     expect(eventTexts(database, jobId).filter((text) => text === `Accepted data consent: '${TERMS_LABEL}'`)).toHaveLength(1);
+    database.close();
+  });
+
+  it("chooses a one-option arbitration acknowledgment under the standing settings turned on since the run paused, logging label and option once", async () => {
+    const ACKNOWLEDGE = "I Acknowledge/Accept this Statement";
+    const STATEMENT = `Arbitration Acknowledgment: ${ACKNOWLEDGE}`;
+    const ARBITRATION: RawControl = { tag: "select", id: "arbitration", label: "Arbitration Acknowledgment:", required: true, options: [ACKNOWLEDGE] };
+    const database = disposableDatabase();
+    const jobId = approvedJobId(database);
+    const controls = [ARBITRATION, START, SUBMIT];
+    const { run, dataDir } = await startHeld(database, jobId, controls, OFF);
+    expect(run.status).toBe("paused-needs-input");
+    expect(run.pauses.map((entry) => entry.fieldId)).toEqual(["arbitration"]);
+
+    const continued = await continueWith(database, run.id, dataDir, controls, BOTH_ON);
+    expect(continued.page.filled.get("arbitration")).toBe(ACKNOWLEDGE);
+    expect(decision(continued.run, "arbitration")).toMatchObject({
+      action: "choose", value: ACKNOWLEDGE, basis: { kind: "standing_consent", setting: "sign_attestations", group: "authorization", statement: STATEMENT }
+    });
+    expect(continued.run.pauses).toEqual([expect.objectContaining({ fieldId: "arbitration", status: "answered" })]);
+    expect(continued.run.status).toBe("awaiting-approval");
+    expect(eventTexts(database, jobId).filter((text) => text === `Accepted attestation: '${STATEMENT}'`)).toHaveLength(1);
     database.close();
   });
 

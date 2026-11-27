@@ -17,6 +17,10 @@ import { manualOnly } from "./submission-mode";
  *   authorizations (including a notice that the process will require a
  *   background check or drug screen, acknowledged).
  *
+ * A list or radio set with only one option is decided on its label and that
+ * option together (`singleOptionStatement`, Track 67), so the option's own
+ * words count and a fact it asserts still vetoes it.
+ *
  * The classifier is a deterministic whitelist. Statements of fact about the
  * candidate (citizenship, export control, clearance, debarment, criminal
  * history, prior employment, relatives and immediate family, where they live,
@@ -142,8 +146,11 @@ const PRIVACY_POLICY = /\b(?:agree|consent|accept)\b[^.]{0,80}\b(?:privacy (?:po
  */
 const TERMS = /\b(?:agree|agrees|agreed|consent|accept|accepts|accepted|acknowledge)\b[^.]{0,120}\b(?:terms (?:and|&) conditions|terms of (?:use|service)|terms and policies)\b|\bi have read(?:,? understood,?)? and (?:agree|accept|consent)\w*\b[^.]{0,120}\bterms\b/i;
 const EMPLOYMENT_TERMS = /\bterms (?:and|&) conditions of (?:employment|the (?:offer|position|internship|role))\b|\bterms of (?:employment|the offer)\b/i;
-/** "<heading>: I agree and consent": a bare agreement after a heading (Greenhouse's one-box question, read with its legend). */
-const HEADED_AGREEMENT = /^(.+):\s*(?:yes[,.]?\s*)?(?:i\s+)?(?:agree|accept|consent)(?:\s*(?:,|and|&)\s*(?:i\s+)?(?:agree|accept|consent|acknowledge|understand))*[.!]?$/i;
+/**
+ * "<heading>: I agree and consent": a bare agreement after a heading (Greenhouse's one-box question, read with its legend),
+ * or "<heading>: I Acknowledge/Accept this Statement" (Ashby's one-option acknowledgment, Track 67).
+ */
+const HEADED_AGREEMENT = /^(.+):\s*(?:yes[,.]?\s*)?(?:i\s+)?(?:agree|accept|consent|acknowledge)(?:\s*(?:,|and|&|\/)\s*(?:i\s+)?(?:agree|accept|consent|acknowledge|understand))*(?:\s+(?:this|the)\s+statement)?[.!]?$/i;
 const TERMS_NOUN = /\bterms (?:and|&) conditions\b|\bterms of (?:use|service)\b|\bterms and policies\b/i;
 const PRIVACY_NOUN = /\bprivacy (?:policy|notice|statement)\b|\b(?:candidate|applicant) privacy\b|\bdata (?:privacy|protection)\b|\bgdpr\b/i;
 const PERSONAL_DATA_NOUN = /\bpersonal (?:data|information)\b|\bdata processing\b|\bprocessing of (?:my |your )?(?:personal )?(?:data|information)\b/i;
@@ -335,4 +342,28 @@ export function privacyReadStatement(label: string, options: readonly string[]):
   if (!option) return null;
   const statement = `${question} — ${normalize(option)}`;
   return statement.length <= 300 ? { option, statement } : null;
+}
+
+/** "I have read the Privacy Notice.": a one-option list's only option, read as affirmative (never with a negative word). */
+const READ_OPTION = /^i have read\b/i;
+
+/**
+ * The statement a list or radio set with exactly one option makes (Track 67, 2026-11-27: an Ashby
+ * "Arbitration Acknowledgment:" or "GDPR Acknowledgement" whose only option is "I Acknowledge/Accept
+ * this Statement", a Greenhouse privacy-notice list whose only option is "Yes"): the label and that
+ * option together, "<label>: <option>" (a trailing colon dropped) or "<label> — <option>" after a label
+ * ending in ".", "?", or "!", decided like any statement, so a fact the option asserts still vetoes it.
+ * Null for zero or several options, an option that is not affirmative ("Yes", "I agree", "I acknowledge…",
+ * "I have read…"), a clipped label or option ("…"), or a statement over 300 characters (the basis limit).
+ */
+export function singleOptionStatement(label: string, options: readonly string[]): { option: string; statement: string } | null {
+  if (options.length !== 1) return null;
+  const question = normalize(label).replace(/\s*:\s*$/, "");
+  const only = options[0]!;
+  const text = normalize(only);
+  if (!question || question.endsWith("…") || text.endsWith("…")) return null;
+  const affirmative = affirmativeOption([only]) ?? (READ_OPTION.test(text) && !NEGATIVE.test(text) ? only : null);
+  if (!affirmative) return null;
+  const statement = /[.?!]$/.test(question) ? `${question} — ${text}` : `${question}: ${text}`;
+  return statement.length <= 300 ? { option: affirmative, statement } : null;
 }

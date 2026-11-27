@@ -304,6 +304,27 @@ describe("re-checking held stops after a saved answer", () => {
     ws.database.close();
   });
 
+  it("answers a held phone number box from the profile and a degree-program enrollment question from the saved enrollment, writing nothing on a dry run (Track 67)", async () => {
+    const ws = workspace();
+    const like = await start(ws, [pythonSelect(), submitButton]);
+    const { options: _options, ...phone } = questionPause("Phone", "phone-number", { fieldKind: "number" });
+    const held = heldRun(ws, like, [
+      phone,
+      questionPause("Are you currently enrolled in a degree program at a registered college or university?", "enrolled", { fieldKind: "radio" })
+    ]);
+    saveCandidate(ws.database, LOCAL_CANDIDATE_ID, {
+      fullName: "Jordan Rivera", preferredName: "Jordan", email: "jordan@example.test", phone: "(555) 010-0199", school: "Example State University",
+      degree: "B.S. Computer Science", graduationDate: "2030-05-15", githubUrl: "https://github.com/example-candidate"
+    });
+    saveFact(ws.database, { key: "enrolled_full_time", scope: { kind: "global" }, value: true });
+    const before = ws.database.prepare("SELECT id, updated_at, pauses_json FROM browser_runs ORDER BY id").all();
+    const result = await recheckRunPauses(ws.database, held.id, { apply: false });
+    expect(result.matches.map((match) => [match.fieldId, match.kind])).toEqual([["phone-number", "profile_field"], ["enrolled", "saved_fact"]]);
+    expect(ws.database.prepare("SELECT id, updated_at, pauses_json FROM browser_runs ORDER BY id").all()).toEqual(before);
+    expect(aliasRows(ws.database)).toEqual([]);
+    ws.database.close();
+  });
+
   it("writes nothing on a dry run", async () => {
     const ws = workspace();
     const run = await start(ws, [pythonSelect(), submitButton]);

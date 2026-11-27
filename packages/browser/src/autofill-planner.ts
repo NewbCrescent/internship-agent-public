@@ -211,7 +211,7 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
           action: "choose",
           value: option,
           basis: saved ? { kind: "fact", key: saved.key, scope: saved.scope } : null,
-          reason: "Your rule for “How did you hear about us?”: your saved answer, else a job board, else LinkedIn, else another board, N/A, or any non-referral option.",
+          reason: "Your rule for “How did you hear about us?”: your saved answer, else a job board, else LinkedIn, else another board, N/A, Other, or any non-referral option.",
           pause: null
         };
       }
@@ -222,6 +222,14 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
   }
 
   const contact = contactValue(field.label, inputs.profile);
+  // A phone question asked as a number box (an Ashby Number question labelled "Phone", Track 67) takes the profile
+  // phone's digits only: a number box takes no "+", spaces, brackets, or dashes. Fewer than 7 or more than 15 digits is no phone.
+  if (contact?.key === "phone" && field.kind === "number" && field.widget !== "autocomplete") {
+    const digits = contact.value.replace(/\D/g, "");
+    if (digits.length >= 7 && digits.length <= 15) {
+      return fill(field, digits, { kind: "profile", field: "phone" }, "The phone number on your profile, digits only (this box takes only numbers).");
+    }
+  }
   if (contact && (TEXT_KINDS.has(field.kind) || field.kind === "select" || field.kind === "radio")) {
     // A phone-country picker that already shows the profile's country ("🇺🇸 (+1) United States of America") is
     // kept, never retyped: typing into it first clears the country it shows (Track 37). A bare "+1" names no country.

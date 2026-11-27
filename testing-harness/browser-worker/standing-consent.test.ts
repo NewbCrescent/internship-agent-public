@@ -440,3 +440,43 @@ describe("standing consent dialogs over the form (Track 40)", () => {
     });
   });
 });
+
+describe("one-option acknowledgment lists in the planner (Track 67)", () => {
+  const ACKNOWLEDGE = "I Acknowledge/Accept this Statement";
+  const one = (id: string, label: string, kind: "radio" | "select", option: string): BrowserField => ({ id, label, kind, required: true, options: [option] });
+
+  it("chooses an arbitration acknowledgment's only option under the attestation setting, logged with label and option", () => {
+    const radio = one("arbitration", "Arbitration Acknowledgment:", "radio", ACKNOWLEDGE);
+    expect(decisionOf(form(radio), "arbitration", BOTH_ON)).toMatchObject({
+      action: "choose",
+      value: ACKNOWLEDGE,
+      basis: { kind: "standing_consent", setting: "sign_attestations", group: "authorization", statement: `Arbitration Acknowledgment: ${ACKNOWLEDGE}` },
+      pause: null
+    });
+    for (const standing of [undefined, ALL_OFF, DATA_ON]) {
+      expect(decisionOf(form(radio), "arbitration", standing).action).toBe("pause");
+    }
+  });
+
+  it("chooses a GDPR acknowledgment's only option under the data-consent setting", () => {
+    const list = one("gdpr", "GDPR Acknowledgement", "select", ACKNOWLEDGE);
+    expect(decisionOf(form(list), "gdpr", BOTH_ON)).toMatchObject({
+      action: "choose",
+      value: ACKNOWLEDGE,
+      basis: { kind: "standing_consent", setting: "accept_data_consent", group: "privacy-policy", statement: `GDPR Acknowledgement: ${ACKNOWLEDGE}` }
+    });
+  });
+
+  it("chooses Yes on a privacy-notice list whose only option is Yes", () => {
+    const LABEL = "By selecting yes to this question you confirm that you have read the Fixture Robotics Applicant Privacy Notice.";
+    expect(decisionOf(form(one("notice", LABEL, "select", "Yes")), "notice", BOTH_ON)).toMatchObject({
+      action: "choose",
+      value: "Yes",
+      basis: { kind: "standing_consent", setting: "sign_attestations", group: "acknowledgment", statement: `${LABEL} — Yes` }
+    });
+  });
+
+  it("never chooses the only option of an attestation about how the candidate prepared the application", () => {
+    expect(decisionOf(form(one("usage", "Candidate AI Usage Attestation:", "select", "I agree")), "usage", BOTH_ON).action).toBe("pause");
+  });
+});

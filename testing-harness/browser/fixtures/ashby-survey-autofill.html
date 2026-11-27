@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Robotics Software Intern @ Fixture Robotics</title>
+<style>
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .ashby-application-form-input-file input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  ._inputContainer { position: relative; display: flex; width: 320px; }
+  ._toggleButton { width: 24px; }
+  .ashby-application-form-input-autocomplete-popup { border: 1px solid #888; width: 320px; }
+  .ashby-application-form-input-autocomplete-popup:empty { display: none; }
+</style>
+</head>
+<body>
+  <!--
+    MODELLED for Track 67 (2026-11-27), a fictional Ashby application page ("Fixture Robotics") whose
+    form has a survey. Ashby draws the "Autofill from resume" box of a form with surveys
+    (submitMultipleFormsAction) as `ashby-application-form-autofill-uploader` around
+    `ashby-application-form-autofill-input-root`, not as the single form's
+    `ashby-application-form-autofill-pane` (Ashby's public bundle index-DYKNvNNQ.js, read 2026-11-27,
+    no submission made). The inner markup follows fixtures/ashby-application.html (captured
+    2026-11-19). A file chosen in the autofill box redraws the form 200 ms later with new elements
+    and shows "Autofill completed!" (modelled on a real run trace in which no data-ia-control tag was
+    found after that upload). `fixture.autofillUploads` counts uploads into the box and
+    `fixture.redraws` counts redraws.
+  -->
+  <div id="root">
+    <h1 class="ashby-job-posting-heading">Robotics Software Intern</h1>
+    <div tabindex="0" role="tabpanel" aria-labelledby="job-application-form" id="form">
+      <div class="_autofillPane ashby-application-form-autofill-uploader">
+        <div role="presentation" class="ashby-application-form-autofill-input-root _root" data-state="default">
+          <input accept="application/pdf,.pdf,.doc,.docx" type="file" tabindex="-1" class="visually-hidden">
+          <div class="ashby-application-form-autofill-input-base-layer">
+            <h3 class="ashby-application-form-autofill-input-title">Autofill from resume</h3>
+            <p class="ashby-application-form-autofill-input-description">Upload your resume here to autofill key application fields.</p>
+            <button class="_button _ctaButton">Upload file</button>
+          </div>
+        </div>
+      </div>
+      <div id="notice"></div>
+      <div class="_jobPostingForm ashby-application-form-container" id="container"></div>
+      <div class="ashby-survey-form-container"><div><p>Voluntary Demographic Question</p></div></div>
+      <button class="_button _primary _submitButton ashby-application-form-submit-button"><span>Submit Application</span></button>
+    </div>
+  </div>
+  <script>
+    const FORM = `
+      <div class="_section">
+        <div class="_fieldEntry ashby-application-form-field-entry" data-field-path="_systemfield_name">
+          <label class="_heading _required _label ashby-application-form-question-title" for="_systemfield_name">Name</label>
+          <div><input placeholder="Type here..." name="_systemfield_name" required id="_systemfield_name" type="text" class="_input ashby-application-form-input-text"></div>
+        </div>
+        <div class="_fieldEntry ashby-application-form-field-entry" data-field-path="_systemfield_resume">
+          <label class="_heading _required _label ashby-application-form-question-title" for="_systemfield_resume">Resume</label>
+          <div role="presentation" class="_container ashby-application-form-input-file">
+            <input accept="application/pdf,.pdf,.doc,.docx" type="file" tabindex="-1" id="_systemfield_resume" required>
+            <div class="_instructions"><button class="_button"><span><span>Upload File</span></span></button><p class="_dragInstructions">or drag and drop here</p></div>
+          </div>
+        </div>
+        <div class="_fieldEntry ashby-application-form-field-entry" data-field-path="_systemfield_location">
+          <label class="_heading _required _label ashby-application-form-question-title" for="_systemfield_location">Location</label>
+          <div><div class="_inputContainer"><input class="_input ashby-application-form-input-autocomplete" placeholder="Start typing..." aria-autocomplete="list" aria-expanded="false" aria-haspopup="listbox" role="combobox" autocomplete="off" type="text"><button type="button" class="_toggleButton"></button></div>
+            <div class="ashby-application-form-input-autocomplete-popup"></div></div>
+        </div>
+      </div>`;
+    const state = { uploads: {}, location: null, autofillUploads: 0, redraws: 0 };
+    window.fixture = state;
+    const container = document.getElementById("container");
+    const notice = document.getElementById("notice");
+    const draw = () => { container.innerHTML = FORM; };
+    draw();
+    const PLACES = ["Berkeley, California, United States", "Berkeley Heights, New Jersey, United States"];
+    // Suggestions are delegated from the document, so they keep working after a redraw.
+    let timer = null;
+    document.addEventListener("input", (event) => {
+      const input = event.target.closest(".ashby-application-form-input-autocomplete");
+      if (!input) return;
+      const entry = input.closest(".ashby-application-form-field-entry");
+      const listbox = entry.querySelector(".ashby-application-form-input-autocomplete-popup");
+      state.location = null;
+      clearTimeout(timer);
+      listbox.innerHTML = "";
+      const typed = input.value.trim().toLowerCase();
+      if (!typed) return;
+      // Suggestions arrive from a search request, a moment after typing stops.
+      timer = setTimeout(() => {
+        listbox.innerHTML = PLACES.filter((place) => place.toLowerCase().includes(typed))
+          .map((place) => `<div class="ashby-application-form-input-autocomplete-popup-result">${place}</div>`).join("");
+        input.setAttribute("aria-expanded", listbox.children.length ? "true" : "false");
+      }, 300);
+    });
+    document.addEventListener("click", (event) => {
+      const option = event.target.closest(".ashby-application-form-input-autocomplete-popup-result");
+      if (!option) return;
+      const entry = option.closest(".ashby-application-form-field-entry");
+      const input = entry.querySelector(".ashby-application-form-input-autocomplete");
+      input.value = option.textContent;
+      state.location = option.textContent;
+      option.parentElement.innerHTML = "";
+      input.setAttribute("aria-expanded", "false");
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      for (const listbox of document.querySelectorAll(".ashby-application-form-input-autocomplete-popup")) listbox.innerHTML = "";
+    });
+    // A file in the autofill box makes Ashby parse the resume and redraw the form (new elements, no tags kept).
+    document.addEventListener("change", (event) => {
+      if (event.target.type !== "file") return;
+      if (event.target.closest(".ashby-application-form-autofill-input-root")) {
+        state.autofillUploads += 1;
+        setTimeout(() => { draw(); state.redraws += 1; notice.textContent = "Autofill completed!"; }, 200);
+        return;
+      }
+      state.uploads[event.target.id] = event.target.files[0]?.name ?? null;
+    });
+  </script>
+</body>
+</html>

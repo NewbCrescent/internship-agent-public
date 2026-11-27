@@ -8,6 +8,7 @@ import {
   isSignatureLabel,
   privacyReadStatement,
   signatureDateValue,
+  singleOptionStatement,
   standingStatementDecision,
   type StandingBasisSetting,
   type StandingConsentSettings,
@@ -58,7 +59,9 @@ const SETTING_TEXT: Record<StandingBasisSetting, string> = {
  * candidate's standing settings, or null to leave the field to the usual
  * rules. A signature box always waits for the candidate unless the
  * attestation setting is on and a name is saved; every other field is
- * decided here only when `standing` is given. With either setting on, a
+ * decided here only when `standing` is given. A consent list or radio set
+ * takes its one affirmative option; a list with only one option is decided
+ * on its label and that option together. With either setting on, a
  * marketing opt-in asked as a list or radio set takes its one "No" (even when
  * its label was clipped); one that also names the application itself does
  * not. Fact statements, unknown statements, and checkbox groups return null.
@@ -115,6 +118,22 @@ export function standingFieldDecision(field: BrowserField, form: RecognizedForm,
       return pause(field, MARKETING_QUESTION);
     }
     return null;
+  }
+  // A list or radio set with one option (Track 67: an Ashby "Arbitration Acknowledgment:" radio whose only option is
+  // "I Acknowledge/Accept this Statement", a Greenhouse privacy-notice list whose only option is "Yes") is decided on
+  // its label and that option together, so the option's own words count, and logged with that combined text.
+  if ((field.kind === "select" || field.kind === "radio") && field.options?.length === 1) {
+    const single = singleOptionStatement(field.label, field.options);
+    const decision = single ? standingStatementDecision(single.statement, standing) : null;
+    if (!single || decision?.verdict !== "accept" || optionalTerms(decision, field)) return null;
+    return {
+      fieldId: field.id,
+      action: "choose",
+      value: single.option,
+      basis: { kind: "standing_consent", setting: decision.setting, group: decision.groups[0]!, statement: single.statement },
+      reason: `Accepted under your standing ${SETTING_TEXT[decision.setting]} setting.`,
+      pause: null
+    };
   }
   if ((field.kind === "select" || field.kind === "radio") && (field.options?.length ?? 0) >= 2) {
     // "Have you read the … Privacy Policy?": decided on the question and its affirmative option together (Track 32).

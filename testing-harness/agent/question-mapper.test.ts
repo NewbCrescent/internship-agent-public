@@ -135,6 +135,10 @@ describe("saved answer mappings", () => {
     }
   });
 
+  it("maps \"How did you connect with us?\" to the same global how-heard answer (Track 67)", async () => {
+    expect(await mapper.map("How did you connect with us?")).toMatchObject({ status: "MAPPED", key: "how_heard", scope: { kind: "global" } });
+  });
+
   it("scopes previous employment to the posting's company, never another one", async () => {
     expect(await mapper.map("Have you previously worked here?", { companyName: "Vandelay, Inc." })).toMatchObject({
       status: "MAPPED",
@@ -614,6 +618,13 @@ describe("known-answer gaps from the 2026-11-26 pass (Track 43)", () => {
     ]) {
       expect(await mapper.map(question), question).not.toMatchObject({ key: "enrolled_full_time", broader: true });
     }
+  });
+
+  it("maps a degree-program enrollment question to full-time enrollment as a broader question (Track 67)", async () => {
+    expect(await mapper.map("Are you currently enrolled in a degree program at a registered college or university?"))
+      .toMatchObject({ status: "MAPPED", key: "enrolled_full_time", scope: { kind: "global" }, broader: true });
+    expect(await mapper.map("Are you currently enrolled in a master's degree program at an accredited university?"))
+      .not.toMatchObject({ key: "enrolled_full_time" });
   });
 
   it("scopes OpenSesame's sponsorship question to the posting's country, and leaves it ambiguous without one", async () => {

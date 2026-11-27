@@ -10,6 +10,7 @@ import {
   isSignatureLabel,
   privacyReadStatement,
   signatureDateValue,
+  singleOptionStatement,
   standingConsentSettings,
   standingStatementDecision,
   textMessageTopic
@@ -375,5 +376,60 @@ describe("\"Have you read the privacy policy?\" lists (littelfuse.wd1, 2026-11-2
     expect(standingStatementDecision(plain, DATA_ONLY).verdict).toBe("needs-setting");
     const fact = privacyReadStatement(LABEL, ["Yes, and I am a U.S. citizen", "No"])!.statement;
     expect(standingStatementDecision(fact, BOTH).verdict).toBe("fact");
+  });
+});
+
+describe("one-option lists (Track 67)", () => {
+  const ACKNOWLEDGE = "I Acknowledge/Accept this Statement";
+
+  it("reads an arbitration acknowledgment's heading and only option as an arbitration authorization", () => {
+    const single = singleOptionStatement("Arbitration Acknowledgment:", [ACKNOWLEDGE]);
+    expect(single).toEqual({ option: ACKNOWLEDGE, statement: `Arbitration Acknowledgment: ${ACKNOWLEDGE}` });
+    const accepted = standingStatementDecision(single!.statement, BOTH);
+    expect(accepted).toMatchObject({ verdict: "accept", setting: "sign_attestations" });
+    expect(accepted.verdict === "accept" && accepted.groups).toContain("authorization");
+    expect(standingStatementDecision(single!.statement, DATA_ONLY).verdict).toBe("needs-setting");
+  });
+
+  it("reads a GDPR acknowledgment with that option as privacy-policy consent", () => {
+    const single = singleOptionStatement("GDPR Acknowledgement", [ACKNOWLEDGE]);
+    expect(single).toEqual({ option: ACKNOWLEDGE, statement: `GDPR Acknowledgement: ${ACKNOWLEDGE}` });
+    const accepted = standingStatementDecision(single!.statement, BOTH);
+    expect(accepted).toMatchObject({ verdict: "accept", setting: "accept_data_consent" });
+    expect(accepted.verdict === "accept" && accepted.groups).toContain("privacy-policy");
+    expect(standingStatementDecision(single!.statement, ATTESTATIONS_ONLY).verdict).toBe("needs-setting");
+  });
+
+  it("reads a privacy-notice list whose only option is Yes or 'I have read' as an acknowledgment", () => {
+    const LABEL = "By selecting yes to this question you confirm that you have read the Fixture Robotics Applicant Privacy Notice.";
+    const yes = singleOptionStatement(LABEL, ["Yes"]);
+    expect(yes).toEqual({ option: "Yes", statement: `${LABEL} — Yes` });
+    expect(standingStatementDecision(yes!.statement, BOTH)).toMatchObject({ verdict: "accept", setting: "sign_attestations", groups: ["acknowledgment"] });
+    const read = singleOptionStatement("Privacy Notice", ["I have read the Privacy Notice."]);
+    expect(read).toEqual({ option: "I have read the Privacy Notice.", statement: "Privacy Notice: I have read the Privacy Notice." });
+    expect(standingStatementDecision(read!.statement, BOTH)).toMatchObject({ verdict: "accept", setting: "sign_attestations", groups: ["acknowledgment"] });
+    expect(singleOptionStatement("Privacy Notice", ["I have not read the Privacy Notice."])).toBeNull();
+    const policy = singleOptionStatement("Fixture Robotics Candidate Privacy Policy", ["I acknowledge that I have read and understood the Fixture Robotics Candidate Privacy Policy."]);
+    const decided = standingStatementDecision(policy!.statement, BOTH);
+    expect(decided.verdict).toBe("accept");
+    expect(decided.verdict === "accept" && decided.groups).toContain("acknowledgment");
+  });
+
+  it("never accepts an unknown heading, a fact the option asserts, a clipped label, several options, or marketing", () => {
+    const usage = singleOptionStatement("Candidate AI Usage Attestation:", ["I agree"]);
+    expect(standingStatementDecision(usage!.statement, BOTH).verdict).toBe("none");
+    const REVIEW = "Please review the question again to confirm your response is correct.";
+    const CONFIRMING = "Confirming my response to the US Persons question is correct.";
+    expect(singleOptionStatement(REVIEW, [CONFIRMING])).toBeNull();
+    expect(standingStatementDecision(`${REVIEW} — ${CONFIRMING}`, BOTH).verdict).toBe("fact");
+    expect(singleOptionStatement("Arbitration Acknowledgment:", [ACKNOWLEDGE, "I do not accept"])).toBeNull();
+    expect(singleOptionStatement("Arbitration Acknowledg…", [ACKNOWLEDGE])).toBeNull();
+    const newsletter = singleOptionStatement("Newsletter", ["I agree"]);
+    expect(standingStatementDecision(newsletter!.statement, BOTH).verdict).toBe("marketing");
+  });
+
+  it("leaves a statement that the candidate took an action with the candidate", () => {
+    // It states an action the candidate took (marking a sender as safe), a fact the agent cannot know.
+    expect(standingStatementDecision("I understand that next steps will be sent via email and I have marked the sender address above as safe.", BOTH).verdict).not.toBe("accept");
   });
 });

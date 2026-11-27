@@ -1936,7 +1936,7 @@ export function attachedNamesFromText(text: string): string[] {
  * is read by opening it), a wrapping label's aria-labelledby labels its
  * control (Rippling's uploads), and
  * react-select's hidden required inputs, Ashby's "Autofill from resume" parser
- * input, a resume-autofill drop zone's input (a `role="button"` box whose text
+ * input (its pane, its survey-form uploader, or its input root), a resume-autofill drop zone's input (a `role="button"` box whose text
  * says "autofill", as Dover's), and the CAPTCHA token field are not controls. Ashby's Yes/No button
  * pairs are read as one radio question, its `_required` question-title class
  * marks a question required (single- and multi-choice questions, which Ashby
@@ -2294,8 +2294,11 @@ export function collectControlsIn(root: Element): RawControl[] {
     if (input.getAttribute("aria-hidden") === "true" && input.getAttribute("tabindex") === "-1" && type !== "file") continue;
     // The hidden CAPTCHA token field is page machinery.
     if (TOKEN.test(input.name ?? "") || TOKEN.test(input.id ?? "")) continue;
-    // Ashby's "Autofill from resume" box parses a resume into the form; it is not a question.
-    if (type === "file" && input.closest(".ashby-application-form-autofill-pane")) continue;
+    // Ashby's "Autofill from resume" box parses a resume into the form and redraws it, which drops every data-ia-control
+    // tag; it is not a question. A form with surveys draws it as ashby-application-form-autofill-uploader, and the box
+    // itself is always ashby-application-form-autofill-input-root (Ashby's public bundle index-DYKNvNNQ.js, read
+    // 2026-11-27; TELUS Digital run <run id>, Track 67).
+    if (type === "file" && input.closest(".ashby-application-form-autofill-pane, .ashby-application-form-autofill-uploader, .ashby-application-form-autofill-input-root")) continue;
     // A drop zone that autofills the form from a resume (Dover's "Autofill from resume") parses a resume; it is not a question, like Ashby's.
     if (type === "file" && /\bautofill\b/i.test(collapse(input.closest('[role="button"]')?.textContent))) continue;
     // Oracle Candidate Experience's "Import your profile from resume" box parses a resume into the form and redraws it
