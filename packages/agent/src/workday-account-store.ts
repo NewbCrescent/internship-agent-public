@@ -26,6 +26,10 @@ const entrySchema = z.object({
   password: z.string().min(8).nullable(),
   account: z.enum(["pending", "created", "refused"]).nullable(),
   hold: holdSchema.nullable(),
+  /** When the agent last clicked Workday's resend-verification control for this host. */
+  resentAt: z.string().optional(),
+  /** When the agent last asked Workday for a password-reset email for this host. */
+  resetAt: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string()
 }).strict();

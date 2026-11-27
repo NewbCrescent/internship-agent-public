@@ -18,15 +18,18 @@ import {
   type WorkdayAccountEntry,
   type WorkdayAccountHoldKind
 } from "./workday-account-store";
-import { MailboxUnavailable, pollVerificationLink, type VerificationMailboxFactory } from "./workday-verification-mail";
+import { MailboxUnavailable, pollPasswordResetLink, pollVerificationLink, type VerificationMailboxFactory } from "./workday-verification-mail";
 
 /**
  * Workday candidate accounts created and signed in by the agent, at the
  * candidate's request (INTERNSHIP_AGENT_WORKDAY_ACCOUNT_EMAIL). Each Workday
  * host gets one random password, saved before it is typed anywhere. CAPTCHAs,
  * existing accounts, refused passwords, and unknown screens hold the host for
- * the candidate; nothing is solved, bypassed, or reset. No event, session
- * detail, error, or return value carries the password or the email.
+ * the candidate; nothing is solved or bypassed. On automatic runs the agent
+ * uses Workday's own resend-verification control and its forgot-password
+ * email, each at most once per host per day, as the candidate allowed on
+ * 2026-11-27. No event, session detail, error, or return value carries the
+ * password, the email, or an emailed link.
  */
 export type WorkdayAccountSettings = {
   email: string;
@@ -88,6 +91,14 @@ const emailMatches = (candidateEmail: string | null | undefined, email: string) 
 
 /** Mailbox reads in a row that find no verification email before the host stops (Workday's real emails arrive within seconds of the create, 2026-11-26). */
 const EMPTY_VERIFY_READS = 3;
+
+/** Workday's emailed candidate links are one-time links that expire after about two hours (reset links; an employer's recruiting team, public forum, 2025-11-06). */
+const LINK_FRESH_MS = 2 * 3_600_000;
+
+/** At most one resend and one password-reset request per host per day (Workday allows five reset requests a day). */
+const RECOVERY_INTERVAL_MS = 86_400_000;
+
+const NO_RESET = "the agent resets a password only through Workday's Forgot your password? email, at most once a day";
 
 /** Retried email-verification holds wait 1 h, doubling per attempt, at most 24 h. */
 function verifyDue(at: string, attempts: number, now: Date): boolean {
@@ -176,6 +187,8 @@ export async function ensureWorkdayAccount(
       password: current?.password ?? null,
       account: current?.account ?? null,
       hold: current?.hold ?? null,
+      resentAt: current?.resentAt,
+      resetAt: current?.resetAt,
       createdAt: current?.createdAt ?? stamp,
       ...changes,
       updatedAt: stamp
@@ -228,8 +241,20 @@ export async function ensureWorkdayAccount(
     return unexpected("the browser page cannot run account steps");
   }
 
-  // Never type a password Workday already refused, and never retry a lockout.
-  if (current && (current.account === "refused" || (current.hold && NO_RETRY.includes(current.hold.kind)))) {
+  // Each recovery runs at most once per call and once per host per day.
+  let resentThisCall = false;
+  let resetThisCall = false;
+  const openedLinks: string[] = [];
+  const recoveryDue = (at?: string) => !at || now().getTime() - Date.parse(at) >= RECOVERY_INTERVAL_MS;
+  const minutes = (ms: number) => {
+    const count = Math.max(1, Math.round(ms / 60_000));
+    return `${count} minute${count === 1 ? "" : "s"}`;
+  };
+
+  // Never type a password Workday already refused, and never retry a lockout. An account saved as refused whose
+  // hold was cleared goes, on an automatic run, to Workday's forgot-password email instead.
+  const refusedWithoutHold = mode === "create" && current?.account === "refused" && !current.hold;
+  if (current && !refusedWithoutHold && (current.account === "refused" || (current.hold && NO_RETRY.includes(current.hold.kind)))) {
     const reason = current.hold?.reason ?? `Workday ${host}: Workday refused the saved account. ${YOURSELF}`;
     session("signed_out", reason);
     throw new WorkdayAccountHeld(reason);
@@ -265,21 +290,35 @@ export async function ensureWorkdayAccount(
     if (result.kind === "none") {
       const previous = current?.hold;
       if (previous?.kind === "verify-email" && previous.attempts + 1 >= EMPTY_VERIFY_READS) {
-        return hold("interrupted", `Workday ${host}: the agent found no verification email from Workday on ${previous.attempts + 1} checks since the account step (Workday's emails arrive within seconds), and Workday still does not let it sign in; the account may already exist with another password, or was never created. The agent stops trying and never resets passwords. ${YOURSELF}`);
+        const checks = previous.attempts + 1;
+        return resetFlow(() => hold("interrupted", `Workday ${host}: the agent found no verification email from Workday on ${checks} checks since the account step (Workday's emails arrive within seconds), and Workday still does not let it sign in; the account may already exist with another password, or was never created. The agent stops trying; ${NO_RESET}. ${YOURSELF}`));
       }
-      const minutes = Math.max(1, Math.round(timeoutMs / 60_000));
-      return hold("verify-email", `Workday ${host}: verification email not found within ${minutes} minute${minutes === 1 ? "" : "s"}; the agent checks again on a later pass.`);
+      return hold("verify-email", `Workday ${host}: verification email not found within ${minutes(timeoutMs)}; the agent checks again on a later pass.`);
     }
     if (result.kind === "ambiguous") {
       return hold("verify-email", `Workday ${host}: several verification links arrived; open the newest one yourself, and the agent signs in on a later pass.`);
     }
+    const found = `Workday ${host}: verification email found and opened.`;
+    // Workday's emailed links expire: a link from an account created (or last resent) two hours or more ago is not
+    // opened first; the agent asks Workday to resend the email, and opens the old link only when it cannot.
+    const old = now().getTime() - Math.max(Date.parse(current!.createdAt), current!.resentAt ? Date.parse(current!.resentAt) : 0) >= LINK_FRESH_MS;
+    if (!unconfirmedFallback && old) {
+      const link = result.link;
+      return resendFlow([link], () => openLink(link, signInAfter, found), signInAfter);
+    }
+    return openLink(result.link, signInAfter, found);
+  };
+
+  /** Opens a verification link in a new tab, then signs in (`signInAfter`) or holds the host for a later pass. */
+  const openLink = async (link: string, signInAfter: boolean, foundText: string): Promise<"signed-in" | "created"> => {
     // Navigation errors can include the full URL, including its activation token.
     try {
-      await openInNewTab(result.link);
+      await openInNewTab(link);
     } catch {
       return unexpected("the verification page could not be opened");
     }
-    event(`Workday ${host}: verification email found and opened.`);
+    openedLinks.push(link);
+    event(foundText);
     // The email shows Workday created the account, even when the agent never read the create's answer.
     if (current?.account === "pending") save({ account: "created" });
     await safely(() => goto(applicationUrl));
@@ -295,11 +334,156 @@ export async function ensureWorkdayAccount(
   };
 
   /**
+   * Clicks the sign-in page's own resend-verification control once (automatic runs with a mailbox, once per host per
+   * day), then opens the new verification email's link: one that arrived after the click and is not in `previous` or
+   * already opened in this call. `fallback` runs when no resend can be made: `unavailable` (no control, no mailbox, or
+   * the auto-submit path), `budget` (resent in the last day), or `after-resend` (already resent in this call).
+   */
+  const resendFlow = async (
+    previous: string[],
+    fallback: (why: "unavailable" | "budget" | "after-resend") => Promise<"signed-in" | "created">,
+    signInAfter = true
+  ): Promise<"signed-in" | "created"> => {
+    if (resentThisCall) return fallback("after-resend");
+    const resend = page.resendVerification?.bind(page);
+    const mailbox = runtime.mailbox;
+    if (mode !== "create" || !mailbox || !resend) return fallback("unavailable");
+    if (!recoveryDue(current?.resentAt)) return fallback("budget");
+    // Saved before the click, so a browser failure after it still counts against the day's budget.
+    const prior = current?.resentAt;
+    const clickAt = now();
+    resentThisCall = true;
+    save({ resentAt: clickAt.toISOString() });
+    const outcome = await safely(() => resend(current!.email, host, runtime.accountWait));
+    if (outcome.result === "missing") {
+      resentThisCall = false;
+      save({ resentAt: prior });
+      return fallback("unavailable");
+    }
+    if (outcome.result === "captcha") {
+      return hold("captcha", `Workday ${host}: Workday shows a CAPTCHA after the resend request, and the agent never solves CAPTCHAs. ${YOURSELF}`);
+    }
+    if (outcome.result === "other") {
+      return hold("interrupted", `Workday ${host}: Workday asked for a text-message, phone, or security-question step after the resend request; the agent stops there. ${YOURSELF}`);
+    }
+    if (outcome.result === "error") {
+      return hold("interrupted", `Workday ${host}: Workday showed an error after the resend request: "${redact(outcome.message ?? "").slice(0, 300)}". ${YOURSELF}`);
+    }
+    event(`Workday ${host}: resent the verification email at Workday's request.`);
+    const timeoutMs = runtime.mailTimeoutMs ?? 180_000;
+    let result: Awaited<ReturnType<typeof pollVerificationLink>>;
+    try {
+      result = await pollVerificationLink(mailbox, { host, tenant, company, since: clickAt, exclude: [...previous, ...openedLinks] }, { pollMs: runtime.mailPollMs, timeoutMs });
+    } catch (error) {
+      if (error instanceof MailboxUnavailable) {
+        return hold("interrupted", `Workday ${host}: the agent asked Workday to resend the verification email, but the mailbox could not be read (${error.message}). ${YOURSELF}`);
+      }
+      throw error;
+    }
+    if (result.kind === "none") {
+      return hold("interrupted", `Workday ${host}: the agent asked Workday to resend the verification email, and no new email arrived within ${minutes(timeoutMs)}; it asks at most once a day. ${YOURSELF}`);
+    }
+    if (result.kind === "ambiguous") {
+      return hold("interrupted", `Workday ${host}: several new verification links arrived after the agent asked Workday to resend the email; open the newest one yourself. ${YOURSELF}`);
+    }
+    return openLink(result.link, signInAfter, `Workday ${host}: the new verification email was found and opened.`);
+  };
+
+  /**
+   * Workday does not let the agent sign in with the saved password: on automatic runs with a mailbox, once per call
+   * and once per host per day, the agent asks for a password-reset email with Workday's "Forgot your password?"
+   * control, opens the emailed link, sets a new generated password (saved only once the reset form shows, right
+   * before it is typed), and signs in. `fallback` (the earlier hold) runs when no reset can be asked for.
+   */
+  const resetFlow = async (fallback: () => Promise<"signed-in" | "created">): Promise<"signed-in" | "created"> => {
+    const request = page.requestPasswordReset?.bind(page);
+    const complete = page.completePasswordReset?.bind(page);
+    const mailbox = runtime.mailbox;
+    if (resetThisCall || mode !== "create" || !mailbox || !request || !complete || !recoveryDue(current?.resetAt)) return fallback();
+    const entry = current!;
+    // Saved before the click, so a browser failure after it still counts against the day's budget.
+    const prior = entry.resetAt;
+    const clickAt = now();
+    resetThisCall = true;
+    save({ resetAt: clickAt.toISOString() });
+    const asked = await safely(() => request(entry.email, host, runtime.accountWait));
+    if (asked.result === "missing") {
+      resetThisCall = false;
+      save({ resetAt: prior });
+      return fallback();
+    }
+    switch (asked.result) {
+      case "captcha":
+        return hold("captcha", `Workday ${host}: Workday shows a CAPTCHA on its Forgot your password? form, and the agent never solves CAPTCHAs. ${YOURSELF}`);
+      case "other":
+        return hold("interrupted", `Workday ${host}: Workday's Forgot your password? form asked for a text-message, phone, or security-question step, or showed a form the agent does not recognize (${asked.detail ?? "unknown"}); the agent stops there. ${YOURSELF}`);
+      case "refused":
+        return hold("interrupted", `Workday ${host}: Workday refused the password-reset request ("${redact(asked.message ?? "").slice(0, 300)}"); the agent does not ask again. ${YOURSELF}`);
+      case "error":
+        return hold("interrupted", `Workday ${host}: Workday showed an error after the password-reset request: "${redact(asked.message ?? "").slice(0, 300)}". ${YOURSELF}`);
+      default:
+        break;
+    }
+    event(`Workday ${host}: Workday does not let the agent sign in with the saved password, so the agent asked for a password-reset email with Workday's Forgot your password? control, as you allowed on 2026-11-27.`);
+    const timeoutMs = runtime.mailTimeoutMs ?? 180_000;
+    let result: Awaited<ReturnType<typeof pollPasswordResetLink>>;
+    try {
+      result = await pollPasswordResetLink(mailbox, { host, tenant, company, since: clickAt }, { pollMs: runtime.mailPollMs, timeoutMs });
+    } catch (error) {
+      if (error instanceof MailboxUnavailable) {
+        return hold("interrupted", `Workday ${host}: the agent asked Workday for a password-reset email, but the mailbox could not be read (${error.message}). ${YOURSELF}`);
+      }
+      throw error;
+    }
+    if (result.kind === "none") {
+      return hold("interrupted", `Workday ${host}: the agent asked Workday for a password-reset email, and none arrived within ${minutes(timeoutMs)}; it asks at most once a day. ${YOURSELF}`);
+    }
+    if (result.kind === "ambiguous") {
+      return hold("interrupted", `Workday ${host}: several password-reset links arrived; the agent opened none. ${YOURSELF}`);
+    }
+    const link = result.link;
+    const outcome = await safely(() => complete(link, {
+      email: entry.email,
+      password: () => {
+        // Saved before it is typed anywhere, as the create step does.
+        const password = generateWorkdayPassword();
+        save({ password, account: "created" });
+        return password;
+      }
+    }, host, runtime.accountWait));
+    switch (outcome.result) {
+      case "reset": {
+        event(`Workday ${host}: the password was reset through Workday's emailed link; the new password is saved locally.`);
+        save({ hold: null });
+        await safely(() => goto(applicationUrl));
+        const entered = await safely(() => page.enterApplication());
+        if (entered === "flow" && !(await safely(() => page.signInRequired()))) {
+          connected(`The agent signed in to ${company}'s Workday with the saved account.`, `Workday ${host}: signed in with the saved account.`);
+          return "signed-in";
+        }
+        return signInFlow(false, false, true);
+      }
+      case "expired":
+        return hold("interrupted", `Workday ${host}: Workday says the password-reset link has expired or was already used; the agent does not ask again today. ${YOURSELF}`);
+      case "captcha":
+        return hold("captcha", `Workday ${host}: Workday shows a CAPTCHA on the password-reset page, and the agent never solves CAPTCHAs. ${YOURSELF}`);
+      case "other":
+        return hold("interrupted", `Workday ${host}: the password-reset page asked for a text-message, phone, or security-question step, or showed a page the agent does not recognize (${outcome.detail ?? "unknown"}); the agent stops there. ${YOURSELF}`);
+      case "password-refused":
+        return hold("password-refused", `Workday ${host}: Workday refused the generated password on its password-reset page; the agent does not try another. ${YOURSELF}`);
+      case "error":
+        return hold("interrupted", `Workday ${host}: Workday showed an error after the password-reset submit: "${redact(outcome.message ?? "").slice(0, 300)}". ${YOURSELF}`);
+      default:
+        return hold("interrupted", `Workday ${host}: ${outcome.detail ?? "Workday did not answer the password-reset submit"}; the new password is saved locally but may not be set. ${YOURSELF}`);
+    }
+  };
+
+  /**
    * `afterCreate`: this call just created the account. A sign-in Workday does
    * not answer then may be one it ignores until the email is verified, so with
    * a mailbox the agent looks for the verification email instead of holding.
    */
-  const signInFlow = async (afterVerify = false, afterCreate = false): Promise<"signed-in" | "created"> => {
+  const signInFlow = async (afterVerify = false, afterCreate = false, afterReset = false): Promise<"signed-in" | "created"> => {
     const entry = current!;
     const outcome: WorkdayAccountOutcome = await safely(() => signInToAccount({ email: entry.email, password: entry.password! }, host, runtime.accountWait));
     switch (outcome.result) {
@@ -307,10 +491,19 @@ export async function ensureWorkdayAccount(
         connected(`The agent signed in to ${company}'s Workday with the saved account.`, `Workday ${host}: signed in with the saved account.`);
         return "signed-in";
       case "verify-email":
-        if (afterVerify) return hold("interrupted", `Workday ${host}: Workday still asks to verify the email after the agent opened the verification link, so the link may have expired; the agent does not open it again. Ask Workday for a new verification email on its sign-in page, then sign in yourself with Open sign-in on the Workday accounts page.`);
+        if (afterVerify) {
+          return resendFlow([], (why) => hold("interrupted", why === "budget"
+            ? `Workday ${host}: Workday still asks to verify the email after the agent opened the verification link, and the agent already asked Workday to resend it in the last 24 hours, so it stops here. ${YOURSELF}`
+            : why === "after-resend"
+              ? `Workday ${host}: Workday still asks to verify the email after the agent opened the new verification link it asked Workday to resend, so it stops here. ${YOURSELF}`
+              : `Workday ${host}: Workday still asks to verify the email after the agent opened the verification link, so the link may have expired; the agent does not open it again. Ask Workday for a new verification email on its sign-in page, then sign in yourself with Open sign-in on the Workday accounts page.`));
+        }
         return verifyFlow();
       case "wrong-password":
-      case "no-account":
+      case "no-account": {
+        if (afterReset) {
+          return hold("wrong-password", `Workday ${host}: Workday refused the new password right after the agent reset it through Workday's emailed link; the agent does not try it again. ${YOURSELF}`);
+        }
         // A tenant that verifies emails refuses sign-ins with Workday's generic failure until the email is
         // verified (nvidia.wd5, 2026-11-25): right after this call created the account, or on a pass that
         // retries a verify-email hold, the agent looks for the verification email instead of holding.
@@ -332,9 +525,12 @@ export async function ensureWorkdayAccount(
           }
           return hold("interrupted", `Workday ${host}: an earlier account creation did not finish, and Workday does not accept the saved password. ${YOURSELF}`);
         }
-        return hold("wrong-password", afterVerify
-          ? `Workday ${host}: Workday refused the saved password after the agent opened the verification link (the link may have expired, or the account was not created with this password); the agent does not try it again. ${YOURSELF}`
-          : `Workday ${host}: Workday refused the saved password; the agent does not try it again. ${YOURSELF}`);
+        if (afterVerify) {
+          return resendFlow([], () => hold("wrong-password", `Workday ${host}: Workday refused the saved password after the agent opened the verification link (the link may have expired, or the account was not created with this password); the agent does not try it again. ${YOURSELF}`));
+        }
+        const refused = () => hold("wrong-password", `Workday ${host}: Workday refused the saved password; the agent does not try it again. ${YOURSELF}`);
+        return outcome.result === "wrong-password" ? resetFlow(refused) : refused();
+      }
       case "locked":
         return hold("locked", `Workday ${host}: Workday says the account is locked or disabled; the agent does not try again. ${YOURSELF}`);
       case "captcha":
@@ -373,7 +569,7 @@ export async function ensureWorkdayAccount(
         event(`Workday ${host}: account created; Workday asks to verify the email.`);
         return verifyFlow(undefined, false);
       case "exists":
-        return hold("exists", `Workday ${host}: Workday did not accept the saved password and says an account already exists for this email; the agent never resets passwords. ${YOURSELF}`, { account: "refused" });
+        return resetFlow(() => hold("exists", `Workday ${host}: Workday did not accept the saved password and says an account already exists for this email; ${NO_RESET}. ${YOURSELF}`, { account: "refused" }));
       case "no-answer":
         return hold("interrupted", `Workday ${host}: Workday did not accept the saved password, and ${outcome.detail ?? "the create-account submit got no answer"}, so the account was probably not created. ${YOURSELF}`);
       case "error":
@@ -398,6 +594,7 @@ export async function ensureWorkdayAccount(
     return hold("verify-email", `Workday ${host}: verify the account email Workday sent you; the agent signs in again on a later pass.`);
   }
 
+  if (refusedWithoutHold) return resetFlow(() => hold("exists", `Workday ${host}: Workday refused the saved account; ${NO_RESET}. ${YOURSELF}`));
   if (current?.password && (current.account === "pending" || current.account === "created")) return signInFlow();
   if (mode === "sign-in") return unexpected("no saved password for this Workday site");
 
@@ -410,8 +607,9 @@ export async function ensureWorkdayAccount(
     event(`Workday ${host}: checked "${termsLabel}" on the create-account form, as part of your request that the agent create the account.`);
   }
   // "Already exists" or no answer: the account may exist with the password
-  // just saved, so the agent signs in once with it (it never resets a
-  // password and never submits the create form again).
+  // just saved, so the agent signs in once with it (it resets one only
+  // through Workday's forgot-password email and never submits the create
+  // form again).
   const signInOnce = async (
     after: "exists" | "no-answer",
     createTimeout = "Workday did not answer the create-account submit within 60 seconds"
@@ -433,7 +631,7 @@ export async function ensureWorkdayAccount(
       case "wrong-password":
       case "no-account":
         if (exists) {
-          return hold("exists", `Workday ${host}: Workday says an account already exists for this email, and signing in once with the saved password did not work; the agent never resets passwords. ${YOURSELF}`, { account: "refused" });
+          return resetFlow(() => hold("exists", `Workday ${host}: Workday says an account already exists for this email, and signing in once with the saved password did not work; ${NO_RESET}. ${YOURSELF}`, { account: "refused" }));
         }
         return hold("interrupted", `Workday ${host}: ${createTimeout}, and signing in once with the saved password did not work, so the account was probably not created. ${YOURSELF}`);
       case "locked":

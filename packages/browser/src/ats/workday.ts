@@ -10,13 +10,20 @@ import { capturePostSubmitEvidence, type InvalidField, type PostSubmitEvidence }
 import { classifyFieldRole, classifyUploadRole, hasTranscriptField, isSensitiveRole } from "./field-roles";
 import { isHearAboutQuestion, pickHearAboutOption } from "./hear-about";
 import {
+  completeWorkdayPasswordReset,
   createWorkdayAccount,
   isWorkdayAccountStep,
   readWorkdayAccountScreen,
+  requestWorkdayPasswordReset,
+  resendWorkdayVerification,
   signInToWorkday,
   type WorkdayAccountOutcome,
   type WorkdayAccountScreen,
   type WorkdayCredentials,
+  type WorkdayFlowOutcome,
+  type WorkdayResendResult,
+  type WorkdayResetRequestResult,
+  type WorkdayResetResult,
   type WorkdaySettleOptions
 } from "./workday-account";
 import { fillWorkdayHistory, typeIntoDateSection, type HistoryFillResult } from "./workday-history";
@@ -72,6 +79,17 @@ export type WorkdayPage = BrowserPage & {
     host: string,
     options?: WorkdaySettleOptions
   ): Promise<{ outcome: WorkdayAccountOutcome; termsLabel: string | null }>;
+  /** Clicks the sign-in page's own resend-verification control once; "missing" when the page shows none. */
+  resendVerification?(email: string, host: string, options?: WorkdaySettleOptions): Promise<WorkdayFlowOutcome<WorkdayResendResult>>;
+  /** Asks for a password-reset email with Workday's "Forgot your password?" form; "missing" when the page shows no such control. */
+  requestPasswordReset?(email: string, host: string, options?: WorkdaySettleOptions): Promise<WorkdayFlowOutcome<WorkdayResetRequestResult>>;
+  /** Opens the emailed password-reset link in a new tab and sets the password `credentials.password()` returns, called once, right before typing. */
+  completePasswordReset?(
+    link: string,
+    credentials: { email: string; password: () => string },
+    host: string,
+    options?: WorkdaySettleOptions
+  ): Promise<WorkdayFlowOutcome<WorkdayResetResult>>;
   /** Opens a link in a new tab of the same browser context (the run's profile), then closes the tab. */
   openInNewTab?(url: string): Promise<void>;
   /** Navigates this tab to a URL. */
@@ -599,6 +617,9 @@ export function createWorkdayPage(page: Page): WorkdayPage {
     accountScreen: () => readWorkdayAccountScreen(page),
     signInToAccount: (credentials, host, options) => signInToWorkday(page, credentials, host, options),
     createAccount: (credentials, host, options) => createWorkdayAccount(page, credentials, host, options),
+    resendVerification: (email, host, options) => resendWorkdayVerification(page, email, host, options),
+    requestPasswordReset: (email, host, options) => requestWorkdayPasswordReset(page, email, host, options),
+    completePasswordReset: (link, credentials, host, options) => completeWorkdayPasswordReset(page, link, credentials, host, options),
     workdayErrors: () => readWorkdayErrors(page),
     openInNewTab: async (url) => {
       const tab = await page.context().newPage();

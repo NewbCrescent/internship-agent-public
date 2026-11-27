@@ -49,6 +49,15 @@
  * interrupted after the third, with no password typed on later passes, and after a link that no longer verifies is
  * opened, a sign-in that still asks to verify holds as interrupted and a refused one as a refused password naming the
  * opened link (no-email-waits, no-email-stops, link-unverified, link-refused).
+ * Workday's own recovery flows (Track 65, allowed by the candidate on 2026-11-27): after an opened link that no longer
+ * verifies, or before opening a link from an account two hours or more old, the sign-in page's "Resend Account
+ * Verification" control is clicked once and the new email's link opened (resend, resend-old); a host resent within a
+ * day is held without a click (resend-again), and a page without the control keeps the earlier hold (link-unverified).
+ * An existing account with another password goes through "Forgot your password?": the reset email's link is opened, a
+ * new password is saved (0600) only once the reset form shows, and the agent signs in (reset, and no-email-reset after
+ * the third empty verification read); no reset email holds as interrupted and a later pass does not ask again
+ * (reset-no-email), and a CAPTCHA on the reset page holds with the saved password unchanged (reset-captcha). No
+ * password, reset link, or token reaches the database, logs, or errors.
  * Never reads process.env for accounts or Gmail.
  *
  * Usage: pnpm test:browser:workday-account
@@ -60,6 +69,7 @@ import { basename, dirname, join } from "node:path";
 import { chromium, type Page } from "playwright-core";
 
 import {
+  clearWorkdayAccountHold,
   ensureWorkdayAccount,
   getWorkdayAccount,
   putWorkdayAccount,
@@ -129,6 +139,8 @@ async function main(): Promise<void> {
     const fixture = readFileSync(join(process.cwd(), "testing-harness/browser/fixtures/workday-application.html"), "utf8");
     const context = await browser.newContext();
     const activationAttempts = new Map<string, number>();
+    // The path of every verification page opened (the tokens are fixture values).
+    const activationPaths: string[] = [];
     const navigationFailureHost = "fixture-silent-quiet-navigation.wd1.myworkdayjobs.com";
     await context.route("**/*", async (route) => {
       const request = route.request();
@@ -138,6 +150,7 @@ async function main(): Promise<void> {
         host = url.hostname;
         if (request.resourceType() === "document" && url.pathname.startsWith("/External/activate/")) {
           activationAttempts.set(host, (activationAttempts.get(host) ?? 0) + 1);
+          activationPaths.push(url.pathname);
           if (host === navigationFailureHost) return route.abort();
         }
       } catch { /* not a URL */ }
@@ -168,8 +181,41 @@ async function main(): Promise<void> {
 
     const urlFor = (host: string, mode: string) => `https://${host}/External/job/US-WA/Intern_R1?account=${mode}`;
     const fixtureState = (tab: Page) => tab.evaluate(() => (window as unknown as { fixtureAccount: FixtureAccount }).fixtureAccount);
+    type StoredAccount = { password: string; verified: boolean; token: string; resetToken?: string; resetMode?: string };
     const storedAccount = (tab: Page) => tab.evaluate((email) =>
-      (JSON.parse(localStorage.getItem("fixture-workday-accounts") || "{}") as Record<string, { password: string; verified: boolean; token: string }>)[email] ?? null, EMAIL);
+      (JSON.parse(localStorage.getItem("fixture-workday-accounts") || "{}") as Record<string, StoredAccount>)[email] ?? null, EMAIL);
+    /** The fixture's resend and reset-request counters (localStorage, so they survive the flow's reloads). */
+    const counter = (tab: Page, key: "fixture-workday-resends" | "fixture-workday-resets") =>
+      tab.evaluate((name) => Number(localStorage.getItem(name) || 0), key);
+    /** Stores a fixture account for a host before its scenario, from a tab that closes again. */
+    const seedFixtureAccount = async (host: string, mode: string, value: StoredAccount) => {
+      const tab = await context.newPage();
+      await tab.goto(urlFor(host, mode));
+      await tab.evaluate(({ email, account }) => {
+        const accounts = JSON.parse(localStorage.getItem("fixture-workday-accounts") || "{}") as Record<string, unknown>;
+        accounts[email] = account;
+        localStorage.setItem("fixture-workday-accounts", JSON.stringify(accounts));
+      }, { email: EMAIL, account: value });
+      await tab.close();
+    };
+    // Every password-reset link and token the fake mailbox served (fixture values), for the privacy checks.
+    const servedReset: string[] = [];
+    /**
+     * Workday's password-reset email as public sources describe it (sender <tenant>@otp.workday.com, subject "Reset your
+     * password for your candidate account", a two-hour link; 2025-11-06), shaped like the captured HTML-only
+     * verification email (the link shown only as text); the link's path is modelled. Empty until a reset was asked for.
+     */
+    const resetMail = (host: string, tab: () => Page | null) => async (): Promise<MailMessage[]> => {
+      const current = tab();
+      const token = current ? (await storedAccount(current))?.resetToken : undefined;
+      if (!token) return [];
+      const link = `https://${host}/External/passwordreset/${token}`;
+      servedReset.push(link, token);
+      return [{
+        from: "Fixture Aerospace <fixture@otp.workday.com>", subject: "Reset your password for your candidate account", text: "", receivedAt: new Date(),
+        html: `<table><tr><td><p>Click the link below to reset your password. The link expires in 2 hours.</p><p>${link}</p><p><a href="http://www.workday.com">Workday</a></p></td></tr></table>`
+      }];
+    };
     const events = () => (database.prepare("SELECT detail FROM application_events WHERE job_id = ?").all(jobId) as Array<{ detail: string | null }>).map((row) => row.detail ?? "");
 
     async function scenario(
@@ -829,7 +875,7 @@ async function main(): Promise<void> {
     verifyHold(noEmailStopsHost, 2);
     mail = async () => [];
     const noEmailStops = await scenario("no-email-stops", noEmailStopsHost, "create&signin-error=generic");
-    held("no-email-stops", noEmailStops, "never resets passwords");
+    held("no-email-stops", noEmailStops, "Forgot your password? email");
     const noEmailStopsEntry = getWorkdayAccount(file, noEmailStopsHost);
     if (noEmailStopsEntry?.account !== "created" || noEmailStopsEntry.hold?.kind !== "interrupted" || noEmailStopsEntry.password !== SEEDED_PASSWORD) {
       failures.push(`no-email-stops: entry is ${noEmailStopsEntry?.account} with hold ${noEmailStopsEntry?.hold?.kind}`);
@@ -867,6 +913,9 @@ async function main(): Promise<void> {
     if (getWorkdayAccount(file, linkUnverifiedHost)?.hold?.kind !== "interrupted") failures.push(`link-unverified: the hold is ${getWorkdayAccount(file, linkUnverifiedHost)?.hold?.kind}`);
     if (!events().includes(`Workday ${linkUnverifiedHost}: verification email found and opened.`)) failures.push("link-unverified: no verification event");
     if ((await storedAccount(linkUnverified.tab))?.verified) failures.push("link-unverified: the fixture account was verified by a stale link");
+    // A sign-in page without Workday's resend control: nothing is clicked and the earlier hold stays.
+    if (await counter(linkUnverified.tab, "fixture-workday-resends") !== 0) failures.push("link-unverified: a resend was clicked");
+    if (getWorkdayAccount(file, linkUnverifiedHost)?.resentAt !== undefined) failures.push("link-unverified: a resend time was saved without a resend");
     mail = async () => [];
 
     const linkRefusedHost = "fixture-link-refused.wd1.myworkdayjobs.com";
@@ -874,6 +923,155 @@ async function main(): Promise<void> {
     const linkRefused = await scenario("link-refused", linkRefusedHost, "login-redirect", { clock: virtualClock(0).clock });
     held("link-refused", linkRefused, "after the agent opened the verification link");
     if (getWorkdayAccount(file, linkRefusedHost)?.hold?.kind !== "wrong-password") failures.push(`link-refused: the hold is ${getWorkdayAccount(file, linkRefusedHost)?.hold?.kind}`);
+    mail = async () => [];
+
+    // Track 65: an opened verification link that no longer verifies, on a sign-in page that offers Workday's own
+    // "Resend Account Verification" control: the agent clicks it once, opens the new email's link, and signs in.
+    const resendHost = "fixture-resend.wd1.myworkdayjobs.com";
+    let resendTab: Page | null = null;
+    mail = async () => {
+      const messages = await staleLink(resendHost)();
+      if (resendTab && await counter(resendTab, "fixture-workday-resends") >= 1) messages.push(...(await linkFor(resendHost, () => resendTab)()));
+      return messages;
+    };
+    const resend = await scenario("resend", resendHost, "notice&resend=1", { clock: virtualClock().clock }, (tab) => { resendTab = tab; });
+    if (resend.result !== "signed-in" && resend.result !== "created") failures.push(`resend: expected a sign-in, got ${resend.result ?? resend.error?.message}`);
+    await opensFlow("resend", resend.page);
+    if (!(await storedAccount(resend.tab))?.verified) failures.push("resend: the fixture account was not verified");
+    if (await counter(resend.tab, "fixture-workday-resends") !== 1) failures.push(`resend: ${await counter(resend.tab, "fixture-workday-resends")} resend clicks`);
+    const resendEntry = getWorkdayAccount(file, resendHost);
+    if (!resendEntry?.resentAt || resendEntry.hold !== null || resendEntry.account !== "created") failures.push(`resend: entry is ${resendEntry?.account} with hold ${resendEntry?.hold?.kind}, resentAt ${resendEntry?.resentAt}`);
+    for (const text of [
+      `Workday ${resendHost}: verification email found and opened.`,
+      `Workday ${resendHost}: resent the verification email at Workday's request.`,
+      `Workday ${resendHost}: the new verification email was found and opened.`
+    ]) if (!events().includes(text)) failures.push(`resend: no event "${text}"`);
+    mail = async () => [];
+
+    // A found link from an account created 27 hours ago is not opened first: the agent clicks the resend control and
+    // opens only the new email's link.
+    const hoursAgo = (hours: number) => new Date(Date.now() - hours * 3_600_000).toISOString();
+    const oldMail = (host: string, token: string, hours: number): MailMessage => ({
+      from: "Fixture Careers <fixture@otp.workday.com>", subject: "Verify your candidate account", receivedAt: new Date(Date.now() - hours * 3_600_000), text: "",
+      html: `<table><tr><td><p>Please verify your candidate account.</p><p>https://${host}/External/activate/${token}</p></td></tr></table>`
+    });
+    const seedOldEntry = (host: string, resentAt?: string) => putWorkdayAccount(file, {
+      host, email: EMAIL, password: SEEDED_PASSWORD, account: "created", createdAt: hoursAgo(27), updatedAt: hoursAgo(2), ...(resentAt ? { resentAt } : {}),
+      hold: { kind: "verify-email", reason: `Workday ${host}: verification email not found within 1 minute; the agent checks again on a later pass.`, at: hoursAgo(2), attempts: 1 }
+    });
+    const resendOldHost = "fixture-resend-old.wd1.myworkdayjobs.com";
+    await seedFixtureAccount(resendOldHost, "create&resend=1", { password: SEEDED_PASSWORD, verified: false, token: "oldfixturetoken" });
+    seedOldEntry(resendOldHost);
+    let resendOldTab: Page | null = null;
+    mail = async () => {
+      const messages = [oldMail(resendOldHost, "oldfixturetoken", 26)];
+      if (resendOldTab && await counter(resendOldTab, "fixture-workday-resends") >= 1) messages.push(...(await linkFor(resendOldHost, () => resendOldTab)()));
+      return messages;
+    };
+    const resendOldPaths = activationPaths.length;
+    const resendOld = await scenario("resend-old", resendOldHost, "create&resend=1", { clock: virtualClock().clock }, (tab) => { resendOldTab = tab; });
+    if (resendOld.result !== "signed-in") failures.push(`resend-old: expected "signed-in", got ${resendOld.result ?? resendOld.error?.message}`);
+    await opensFlow("resend-old", resendOld.page);
+    if (!(await storedAccount(resendOld.tab))?.verified) failures.push("resend-old: the fixture account was not verified");
+    if (await counter(resendOld.tab, "fixture-workday-resends") !== 1) failures.push("resend-old: expected one resend click");
+    if (activationPaths.slice(resendOldPaths).some((path) => path.includes("oldfixturetoken"))) failures.push("resend-old: the old link was opened");
+    if (!events().includes(`Workday ${resendOldHost}: the new verification email was found and opened.`)) failures.push("resend-old: no new-email event");
+    mail = async () => [];
+
+    // A host the agent resent within the last 24 hours: the stale link is opened, but no second resend is clicked.
+    const resendAgainHost = "fixture-resend-again.wd1.myworkdayjobs.com";
+    await seedFixtureAccount(resendAgainHost, "create&resend=1", { password: SEEDED_PASSWORD, verified: false, token: "currentfixturetoken" });
+    seedOldEntry(resendAgainHost, hoursAgo(1));
+    mail = async () => [oldMail(resendAgainHost, "expiredfixturetoken", 1)];
+    const resendAgain = await scenario("resend-again", resendAgainHost, "create&resend=1", { clock: virtualClock().clock });
+    held("resend-again", resendAgain, "already asked Workday to resend it in the last 24 hours");
+    if (getWorkdayAccount(file, resendAgainHost)?.hold?.kind !== "interrupted") failures.push(`resend-again: the hold is ${getWorkdayAccount(file, resendAgainHost)?.hold?.kind}`);
+    if (await counter(resendAgain.tab, "fixture-workday-resends") !== 0) failures.push("resend-again: a second resend was clicked within 24 hours");
+    if ((await storedAccount(resendAgain.tab))?.verified) failures.push("resend-again: the fixture account was verified");
+    mail = async () => [];
+
+    // An account that already exists with another password (the candidate's earlier accounts): "Forgot your password?",
+    // the reset email's link, a new generated password saved before it is typed, and a sign-in with it.
+    const OLD_PASSWORD = "Old-Fixture-Pass-9!";
+    const resetHost = "fixture-reset.wd1.myworkdayjobs.com";
+    await seedFixtureAccount(resetHost, "create&forgot=1", { password: OLD_PASSWORD, verified: true, token: "resetfixturetoken" });
+    let resetTab: Page | null = null;
+    mail = resetMail(resetHost, () => resetTab);
+    const reset = await scenario("reset", resetHost, "create&forgot=1", undefined, (tab) => { resetTab = tab; });
+    if (reset.result !== "signed-in") failures.push(`reset: expected "signed-in", got ${reset.result ?? reset.error?.message}`);
+    await opensFlow("reset", reset.page);
+    if (await counter(reset.tab, "fixture-workday-resets") !== 1) failures.push("reset: expected one reset request");
+    const resetEntry = getWorkdayAccount(file, resetHost);
+    if (resetEntry?.account !== "created" || resetEntry.hold !== null || !resetEntry.resetAt) failures.push(`reset: entry is ${resetEntry?.account} with hold ${resetEntry?.hold?.kind}, resetAt ${resetEntry?.resetAt}`);
+    if (!resetEntry?.password || resetEntry.password === OLD_PASSWORD || !PASSWORD_RULE.test(resetEntry.password)) failures.push("reset: the new password was not generated and saved");
+    if ((await storedAccount(reset.tab))?.password !== resetEntry?.password) failures.push("reset: Workday holds a different password than the saved one");
+    if ((statSync(file).mode & 0o777) !== 0o600) failures.push(`reset: accounts file mode ${(statSync(file).mode & 0o777).toString(8)}`);
+    if ((statSync(dirname(file)).mode & 0o777) !== 0o700) failures.push(`reset: accounts directory mode ${(statSync(dirname(file)).mode & 0o777).toString(8)}`);
+    if (accountSubmits.get(resetHost)?.join(",") !== "Create Account,Sign In,Forgot Password,Reset Password,Sign In") failures.push(`reset: account submits ${accountSubmits.get(resetHost)?.join(",")}`);
+    for (const text of [
+      `Workday ${resetHost}: Workday does not let the agent sign in with the saved password, so the agent asked for a password-reset email with Workday's Forgot your password? control, as you allowed on 2026-11-27.`,
+      `Workday ${resetHost}: the password was reset through Workday's emailed link; the new password is saved locally.`
+    ]) if (!events().includes(text)) failures.push(`reset: no event "${text}"`);
+    mail = async () => [];
+
+    // The third empty verification read on a host where the candidate had an account before: the reset runs, and the
+    // agent signs in with the new password.
+    const noEmailResetHost = "fixture-no-email-reset.wd1.myworkdayjobs.com";
+    await seedFixtureAccount(noEmailResetHost, "create&signin-error=generic&forgot=1", { password: OLD_PASSWORD, verified: true, token: "noemailfixturetoken" });
+    seedAccount(noEmailResetHost, "created");
+    verifyHold(noEmailResetHost, 2);
+    let noEmailResetTab: Page | null = null;
+    mail = resetMail(noEmailResetHost, () => noEmailResetTab);
+    const noEmailReset = await scenario("no-email-reset", noEmailResetHost, "create&signin-error=generic&forgot=1", undefined, (tab) => { noEmailResetTab = tab; });
+    if (noEmailReset.result !== "signed-in") failures.push(`no-email-reset: expected "signed-in", got ${noEmailReset.result ?? noEmailReset.error?.message}`);
+    await opensFlow("no-email-reset", noEmailReset.page);
+    if (await counter(noEmailReset.tab, "fixture-workday-resets") !== 1) failures.push("no-email-reset: expected one reset request");
+    const noEmailResetEntry = getWorkdayAccount(file, noEmailResetHost);
+    if (noEmailResetEntry?.hold !== null || noEmailResetEntry.account !== "created" || noEmailResetEntry.password === SEEDED_PASSWORD) {
+      failures.push(`no-email-reset: entry is ${noEmailResetEntry?.account} with hold ${noEmailResetEntry?.hold?.kind}`);
+    }
+    if ((await storedAccount(noEmailReset.tab))?.password !== noEmailResetEntry?.password) failures.push("no-email-reset: Workday holds a different password than the saved one");
+    if (!events().includes(`Workday ${noEmailResetHost}: Workday refused the sign-in while the account waits for email verification; the agent looks for the verification email.`)) {
+      failures.push("no-email-reset: no look-for-the-email event");
+    }
+    mail = async () => [];
+
+    // No reset email arrives: held as interrupted with the create's saved password; a later pass (hold cleared) does
+    // not ask Workday again within the day and holds the existing account.
+    const resetNoEmailHost = "fixture-reset-no-email.wd1.myworkdayjobs.com";
+    await seedFixtureAccount(resetNoEmailHost, "create&forgot=1", { password: OLD_PASSWORD, verified: true, token: "resetnoemailtoken" });
+    mail = async () => [];
+    const resetNoEmail = await scenario("reset-no-email", resetNoEmailHost, "create&forgot=1");
+    held("reset-no-email", resetNoEmail, "none arrived");
+    const resetNoEmailEntry = getWorkdayAccount(file, resetNoEmailHost);
+    if (resetNoEmailEntry?.hold?.kind !== "interrupted" || resetNoEmailEntry.account !== "pending" || !resetNoEmailEntry.resetAt) {
+      failures.push(`reset-no-email: entry is ${resetNoEmailEntry?.account} with hold ${resetNoEmailEntry?.hold?.kind}`);
+    }
+    if (!resetNoEmailEntry?.password || !PASSWORD_RULE.test(resetNoEmailEntry.password)) failures.push("reset-no-email: the create's saved password changed");
+    if (await counter(resetNoEmail.tab, "fixture-workday-resets") !== 1) failures.push("reset-no-email: expected one reset request");
+    if ((await storedAccount(resetNoEmail.tab))?.password !== OLD_PASSWORD) failures.push("reset-no-email: Workday's password changed");
+    clearWorkdayAccountHold(file, resetNoEmailHost);
+    const resetNoEmailLater = await scenario("reset-no-email later pass", resetNoEmailHost, "create&forgot=1");
+    held("reset-no-email later pass", resetNoEmailLater, "already exists");
+    const resetNoEmailLaterEntry = getWorkdayAccount(file, resetNoEmailHost);
+    if (resetNoEmailLaterEntry?.account !== "refused" || resetNoEmailLaterEntry.hold?.kind !== "exists") {
+      failures.push(`reset-no-email later pass: entry is ${resetNoEmailLaterEntry?.account} with hold ${resetNoEmailLaterEntry?.hold?.kind}`);
+    }
+    if (await counter(resetNoEmailLater.tab, "fixture-workday-resets") !== 1) failures.push("reset-no-email later pass: Workday was asked for a second reset within 24 hours");
+
+    // A CAPTCHA on the reset page: held, and the saved password is not replaced (the new one is made only on the form).
+    const resetCaptchaHost = "fixture-reset-captcha.wd1.myworkdayjobs.com";
+    await seedFixtureAccount(resetCaptchaHost, "create&forgot=1&reset=captcha", { password: OLD_PASSWORD, verified: true, token: "resetcaptchatoken" });
+    let resetCaptchaTab: Page | null = null;
+    mail = resetMail(resetCaptchaHost, () => resetCaptchaTab);
+    const resetCaptcha = await scenario("reset-captcha", resetCaptchaHost, "create&forgot=1&reset=captcha", undefined, (tab) => { resetCaptchaTab = tab; });
+    held("reset-captcha", resetCaptcha, "password-reset page");
+    const resetCaptchaEntry = getWorkdayAccount(file, resetCaptchaHost);
+    if (resetCaptchaEntry?.hold?.kind !== "captcha" || resetCaptchaEntry.account !== "pending") {
+      failures.push(`reset-captcha: entry is ${resetCaptchaEntry?.account} with hold ${resetCaptchaEntry?.hold?.kind}`);
+    }
+    if (await counter(resetCaptcha.tab, "fixture-workday-resets") !== 1) failures.push("reset-captcha: expected one reset request");
+    if ((await storedAccount(resetCaptcha.tab))?.password !== OLD_PASSWORD) failures.push("reset-captcha: Workday's password changed");
     mail = async () => [];
 
     // No password anywhere it must not be.
@@ -884,6 +1082,15 @@ async function main(): Promise<void> {
       if (rows.includes(password)) failures.push("a password reached the database");
       if (captured.some((line) => line.includes(password))) failures.push("a password reached the console");
       if (caughtMessages.some((message) => message.includes(password))) failures.push("a password reached an error message");
+    }
+    // No password-reset link or token either.
+    if (servedReset.length === 0) failures.push("no password-reset link was served");
+    const reasons = Object.values(readWorkdayAccounts(file)).map((entry) => entry.hold?.reason ?? "");
+    for (const secret of ["passwordreset", ...servedReset]) {
+      if (rows.includes(secret)) failures.push("a password-reset link reached the database");
+      if (captured.some((line) => line.includes(secret))) failures.push("a password-reset link reached the console");
+      if (caughtMessages.some((message) => message.includes(secret))) failures.push("a password-reset link reached an error message");
+      if (reasons.some((reason) => reason.includes(secret))) failures.push("a password-reset link reached a hold reason");
     }
     database.close();
     await context.close();
@@ -896,7 +1103,7 @@ async function main(): Promise<void> {
     console.error(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"failed","failures":${JSON.stringify(failures)}}`);
     process.exit(1);
   }
-  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":44}`);
+  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":52}`);
 }
 
 main().catch((error) => {

@@ -1,5 +1,6 @@
 /**
- * Finds Workday's account-verification link in the candidate's mailbox.
+ * Finds Workday's account-verification link, and its password-reset link (on
+ * the tenant's own origin only), in the candidate's mailbox.
  * Links are read from `href` attributes and the plain-text part and, when a
  * message gives none there, from URLs shown as text in its HTML body.
  * Messages are held in memory only; nothing about them is logged, stored, or
@@ -83,15 +84,56 @@ function visibleTextLinksIn(message: MailMessage): string[] {
 
 export type VerificationLinkResult = { kind: "found"; link: string } | { kind: "none" } | { kind: "ambiguous"; count: number };
 
-export function findWorkdayVerificationLink(messages: MailMessage[], target: VerificationTarget & { since: Date }): VerificationLinkResult {
+/** `exclude`: links the caller already found or opened (an older email); they are skipped. */
+export function findWorkdayVerificationLink(
+  messages: MailMessage[],
+  target: VerificationTarget & { since: Date; exclude?: readonly string[] }
+): VerificationLinkResult {
   const relevant = relevantWorkdayHeader(target);
   const earliest = target.since.getTime() - SKEW_MS;
+  const excluded = new Set(target.exclude ?? []);
   const found = new Set<string>();
   for (const message of messages) {
     if (message.receivedAt.getTime() < earliest) continue;
     if (!relevant({ from: message.from, subject: message.subject }) && !mentions(`${message.text} ${message.html}`, target)) continue;
     if (!VERIFY_PHRASE.test(`${message.subject} ${message.text} ${message.html}`)) continue;
     const accept = (links: string[]) => links.flatMap((link) => acceptedLink(link, target) ?? []);
+    let accepted = accept(linksIn(message));
+    if (accepted.length === 0) accepted = accept(visibleTextLinksIn(message));
+    for (const link of accepted) if (!excluded.has(link)) found.add(link);
+  }
+  if (found.size === 0) return { kind: "none" };
+  if (found.size > 1) return { kind: "ambiguous", count: found.size };
+  return { kind: "found", link: [...found][0]! };
+}
+
+/** A password reset named in the mail ("Reset your password for your candidate account"). */
+const RESET_PHRASE = /\b(?:reset\w*|forgot\w*|chang\w*|recover\w*)\b[^.]{0,40}\bpassword\b|\bpassword\b[^.]{0,40}\b(?:reset|change|recovery)\b/i;
+
+/**
+ * An https link on the tenant's own host (no Workday-wide domain, since this link sets a password) whose path names
+ * a reset or password step and no activation or verification step.
+ */
+function acceptedResetLink(raw: string, target: VerificationTarget): string | null {
+  let url: URL;
+  try { url = new URL(raw); } catch { return null; }
+  if (url.protocol !== "https:" || url.username || url.password) return null;
+  if (url.hostname.toLocaleLowerCase("en-US") !== target.host.toLocaleLowerCase("en-US")) return null;
+  const rest = `${url.pathname}${url.search}`;
+  if (!/reset|password|forgot|recover/i.test(rest) || /unsubscribe|activat|verif/i.test(rest)) return null;
+  return url.href;
+}
+
+/** Workday's password-reset link, matched like the verification link but on the tenant's own origin only. */
+export function findWorkdayPasswordResetLink(messages: MailMessage[], target: VerificationTarget & { since: Date }): VerificationLinkResult {
+  const relevant = relevantWorkdayHeader(target);
+  const earliest = target.since.getTime() - SKEW_MS;
+  const found = new Set<string>();
+  for (const message of messages) {
+    if (message.receivedAt.getTime() < earliest) continue;
+    if (!relevant({ from: message.from, subject: message.subject }) && !mentions(`${message.text} ${message.html}`, target)) continue;
+    if (!RESET_PHRASE.test(`${message.subject} ${message.text} ${message.html}`)) continue;
+    const accept = (links: string[]) => links.flatMap((link) => acceptedResetLink(link, target) ?? []);
     let accepted = accept(linksIn(message));
     if (accepted.length === 0) accepted = accept(visibleTextLinksIn(message));
     for (const link of accepted) found.add(link);
@@ -101,11 +143,31 @@ export function findWorkdayVerificationLink(messages: MailMessage[], target: Ver
   return { kind: "found", link: [...found][0]! };
 }
 
+type PollOptions = { pollMs?: number; timeoutMs?: number; sleep?: (ms: number) => Promise<void> };
+
 /** Polls the mailbox until one verification link arrives, several do, or the time runs out. */
 export async function pollVerificationLink(
   factory: VerificationMailboxFactory,
+  target: VerificationTarget & { since: Date; exclude?: readonly string[] },
+  options: PollOptions = {}
+): Promise<VerificationLinkResult> {
+  return pollMailboxLink(factory, target, findWorkdayVerificationLink, options);
+}
+
+/** Polls the mailbox until one password-reset link arrives, several do, or the time runs out. */
+export async function pollPasswordResetLink(
+  factory: VerificationMailboxFactory,
   target: VerificationTarget & { since: Date },
-  options: { pollMs?: number; timeoutMs?: number; sleep?: (ms: number) => Promise<void> } = {}
+  options: PollOptions = {}
+): Promise<VerificationLinkResult> {
+  return pollMailboxLink(factory, target, findWorkdayPasswordResetLink, options);
+}
+
+async function pollMailboxLink<T extends VerificationTarget & { since: Date }>(
+  factory: VerificationMailboxFactory,
+  target: T,
+  find: (messages: MailMessage[], target: T) => VerificationLinkResult,
+  options: PollOptions
 ): Promise<VerificationLinkResult> {
   const pollMs = options.pollMs ?? 10_000;
   const timeoutMs = options.timeoutMs ?? 180_000;
@@ -127,7 +189,7 @@ export async function pollVerificationLink(
         if (error instanceof MailboxUnavailable) throw error;
         throw new MailboxUnavailable("the mailbox could not be read");
       }
-      const result = findWorkdayVerificationLink(messages, target);
+      const result = find(messages, target);
       if (result.kind !== "none") return result;
       if (Date.now() + pollMs > deadline) return { kind: "none" };
       await sleep(pollMs);

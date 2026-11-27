@@ -46,6 +46,24 @@
     // its button reads Sign In, as a read-only capture of rockwellautomation.wd1's sign-in step showed
     // on 2026-11-24 (Workday labels the filter by its internal auth view; the create filter there
     // reads "Create Account").
+    // &resend=1: signing in to an unverified account shows Workday's alert "Verify your account before you sign in or
+    // request a verification email." and, below it, "Still can't sign in? Be sure to check your spam folder, your account
+    // may need verification" with a "Resend Account Verification" control (texts captured from read-only workday-account
+    // evidence, 2026-11-25 and 2026-11-26; the control's markup, a plain button, is modelled: no DOM was captured).
+    // Clicking it gives the account for the email field's value, if unverified, a new token (the old one no longer
+    // verifies), counts the click in localStorage "fixture-workday-resends", and shows "We sent a new verification email.
+    // Check your inbox." (modelled).
+    // &forgot (modelled, except the captured forgotPasswordLink id of the 2026-11-19 captures): the synthetic create and
+    // sign-in forms draw "Forgot your password?" (forgotPasswordLink), and a click on that control, in any markup, opens a
+    // Forgot Password form (email field, a "Submit" click filter over forgotPasswordSubmitButton in a noCaptchaWrapper,
+    // like the real create button's markup). Its submit gives the email's account, if any, a resetToken and the page's
+    // &reset value, counts the request in localStorage "fixture-workday-resets", and always shows "If an account exists
+    // for this email address, we sent you a link to reset your password.". Without &forgot nothing changes.
+    // /<site>/passwordreset/<token> (modelled, beside /activate/<token>): the reset page for the account with that token:
+    // a CAPTCHA frame only (&reset=captcha at the request), "This link has expired or is no longer valid." (no such
+    // account), or New Password / Verify New Password with a "Submit" click filter over resetPasswordSubmitButton; a
+    // matching password that meets the create step's rule replaces the account's password, drops the token, and shows
+    // "Your password has been reset.".
     // ?dwell=1 (like Workday's sign-in widget, candidate-experience-apply-flow 2026.47.19, read 2026-11-24): an account submit clicked under 500 ms after its submit button mounted is dropped with no message; window.fixtureAccount counts the drops (ignoredSubmits) and records each submit's delay from its button's mount (submitDelays, ms).
     // Save and Continue validation draws Workday-style errors: an errorMessage alert inside each
     // missing field's formField-* container, an errorBanner listing them, and a plain
@@ -125,8 +143,13 @@
     }
     const accountMode = params.get("account");
     const signInError = params.get("signin-error");
+    const resendMode = params.get("resend") === "1";
+    const forgotMode = params.has("forgot");
+    const passwordReset = /\/passwordreset\/([A-Za-z0-9]+)/.exec(location.pathname);
+    const bump = (key) => localStorage.setItem(key, String(Number(localStorage.getItem(key) || 0) + 1));
     window.fixtureAccount = { honeypotTyped: false, termsChecked: false, creates: 0, signIns: 0, emailMethodClicks: 0, headerClicks: 0, ignoredSubmits: 0, submitDelays: [] };
     if (/\/login$/.test(location.pathname)) renderLoginPage();
+    if (passwordReset) renderResetPage(passwordReset[1]);
     const dwellMode = params.get("dwell") === "1";
     const submitMounts = new WeakMap();
     if (dwellMode) {
@@ -385,6 +408,7 @@
       if (params.get("markup") === "real") return renderRealAccount(kind);
       const covered =(id, label) => `<div style="position:relative;display:inline-block"><button type="button" data-automation-id="${id}">${label}</button><div data-automation-id="click_filter" aria-label="${label}" style="position:absolute;inset:0"></div></div>`;
       const captcha = accountMode === "captcha" ? `<div data-automation-id="noCaptchaWrapper"><iframe title="reCAPTCHA challenge" src="about:blank"></iframe></div>` : "";
+      const forgot = forgotMode ? `<button type="button" data-automation-id="forgotPasswordLink">Forgot your password?</button>` : "";
       const form = kind === "create" ? `
           <label for="acct-email">Email Address*</label><input id="acct-email" type="text" data-automation-id="email">
           <label for="acct-password">Password*</label><input id="acct-password" type="password" data-automation-id="password">
@@ -392,13 +416,13 @@
           <input type="text" data-automation-id="beecatcher" name="website" aria-label="This input is for robots only" style="position:absolute;left:-9999px">
           <input type="checkbox" id="acct-terms" data-automation-id="createAccountCheckbox"><label for="acct-terms">Yes, I have read and consent to the Terms and Conditions</label>
           ${covered("createAccountSubmitButton", "Create Account")}
-          <button type="button" data-automation-id="signInLink">Sign In</button>` : `
+          <button type="button" data-automation-id="signInLink">Sign In</button>${forgot}` : `
           <label for="acct-email">Email Address*</label><input id="acct-email" type="text" data-automation-id="email">
           <label for="acct-password">Password*</label><input id="acct-password" type="password" data-automation-id="password">
           <div><label for="input-website">Enter website. This input is for robots only, do not enter if you're human.</label>
             <input data-automation-id="beecatcher" id="input-website" name="website" type="text" style="position:absolute;left:-9999px"></div>
           ${covered("signInSubmitButton", "Sign In")}
-          <button type="button" data-automation-id="createAccountLink">Create Account</button>`;
+          <button type="button" data-automation-id="createAccountLink">Create Account</button>${forgot}`;
       document.getElementById("app").innerHTML = `
         <div data-automation-id="applyFlowPage">
           <ol data-automation-id="progressBar"><li data-automation-id="progressBarActiveStep">current step 1 of 6Create Account/Sign In</li></ol>
@@ -482,6 +506,89 @@
       document.querySelector('[data-automation-id="signInContent"]').innerHTML = html;
     }
 
+    /** A submit covered by Workday's click filter inside a noCaptchaWrapper, like the real create button (modelled ids). */
+    function wrappedSubmit(id, label) {
+      return `
+      <div data-automation-id="noCaptchaWrapper"><div style="position:relative;display:inline-block">
+        <div aria-label="Submit" role="button" tabindex="0" data-automation-id="click_filter" style="position:absolute;inset:0;z-index:1"></div>
+        <button type="submit" data-automation-id="${id}" tabindex="-2" aria-hidden="true">${label}</button></div></div>`;
+    }
+
+    /** &forgot: Workday's Forgot Password form (modelled). */
+    function renderForgot() {
+      document.querySelector('[data-automation-id="signInContent"]').innerHTML = `
+        <h2>Forgot Password</h2>
+        <div id="account-errors"></div>
+        <div id="account-notice"></div>
+        <label for="forgot-email">Email Address*</label><input id="forgot-email" type="text" data-automation-id="email">
+        ${wrappedSubmit("forgotPasswordSubmitButton", "Submit")}
+        <button type="button" data-automation-id="signInLink">Sign In</button>`;
+    }
+
+    function requestReset() {
+      const email = accountInput("email").value.trim().toLowerCase();
+      const accounts = readAccounts();
+      if (accounts[email]) {
+        accounts[email].resetToken = `r${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+        accounts[email].resetMode = params.get("reset") || "";
+        writeAccounts(accounts);
+      }
+      bump("fixture-workday-resets");
+      document.getElementById("account-notice").innerHTML = "<p>If an account exists for this email address, we sent you a link to reset your password.</p>";
+    }
+
+    /** /<site>/passwordreset/<token>: Workday's password-reset page (modelled). */
+    function renderResetPage(token) {
+      const account = Object.values(readAccounts()).find((entry) => entry.resetToken === token);
+      const app = document.getElementById("app");
+      if (account && account.resetMode === "captcha") {
+        app.innerHTML = `<div data-automation-id="noCaptchaWrapper"><iframe title="reCAPTCHA challenge" src="about:blank"></iframe></div>`;
+        return;
+      }
+      if (!account) {
+        app.innerHTML = "<h2>This link has expired or is no longer valid.</h2>";
+        return;
+      }
+      app.innerHTML = `
+        <div data-automation-id="signInContent">
+          <h2>Reset Password</h2>
+          <div id="account-errors"></div>
+          <label for="reset-password">New Password*</label><input id="reset-password" type="password" data-automation-id="password">
+          <label for="reset-verify">Verify New Password*</label><input id="reset-verify" type="password" data-automation-id="verifyPassword">
+          ${wrappedSubmit("resetPasswordSubmitButton", "Reset Password")}
+        </div>`;
+    }
+
+    function resetPassword() {
+      const accounts = readAccounts();
+      const email = Object.keys(accounts).find((key) => passwordReset && accounts[key].resetToken === passwordReset[1]);
+      const password = accountInput("password").value;
+      const verify = accountInput("verifyPassword").value;
+      if (!email) return accountError("This link has expired or is no longer valid.");
+      if (password !== verify) return accountError("The passwords do not match.");
+      if (password.length < 8 || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/[0-9]/.test(password) || !/[^A-Za-z0-9]/.test(password)) {
+        return accountError("Password must contain at least 8 characters, an uppercase letter, a lowercase letter, a number and a special character.");
+      }
+      accounts[email].password = password;
+      delete accounts[email].resetToken;
+      delete accounts[email].resetMode;
+      writeAccounts(accounts);
+      document.querySelector('[data-automation-id="signInContent"]').innerHTML =
+        `<h2>Your password has been reset.</h2><button type="button" data-automation-id="signInLink">Sign In</button>`;
+    }
+
+    /** &resend=1: Workday's "Resend Account Verification" control (modelled effect). */
+    function resendVerification() {
+      const email = accountInput("email")?.value.trim().toLowerCase() ?? "";
+      const accounts = readAccounts();
+      if (accounts[email] && !accounts[email].verified) {
+        accounts[email].token = `n${Math.random().toString(36).slice(2)}`;
+        writeAccounts(accounts);
+      }
+      bump("fixture-workday-resends");
+      document.getElementById("account-notice").innerHTML = "<p>We sent a new verification email. Check your inbox.</p>";
+    }
+
     function createAccount() {
       const email = accountInput("email").value.trim().toLowerCase();
       const password = accountInput("password").value;
@@ -532,6 +639,11 @@
         if (signInError === "locked") return accountError("Your account has been locked because of too many failed sign-in attempts.");
         if (signInError === "generic") return accountError("You may have entered the wrong email address or password or your account might be locked.");
         return accountError("Wrong email address or password.");
+      }
+      if (!account.verified && resendMode) {
+        accountError("Verify your account before you sign in or request a verification email.");
+        document.getElementById("account-notice").innerHTML = '<p>Still can\'t sign in? Be sure to check your spam folder, your account may need verification</p><button type="button" data-fixture-resend>Resend Account Verification</button>';
+        return;
       }
       if (!account.verified && accountMode === "notice") {
         document.getElementById("account-notice").innerHTML = "<p>Your account has not been verified. Check your email for the verification link.</p>";
@@ -628,21 +740,30 @@
         renderAccount("sign-in");
       } else if (target.matches('[data-automation-id="createAccountLink"]')) {
         renderAccount("create");
+      } else if (target.matches("[data-fixture-resend]")) {
+        resendVerification();
+      } else if (forgotMode && target.matches('[data-automation-id="forgotPasswordLink"]')) {
+        renderForgot();
       } else if (target.matches('[data-automation-id="utilityMenu"] [data-automation-id="click_filter"]')) {
         // ?header=filter: the header's covered Sign In button; a click on it is only counted.
         window.fixtureAccount.headerClicks += 1;
       } else if (target.matches('[data-automation-id="click_filter"]')) {
         // Only the click filter is clickable, as on Workday; it submits the button it covers, whatever its
         // label ("Submit" on ?filter=submit). The test may watch the moment of submit.
-        const covered = target.parentElement?.querySelector('[data-automation-id="createAccountSubmitButton"], [data-automation-id="signInSubmitButton"]');
-        const action = covered?.getAttribute("data-automation-id") === "createAccountSubmitButton" ? "Create Account" : "Sign In";
-        if (dwellMode) {
+        const covered = target.parentElement?.querySelector('[data-automation-id$="SubmitButton"]');
+        const coveredId = covered?.getAttribute("data-automation-id");
+        const action = coveredId === "createAccountSubmitButton" ? "Create Account"
+          : coveredId === "forgotPasswordSubmitButton" ? "Forgot Password"
+          : coveredId === "resetPasswordSubmitButton" ? "Reset Password"
+          : "Sign In";
+        const handlers = { "Create Account": createAccount, "Sign In": signIn, "Forgot Password": requestReset, "Reset Password": resetPassword };
+        if (dwellMode && (action === "Create Account" || action === "Sign In")) {
           const mountedAt = covered ? submitMounts.get(covered) : undefined;
           const elapsed = mountedAt === undefined ? 0 : performance.now() - mountedAt;
           window.fixtureAccount.submitDelays.push(Math.round(elapsed));
           if (elapsed < 500) { window.fixtureAccount.ignoredSubmits += 1; return; }
         }
-        Promise.resolve(window.onFixtureAccountSubmit?.(action)).then(() => (action === "Create Account" ? createAccount() : signIn()));
+        Promise.resolve(window.onFixtureAccountSubmit?.(action)).then(() => handlers[action]());
       } else if (target.closest("[data-add]")) {
         // A click on the Add's inner (visually hidden) text still adds.
         const addButton = target.closest("[data-add]");

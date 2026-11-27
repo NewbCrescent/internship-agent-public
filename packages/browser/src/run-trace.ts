@@ -239,7 +239,7 @@ export function runTraceOf(page: object): RunTrace | undefined {
 
 /**
  * Wraps the adapter's secret-typing steps so nothing is recorded while they
- * run: Workday's sign-in, account creation, and verification link; iCIMS's
+ * run: Workday's sign-in, account creation, verification link, resend and password reset; iCIMS's
  * profile creation, sign-in, and verification link (resumed after); and the
  * emailed security codes of Greenhouse and Oracle (never resumed: nothing is
  * recorded after a code is typed).
@@ -256,6 +256,9 @@ export function wrapUntracedMethods(adapter: object, trace: RunTrace): void {
   wrap(target, "signInToAccount", true);
   wrap(target, "createAccount", true);
   wrap(target, "openInNewTab", true);
+  wrap(target, "resendVerification", true);
+  wrap(target, "requestPasswordReset", true);
+  wrap(target, "completePasswordReset", true);
   wrap(target, "submitSecurityCode", false);
   wrap(target.icims, "createProfile", true);
   wrap(target.icims, "signIn", true);

@@ -9,6 +9,7 @@ import {
   getWorkdayAccount,
   listWorkdayAccounts,
   MailboxUnavailable,
+  pollPasswordResetLink,
   pollVerificationLink,
   putWorkdayAccount,
   readWorkdayAccounts,
@@ -65,6 +66,18 @@ describe("the Workday accounts file", () => {
     writeFileSync(file, JSON.stringify({ version: 2, accounts: {} }));
     expect(() => readWorkdayAccounts(file)).toThrow(WorkdayAccountsFileError);
     try { readWorkdayAccounts(file); } catch (error) { expect((error as Error).message).not.toContain("version"); }
+  });
+
+  it("keeps resend and reset times through writes and hold clears, and reads older files without them", () => {
+    const file = join(scratch(), "workday-accounts.json");
+    putWorkdayAccount(file, entry());
+    expect(getWorkdayAccount(file, HOST)).toEqual(entry());
+    expect(JSON.parse(readFileSync(file, "utf8")).accounts[HOST]).not.toHaveProperty("resentAt");
+    const times = { resentAt: "2026-11-27T01:00:00.000Z", resetAt: "2026-11-27T02:00:00.000Z" };
+    putWorkdayAccount(file, entry({ ...times, hold: { kind: "interrupted", reason: "Workday acme: no email.", at: "2026-11-27T02:00:00.000Z", attempts: 1 } }));
+    expect(getWorkdayAccount(file, HOST)).toMatchObject(times);
+    expect(clearWorkdayAccountHold(file, HOST, new Date("2026-11-27T03:00:00.000Z"))).toBe(true);
+    expect(getWorkdayAccount(file, HOST)).toEqual(entry({ ...times, hold: null, updatedAt: "2026-11-27T03:00:00.000Z" }));
   });
 
   it("lists hosts without emails or passwords", () => {
@@ -152,6 +165,20 @@ describe("polling the mailbox", () => {
     expect(result).toEqual({ kind: "none" });
     expect(state.closed).toBe(1);
     expect(state.calls).toBeGreaterThanOrEqual(1);
+  });
+
+  it("finds a password-reset link on the second poll and closes the mailbox, and gives up after the window", async () => {
+    const reset: MailMessage = {
+      from: "Acme Rockets <acme@otp.workday.com>", subject: "Reset your password for your candidate account", receivedAt: new Date(since.getTime() + 1_000), text: "",
+      html: "<p>Click the link below to reset your password.</p><p>https://acme.wd1.myworkdayjobs.com/External/passwordreset/abc</p>"
+    };
+    const found = { closed: 0, calls: 0 };
+    expect(await pollPasswordResetLink(async () => fakeMailbox([[verification], [verification, reset]], found), target, { pollMs: 1, timeoutMs: 5_000, sleep: noSleep }))
+      .toEqual({ kind: "found", link: "https://acme.wd1.myworkdayjobs.com/External/passwordreset/abc" });
+    expect(found).toEqual({ closed: 1, calls: 2 });
+    const none = { closed: 0, calls: 0 };
+    expect(await pollPasswordResetLink(async () => fakeMailbox([[verification]], none), target, { pollMs: 10, timeoutMs: 50 })).toEqual({ kind: "none" });
+    expect(none.closed).toBe(1);
   });
 
   it("reports a mailbox that cannot be opened or read with fixed messages", async () => {

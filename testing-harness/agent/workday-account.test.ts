@@ -3,6 +3,7 @@ import { Readable } from "node:stream";
 import { describe, expect, it } from "vitest";
 
 import {
+  findWorkdayPasswordResetLink,
   findWorkdayVerificationLink,
   generateWorkdayPassword,
   relevantWorkdayHeader,
@@ -155,6 +156,68 @@ describe("Workday verification links", () => {
     const html = '<a href="https://acme.wd1.myworkdayjobs.com/External/activate/abc123?x=1">https://acme.wd1.myworkdayjobs.com/External/activate/abc123</a>';
     expect(findWorkdayVerificationLink([message({ html })], target))
       .toEqual({ kind: "found", link: "https://acme.wd1.myworkdayjobs.com/External/activate/abc123?x=1" });
+  });
+
+  it("skips links the agent already found or opened (exclude), so a resent email's new link is picked", () => {
+    const older = message({ html: textOnly("https://acme.wd1.myworkdayjobs.com/External/activate/old") });
+    const newer = message({ html: textOnly("https://acme.wd1.myworkdayjobs.com/External/activate/new") });
+    const exclude = ["https://acme.wd1.myworkdayjobs.com/External/activate/old"];
+    expect(findWorkdayVerificationLink([older, newer], { ...target, exclude }))
+      .toEqual({ kind: "found", link: "https://acme.wd1.myworkdayjobs.com/External/activate/new" });
+    expect(findWorkdayVerificationLink([older], { ...target, exclude }).kind).toBe("none");
+    expect(findWorkdayVerificationLink([older, newer], target)).toEqual({ kind: "ambiguous", count: 2 });
+  });
+});
+
+describe("Workday password-reset links", () => {
+  const since = new Date("2026-11-27T12:00:00.000Z");
+  const target = { host: "acme.wd1.myworkdayjobs.com", tenant: "acme", company: "Acme Rockets", since };
+  const resetUrl = "https://acme.wd1.myworkdayjobs.com/External/passwordreset/abc123";
+  // Shaped like Workday's captured HTML-only verification email (the link only as text); the sender, subject, and
+  // two-hour expiry are from public sources (2025-11-06); the link's path is modelled.
+  const resetHtml = (url: string) =>
+    `<table><tr><td><p>Click the link below to reset your password. The link expires in 2 hours.</p><p>${url}</p><p><a href="http://www.workday.com">Workday</a></p></td></tr></table>`;
+  const message = (overrides: Partial<MailMessage> = {}): MailMessage => ({
+    from: "Acme Rockets <acme@otp.workday.com>", subject: "Reset your password for your candidate account",
+    receivedAt: new Date(since.getTime() + 30_000), text: "", html: resetHtml(resetUrl), ...overrides
+  });
+  const find = (overrides: Partial<MailMessage> = {}) => findWorkdayPasswordResetLink([message(overrides)], target);
+
+  it("finds the reset link shown only as text in an HTML-only email, and an href", () => {
+    expect(find()).toEqual({ kind: "found", link: resetUrl });
+    expect(find({ html: `<p>Reset your password.</p><a href="${resetUrl}?a=1&amp;b=2">Reset</a>` }))
+      .toEqual({ kind: "found", link: `${resetUrl}?a=1&b=2` });
+  });
+
+  it("accepts only https links on the tenant's own host whose path names a reset and no activation step", () => {
+    expect(find({ html: resetHtml("http://acme.wd1.myworkdayjobs.com/External/passwordreset/x") }).kind).toBe("none");
+    expect(find({ html: resetHtml("https://other.wd1.myworkdayjobs.com/External/passwordreset/x") }).kind).toBe("none");
+    expect(find({ html: resetHtml("https://www.myworkday.com/acme/passwordreset/x") }).kind).toBe("none");
+    expect(find({ html: resetHtml("https://user@acme.wd1.myworkdayjobs.com/External/passwordreset/x") }).kind).toBe("none");
+    expect(find({ html: resetHtml("https://acme.wd1.myworkdayjobs.com/External/unsubscribe?reset=1") }).kind).toBe("none");
+    expect(find({ html: resetHtml("https://acme.wd1.myworkdayjobs.com/External/activate/x?password=1") }).kind).toBe("none");
+    expect(find({ html: resetHtml("https://acme.wd1.myworkdayjobs.com/External") }).kind).toBe("none");
+  });
+
+  it("ignores mail older than the request (two minutes of skew), without a reset phrase, or from an unrelated sender", () => {
+    expect(find({ receivedAt: new Date(since.getTime() - 121_000) }).kind).toBe("none");
+    expect(find({ receivedAt: new Date(since.getTime() - 60_000) }).kind).toBe("found");
+    expect(find({ subject: "Your candidate account", html: `<p>Hello.</p><p>${resetUrl}</p>` }).kind).toBe("none");
+    expect(find({ from: "Deals <deals@shop.example>", subject: "Reset your password now", html: "<p>Reset your password: https://shop.example/passwordreset/x</p>" }).kind).toBe("none");
+  });
+
+  it("calls two distinct reset links ambiguous", () => {
+    const second = message({ html: resetHtml("https://acme.wd1.myworkdayjobs.com/External/passwordreset/def456") });
+    expect(findWorkdayPasswordResetLink([message(), second], target)).toEqual({ kind: "ambiguous", count: 2 });
+  });
+
+  it("keeps reset and verification mail apart", () => {
+    expect(findWorkdayVerificationLink([message()], target).kind).toBe("none");
+    const verification = message({
+      subject: "Verify your candidate account",
+      html: "<p>Please verify your candidate account.</p><p>https://acme.wd1.myworkdayjobs.com/External/activate/abc123</p>"
+    });
+    expect(findWorkdayPasswordResetLink([verification], target).kind).toBe("none");
   });
 });
 

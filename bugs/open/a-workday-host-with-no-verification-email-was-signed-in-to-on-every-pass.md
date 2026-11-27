@@ -30,7 +30,9 @@ Regressions: the `no-email-waits`, `no-email-stops`, `link-unverified` and
 
 fixture: modelled (synthetic fixture modes; the loop itself is on the real timelines, 2026-11-26)
 
-Move to bugs/resolved/ once a real pass holds these three hosts as interrupted.
+Track 65: the third empty read now first asks Workday for a password-reset email with its own Forgot your password? control (at most once per host per day) and holds as interrupted only when that cannot run or finds no email; see a-workday-account-that-already-existed-with-another-password-was-never-recovered.md.
+
+Move to bugs/resolved/ once a real pass resets the password on, or holds as interrupted, these three hosts.
 
 ## Refuted causes
 
