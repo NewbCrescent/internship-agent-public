@@ -53,3 +53,49 @@ export function withLocation(location: string | null | undefined, text: string, 
   return (location ? "Location: " + location + "\n" : "") + (office ? "Office: " + office + "\n" : "")
     + (location || office ? "\n" : "") + text.trim();
 }
+
+/** A location that is only a work mode ("Hybrid", "Remote") names no place. */
+const WORK_MODE_ONLY = /^(?:hybrid|remote|on-?site|in[- ]office|in person|flexible)$/i;
+
+type PostalAddress = {
+  postalAddress?: { addressLocality?: string | null; addressRegion?: string | null; addressCountry?: string | null } | null;
+} | null | undefined;
+
+/**
+ * Ashby's location string with its structured address: "Berlin" becomes
+ * "Berlin, Germany", and a work-mode location ("Hybrid") gives way to the
+ * office address ("Johnston, Iowa, United States"). Secondary locations
+ * follow, "; "-separated.
+ */
+export function ashbyLocation(job: {
+  location?: string | null;
+  address?: PostalAddress;
+  secondaryLocations?: ReadonlyArray<{ location?: string | null; address?: PostalAddress }> | null;
+}): string | undefined {
+  const group = (location: string | null | undefined, address: PostalAddress) => {
+    const postal = address?.postalAddress;
+    return joinPlaceParts([
+      location && !WORK_MODE_ONLY.test(location.trim()) ? location : null,
+      postal?.addressLocality, postal?.addressRegion, postal?.addressCountry
+    ]);
+  };
+  const groups = [group(job.location, job.address), ...(job.secondaryLocations ?? []).map((entry) => group(entry.location, entry.address))]
+    .filter(Boolean);
+  return groups.length ? [...new Set(groups)].join("; ") : job.location ?? undefined;
+}
+
+/**
+ * Lever's locations ("allLocations", else the category location), with the
+ * posting's country named when there is one location: "Seoul" with country
+ * KR becomes "Seoul, South Korea".
+ */
+export function leverLocation(job: {
+  country?: string | null;
+  categories?: { location?: string | null; allLocations?: ReadonlyArray<string> | null } | null;
+}): string | undefined {
+  const all = (job.categories?.allLocations ?? []).map((entry) => entry.trim()).filter(Boolean);
+  const base = all.length ? all.join("; ") : job.categories?.location?.trim() ?? "";
+  const country = countryName(job.country);
+  if (country && all.length <= 1) return joinPlaceParts([base, country]) || undefined;
+  return base || undefined;
+}

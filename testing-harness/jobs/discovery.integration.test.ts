@@ -11,6 +11,8 @@ import {
   fetchCompanySource,
   fetchPublicBoard,
   getApplicationPackage,
+  ingestPosting,
+  plainText,
   getDiscoveryRuns,
   getReviewQueue,
   processManualBatch,
@@ -37,6 +39,8 @@ import {
   saveCandidateFact,
   seedDevelopmentData
 } from "@internship-agent/db";
+import { judgeLocation } from "@internship-agent/domain";
+import { extractDeterministically } from "@internship-agent/jobs";
 
 const temporaryDirectories: string[] = [];
 
@@ -95,6 +99,19 @@ const WEAK_POSTING = [
   "Harbor Goods sells fictional outdoor gear and seeks a marketing intern for social campaigns.",
   "Requirements: enrolled in a marketing degree program, available part time in Austin."
 ].join("\n");
+
+/** A fictional board posting whose description names no city, state, country, or work mode. */
+const PLACELESS_POSTING = [
+  "Juniper Lane Robotics builds fictional warehouse software for this project's tests. Interns ship one feature with a mentor.",
+  "Requirements:",
+  "- Experience with TypeScript or Python",
+  "- Enrolled in a Bachelor's program"
+].join("\n");
+
+/** The country codes the deterministic extractor reads from a posting's text. */
+function countries(text: string): string[] {
+  return extractDeterministically(text).locations.map((location) => location.countryCode).filter((code): code is string => Boolean(code));
+}
 
 function qualifiedDatabase(): DatabaseSync {
   const database = disposableDatabase();
@@ -606,7 +623,7 @@ describe("bulk discovery run", () => {
             job(11, "Software Engineering Intern"), job(12, "Senior Engineer"), job(13, "Data Intern"), job(14, "Design Intern")
           ] }));
         }
-        if (url === `${list}/11`) return new Response(JSON.stringify({ ...job(11, "Software Engineering Intern"), content: STRONG_POSTING }));
+        if (url === `${list}/11`) return new Response(JSON.stringify({ ...job(11, "Software Engineering Intern"), content: STRONG_POSTING, location: { name: "Redlands, CA" } }));
         if (url === `${list}/13`) return new Response("{}", { status: 404 });
         if (url === `${list}/14`) return new Response(JSON.stringify({ ...job(14, "Design Intern"), content: "Too short." }));
         throw new Error(`unexpected request ${url}`);
@@ -616,6 +633,7 @@ describe("bulk discovery run", () => {
     expect(items).toHaveLength(1);
     expect(items[0]!.title).toBe("Software Engineering Intern");
     expect(items[0]!.text).toContain("Requirements");
+    expect(items[0]!.text.startsWith("Location: Redlands, CA\n\n")).toBe(true);
     expect(requested).toEqual([`${list}?content=true`, list, `${list}/11`, `${list}/13`, `${list}/14`]);
     expect(fetches).toHaveLength(1);
     expect(fetches[0]).toMatchObject({ url: list, decision: "board-fetched", jobs: 4, internships: 3, kept: 1 });
@@ -646,7 +664,7 @@ describe("bulk discovery run", () => {
         }
         if (url === `${base}&skip=100&limit=100`) {
           return new Response(JSON.stringify([
-            { text: "Data Intern", hostedUrl: "https://jobs.lever.co/meridian/2", descriptionPlain: STRONG_POSTING },
+            { text: "Data Intern", hostedUrl: "https://jobs.lever.co/meridian/2", descriptionPlain: STRONG_POSTING, country: "US", categories: { location: "Austin, TX" } },
             senior(100)
           ]));
         }
@@ -655,6 +673,7 @@ describe("bulk discovery run", () => {
       { onFetch: (event) => fetches.push(event) }
     );
     expect(items.map((item) => item.title)).toEqual(["Software Engineering Intern", "Data Intern"]);
+    expect(items[1]!.text.startsWith("Location: Austin, TX, United States\n\n")).toBe(true);
     expect(requested).toEqual([base, `${base}&skip=0&limit=100`, `${base}&skip=100&limit=100`]);
     expect(fetches).toHaveLength(1);
     expect(fetches[0]).toMatchObject({ url: `${base}&skip=0&limit=100`, decision: "board-fetched", jobs: 102, internships: 2, kept: 2 });
@@ -673,5 +692,88 @@ describe("bulk discovery run", () => {
       { label: "Meridian Tools", url: "https://jobs.ashbyhq.com/meridian" },
       async () => new Response("x".repeat(16_000_001))
     )).rejects.toThrow("too large");
+  });
+
+  it("writes each public board's stated location into the posting text (Track 68)", async () => {
+    const greenhouse = await fetchPublicBoard(
+      { label: "Juniper Lane Robotics", url: "https://boards.greenhouse.io/juniperlane" },
+      async (url) => {
+        expect(url).toBe("https://boards-api.greenhouse.io/v1/boards/juniperlane/jobs?content=true");
+        return new Response(JSON.stringify({ jobs: [
+          {
+            title: "Software Engineering Intern", absolute_url: "https://boards.greenhouse.io/juniperlane/jobs/1", content: PLACELESS_POSTING,
+            location: { name: "Austin, TX" }, offices: [{ name: "Austin", location: "Austin, Texas, United States" }]
+          },
+          { title: "Data Intern", absolute_url: "https://boards.greenhouse.io/juniperlane/jobs/2", content: PLACELESS_POSTING, location: { name: "Remote" }, offices: [] },
+          { title: "Platform Intern", absolute_url: "https://boards.greenhouse.io/juniperlane/jobs/3", content: PLACELESS_POSTING, location: 42 },
+          { title: "Design Intern", absolute_url: "https://boards.greenhouse.io/juniperlane/jobs/4", content: "Too short.", location: { name: "Austin, TX" } }
+        ] }));
+      }
+    );
+    expect(greenhouse.map((item) => item.title)).toEqual(["Software Engineering Intern", "Data Intern", "Platform Intern"]);
+    const [stated, remote, malformed] = greenhouse;
+    expect(stated!.text.startsWith("Location: Austin, TX\nOffice: Austin, Texas, United States\n\n")).toBe(true);
+    expect(countries(stated!.text)).toContain("US");
+    expect(judgeLocation(countries(stated!.text)).outcome).toBe("apply");
+    expect(remote!.text.startsWith("Location: Remote\n\n")).toBe(true);
+    expect(countries(remote!.text)).toEqual([]);
+    expect(judgeLocation(countries(remote!.text)).outcome).toBe("review");
+    expect(malformed!.text).toBe(plainText(PLACELESS_POSTING));
+
+    const lever = await fetchPublicBoard(
+      { label: "Juniper Lane Robotics", url: "https://jobs.lever.co/juniperlane" },
+      async () => new Response(JSON.stringify([
+        {
+          text: "Software Engineering Intern", hostedUrl: "https://jobs.lever.co/juniperlane/1", descriptionPlain: PLACELESS_POSTING,
+          country: "US", categories: { location: "Austin, TX", allLocations: ["Austin, TX"] }
+        },
+        {
+          text: "Graphics Intern", hostedUrl: "https://jobs.lever.co/juniperlane/2", descriptionPlain: PLACELESS_POSTING,
+          country: "KR", categories: { location: "Seoul", allLocations: ["Seoul"] }
+        }
+      ]))
+    );
+    expect(lever).toHaveLength(2);
+    expect(lever[0]!.text.startsWith("Location: Austin, TX, United States\n\n")).toBe(true);
+    expect(countries(lever[0]!.text)).toContain("US");
+    expect(judgeLocation(countries(lever[0]!.text)).outcome).toBe("apply");
+    expect(lever[1]!.text.startsWith("Location: Seoul, South Korea\n\n")).toBe(true);
+    expect(countries(lever[1]!.text)).toEqual(["KR"]);
+    expect(judgeLocation(countries(lever[1]!.text)).outcome).toBe("skip");
+
+    const ashby = await fetchPublicBoard(
+      { label: "Juniper Lane Robotics", url: "https://jobs.ashbyhq.com/juniperlane" },
+      async () => new Response(JSON.stringify({ jobs: [{
+        title: "Software Engineering Intern", jobUrl: "https://jobs.ashbyhq.com/juniperlane/1", isListed: true, descriptionPlain: PLACELESS_POSTING,
+        location: "Hybrid", address: { postalAddress: { addressLocality: "Denver", addressRegion: "Colorado", addressCountry: "United States" } }
+      }] }))
+    );
+    expect(ashby).toHaveLength(1);
+    expect(ashby[0]!.text.startsWith("Location: Denver, Colorado, United States\n\n")).toBe(true);
+    expect(countries(ashby[0]!.text)).toContain("US");
+    expect(judgeLocation(countries(ashby[0]!.text)).outcome).toBe("apply");
+  });
+
+  it("re-reads a stored board posting that had no location and stores its country (Track 68)", async () => {
+    const database = qualifiedDatabase();
+    const postingUrl = "https://boards.greenhouse.io/juniperlane/jobs/7";
+    const seeded = await ingestPosting({
+      title: "Software Engineering Intern", companyName: "Juniper Lane Robotics", content: PLACELESS_POSTING, sourceUrl: postingUrl
+    }, { database });
+    expect(getJobPosting(database, seeded.jobId)!.locations.some((location) => location.countryCode)).toBe(false);
+    const source = addCompanySource("Juniper Lane Robotics", "https://boards.greenhouse.io/juniperlane", 6, database);
+    const report = await fetchCompanySource(source.id, {
+      database,
+      fetcher: async (url) => {
+        expect(url).toBe("https://boards-api.greenhouse.io/v1/boards/juniperlane/jobs?content=true");
+        return new Response(JSON.stringify({ jobs: [{
+          title: "Software Engineering Intern", absolute_url: postingUrl, content: PLACELESS_POSTING,
+          location: { name: "Austin, Texas, United States" }
+        }] }));
+      }
+    });
+    expect(report.jobIds).toEqual([seeded.jobId]);
+    expect(getJobPosting(database, seeded.jobId)!.locations.map((location) => location.countryCode)).toContain("US");
+    database.close();
   });
 });

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { discoveredItemSchema, employerPublication, type PostingPublication, type DiscoveredItem } from "@internship-agent/domain";
 
 import type { DiscoveryFetchEvent, DiscoveryRowEvent } from "./discovery-trace";
+import { ashbyLocation, greenhouseOfficeLine, leverLocation, withLocation } from "./place-text";
 
 export type PublicBoard = { kind: "greenhouse" | "lever" | "ashby"; slug: string };
 type Board = PublicBoard;
@@ -40,13 +41,44 @@ type BoardJob = {
   url: string;
   text: string;
   publication?: PostingPublication | null;
+  /** The board's stated place, written as the posting's `Location:` and `Office:` lines. */
+  location?: string;
+  office?: string | null;
   unread?: { decision: "unavailable" | "not-reached"; reason: string };
 };
 type BoardRead = { jobs: BoardJob[]; status: number; endpoint: string; note: string };
 
-const greenhouseJob = z.object({ title: z.string(), absolute_url: z.url(), content: z.string().optional(), first_published: z.unknown().optional() });
-const leverJob = z.object({ text: z.string(), hostedUrl: z.url(), descriptionPlain: z.string().optional(), description: z.string().optional() });
-const ashbyJob = z.object({ publishedAt: z.unknown().optional(), title: z.string(), jobUrl: z.url(), isListed: z.boolean().optional(), descriptionPlain: z.string().optional(), descriptionHtml: z.string().optional() });
+// Location fields fall back to null on an unexpected shape, so one job's location never fails the whole board.
+const greenhouseJob = z.object({
+  title: z.string(), absolute_url: z.url(), content: z.string().optional(), first_published: z.unknown().optional(),
+  location: z.object({ name: z.string() }).nullish().catch(null),
+  offices: z.array(z.object({ name: z.string().nullish(), location: z.string().nullish() })).nullish().catch(null)
+});
+const leverJob = z.object({
+  text: z.string(), hostedUrl: z.url(), descriptionPlain: z.string().optional(), description: z.string().optional(),
+  country: z.string().nullish().catch(null),
+  categories: z.object({ location: z.string().nullish(), allLocations: z.array(z.string()).nullish() }).nullish().catch(null)
+});
+const ashbyAddress = z.object({
+  postalAddress: z.object({ addressLocality: z.string().nullish(), addressRegion: z.string().nullish(), addressCountry: z.string().nullish() }).nullish()
+}).nullish();
+const ashbyJob = z.object({
+  publishedAt: z.unknown().optional(), title: z.string(), jobUrl: z.url(), isListed: z.boolean().optional(), descriptionPlain: z.string().optional(), descriptionHtml: z.string().optional(),
+  location: z.string().nullish().catch(null),
+  address: ashbyAddress.catch(null),
+  secondaryLocations: z.array(z.object({ location: z.string().nullish(), address: ashbyAddress })).nullish().catch(null)
+});
+
+/** The board's stated place for each board kind, as the posting's Location and Office lines (the GitHub list's resolvers write the same lines). */
+function greenhousePlaces(job: z.infer<typeof greenhouseJob>): Pick<BoardJob, "location" | "office"> {
+  return { location: job.location?.name?.trim() || undefined, office: greenhouseOfficeLine({ location: job.location ?? null, offices: job.offices?.slice(0, 50) ?? null }) };
+}
+function leverPlaces(job: z.infer<typeof leverJob>): Pick<BoardJob, "location" | "office"> {
+  return { location: leverLocation({ country: job.country, categories: job.categories ? { location: job.categories.location, allLocations: job.categories.allLocations?.slice(0, 50) ?? null } : null }), office: null };
+}
+function ashbyPlaces(job: z.infer<typeof ashbyJob>): Pick<BoardJob, "location" | "office"> {
+  return { location: ashbyLocation({ location: job.location, address: job.address, secondaryLocations: job.secondaryLocations?.slice(0, 50) ?? null }), office: null };
+}
 
 /** Only explicit public board URLs can enter automated discovery. */
 export function parsePublicBoardUrl(raw: string): Board {
@@ -156,10 +188,10 @@ export async function fetchPublicBoard(
       traced = reread.endpoint;
       note = reread.note;
     } else jobs = board.kind === "greenhouse"
-      ? z.object({ jobs: z.array(greenhouseJob).max(2_000) }).parse(payload).jobs.map((job) => ({ title: job.title, url: job.absolute_url, text: job.content ?? "", publication: employerPublication(job.first_published, job.absolute_url, "first_published") }))
+      ? z.object({ jobs: z.array(greenhouseJob).max(2_000) }).parse(payload).jobs.map((job) => ({ title: job.title, url: job.absolute_url, text: job.content ?? "", publication: employerPublication(job.first_published, job.absolute_url, "first_published"), ...greenhousePlaces(job) }))
       : board.kind === "lever"
-        ? z.array(leverJob).max(2_000).parse(payload).map((job) => ({ title: job.text, url: job.hostedUrl, text: job.descriptionPlain ?? job.description ?? "" }))
-        : z.object({ jobs: z.array(ashbyJob).max(2_000) }).parse(payload).jobs.filter((job) => job.isListed !== false).map((job) => ({ title: job.title, url: job.jobUrl, text: job.descriptionPlain ?? job.descriptionHtml ?? "", publication: employerPublication(job.publishedAt, job.jobUrl, "publishedAt") }));
+        ? z.array(leverJob).max(2_000).parse(payload).map((job) => ({ title: job.text, url: job.hostedUrl, text: job.descriptionPlain ?? job.description ?? "", ...leverPlaces(job) }))
+        : z.object({ jobs: z.array(ashbyJob).max(2_000) }).parse(payload).jobs.filter((job) => job.isListed !== false).map((job) => ({ title: job.title, url: job.jobUrl, text: job.descriptionPlain ?? job.descriptionHtml ?? "", publication: employerPublication(job.publishedAt, job.jobUrl, "publishedAt"), ...ashbyPlaces(job) }));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     observe.onFetch?.({
@@ -185,8 +217,8 @@ export async function fetchPublicBoard(
       rows.push({ ...base, decision: job.unread.decision, reason: job.unread.reason });
       return;
     }
-    const text = plainText(job.text);
-    if (text.length < 80) {
+    const description = plainText(job.text);
+    if (description.length < 80) {
       rows.push({ ...base, decision: "unavailable", reason: "the board gives fewer than 80 characters of description" });
       return;
     }
@@ -194,6 +226,7 @@ export async function fetchPublicBoard(
       rows.push({ ...base, decision: "not-reached", reason: `past this board's limit of ${MAX_BOARD_POSTINGS} internship postings` });
       return;
     }
+    const text = withLocation(job.location, description, job.office ?? null).slice(0, 60_000);
     kept.push(discoveredItemSchema.parse({ title: job.title, companyName: source.label, text, sourceUrl: job.url, publication: job.publication ?? null }));
     rows.push({ ...base, decision: "resolved", reason: "read from the public board", postingUrl: job.url });
   });
@@ -256,6 +289,7 @@ async function readGreenhouseByPosting(slug: string, fetcher: Fetcher): Promise<
         continue;
       }
       const detail = greenhouseJob.parse(await boundedJson(answer));
+      Object.assign(entry, greenhousePlaces(detail));
       entry.text = detail.content ?? "";
       entry.publication = employerPublication(detail.first_published ?? job.first_published, job.absolute_url, "first_published");
       if (plainText(entry.text).length >= 80) withText += 1;
@@ -290,7 +324,9 @@ async function readLeverPages(slug: string, fetcher: Fetcher): Promise<BoardRead
     for (const job of entries) {
       if (seen.has(job.hostedUrl)) continue;
       seen.add(job.hostedUrl);
-      jobs.push({ title: job.text, url: job.hostedUrl, text: INTERN_TITLE.test(job.text) ? (job.descriptionPlain ?? job.description ?? "") : "" });
+      jobs.push(INTERN_TITLE.test(job.text)
+        ? { title: job.text, url: job.hostedUrl, text: job.descriptionPlain ?? job.description ?? "", ...leverPlaces(job) }
+        : { title: job.text, url: job.hostedUrl, text: "" });
     }
     lastFull = entries.length >= LEVER_PAGE_SIZE;
     if (!lastFull) break;

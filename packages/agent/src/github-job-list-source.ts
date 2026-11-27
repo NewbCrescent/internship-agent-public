@@ -7,7 +7,7 @@ import {
   type PageSourceTarget, type ResolvedPosting
 } from "./posting-page-sources";
 import { pacePerHost, waitFor, type Sleep } from "./host-pacer";
-import { countryName, greenhouseOfficeLine, joinPlaceParts, withLocation } from "./place-text";
+import { ashbyLocation, greenhouseOfficeLine, leverLocation, withLocation } from "./place-text";
 import type { DiscoveryListDecision, DiscoveryRowEvent } from "./discovery-trace";
 
 type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
@@ -86,41 +86,6 @@ const ashbyJobSchema = z.object({
   address: ashbyAddressSchema,
   secondaryLocations: z.array(z.object({ location: z.string().nullish(), address: ashbyAddressSchema })).max(50).nullish()
 });
-
-/** A location that is only a work mode ("Hybrid", "Remote") names no place. */
-const WORK_MODE_ONLY = /^(?:hybrid|remote|on-?site|in[- ]office|in person|flexible)$/i;
-
-/**
- * Ashby's location string with its structured address: "Berlin" becomes
- * "Berlin, Germany", and a work-mode location ("Hybrid") gives way to the
- * office address ("Johnston, Iowa, United States"). Secondary locations
- * follow, "; "-separated.
- */
-function ashbyLocation(job: z.infer<typeof ashbyJobSchema>): string | undefined {
-  const group = (location: string | null | undefined, address: z.infer<typeof ashbyAddressSchema>) => {
-    const postal = address?.postalAddress;
-    return joinPlaceParts([
-      location && !WORK_MODE_ONLY.test(location.trim()) ? location : null,
-      postal?.addressLocality, postal?.addressRegion, postal?.addressCountry
-    ]);
-  };
-  const groups = [group(job.location, job.address), ...(job.secondaryLocations ?? []).map((entry) => group(entry.location, entry.address))]
-    .filter(Boolean);
-  return groups.length ? [...new Set(groups)].join("; ") : job.location;
-}
-
-/**
- * Lever's locations ("allLocations", else the category location), with the
- * posting's country named when there is one location: "Seoul" with country
- * KR becomes "Seoul, South Korea".
- */
-function leverLocation(job: z.infer<typeof leverJobSchema>): string | undefined {
-  const all = (job.categories?.allLocations ?? []).map((entry) => entry.trim()).filter(Boolean);
-  const base = all.length ? all.join("; ") : job.categories?.location?.trim() ?? "";
-  const country = countryName(job.country);
-  if (country && all.length <= 1) return joinPlaceParts([base, country]) || undefined;
-  return base || undefined;
-}
 
 const workdayJobSchema = z.object({
   jobPostingInfo: z.object({
