@@ -68,6 +68,7 @@ import {
   runTraceOf,
   runTracesRoot,
   securityCodePause,
+  signInChoicesNotice,
   postSubmitEvidenceOf,
   recognizeCurrentForm,
   resolveDataDir,
@@ -715,6 +716,14 @@ async function closedNoticeOn(page: BrowserPage): Promise<string | null> {
   return closedPostingNotice(await page.bodyText().catch(() => ""), page.url());
 }
 
+/** A no-form page that offers only named sign-in choices (Microsoft Careers' apply page): named as a sign-in step instead of an Apply button the agent may have missed. */
+async function signInChoicesReasonOn(page: BrowserPage): Promise<string | null> {
+  const choices = signInChoicesNotice(await page.bodyText().catch(() => ""));
+  if (!choices) return null;
+  const host = hostOf(page.url());
+  return `No application form was reached at ${page.url()}: the page shows only sign-in choices (${choices.map((choice) => `"${choice}"`).join(", ")}), and the agent does not sign in or create accounts for you. Sign in at ${host} in the agent's browser, then start the run yourself.`;
+}
+
 /** An Apply entry reached the employer's Workday posting: the generic run hands over to the Workday run. Module-private. */
 class WorkdayHandoff extends Error {
   constructor(readonly url: string) {
@@ -984,6 +993,8 @@ export async function startBrowserRun(
         const notice = await closedNoticeOn(page);
         // A closed posting is a PostingClosed: the pipeline skips it as "Posting closed" (as for Workday).
         if (notice) throw new PostingClosed(closedPostingReason(page.url(), notice));
+        const signIn = await signInChoicesReasonOn(page);
+        if (signIn) throw new AutomaticRunStopped(signIn);
         throw new AutomaticRunStopped("No application form was found at " + applicationUrl + ". It may sit behind an Apply button; start the run yourself from the form's address.");
       }
     }
@@ -1061,7 +1072,8 @@ export async function startBrowserRun(
     // Only skips (a copy-link box, a cookie panel's toggles): no application form was reached, so nothing is saved.
     if (!reachedApplicationForm(decisions)) {
       const notice = await closedNoticeOn(page);
-      const reason = notice ? closedPostingReason(page.url(), notice) : noFormReachedReason(page.url());
+      const signIn = notice ? null : await signInChoicesReasonOn(page);
+      const reason = notice ? closedPostingReason(page.url(), notice) : signIn ?? noFormReachedReason(page.url());
       throw automatic ? (notice ? new PostingClosed(reason) : new AutomaticRunStopped(reason)) : new Error(reason);
     }
     const uploadPathFor = await prepareUploads(

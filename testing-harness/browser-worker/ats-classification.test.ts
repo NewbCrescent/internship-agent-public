@@ -20,6 +20,7 @@ import {
   multiStepStopReason,
   planAutofill,
   recognizeForm,
+  signInChoicesNotice,
   siteWallReason,
   submitTargetHoldReason,
   type ApplyEntryCandidate,
@@ -321,6 +322,15 @@ describe("company careers pages: embedded Greenhouse, new-tab entries, closed po
     expect(closedPostingNotice(ASHBY_GONE, "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000c1/application")).toBe("The page you requested was not found");
     expect(closedPostingNotice(ASHBY_GONE, "https://careers.fixturerobotics.example/jobs/1001")).toBeNull();
     expect(closedPostingNotice(ASHBY_GONE)).toBeNull();
+    expect(closedPostingNotice("Robotics Software Intern\nThis job has expired\nSorry, this job has expired\nSHARE THIS JOB\nI'm interested")).toBe("This job has expired");
+  });
+
+  it("names a page that offers only sign-in choices", () => {
+    expect(signInChoicesNotice("Sign in\nSelect a method below to Sign in. This allows you to access your profile or begin a new application.\nSign in using Microsoft\nSign in using LinkedIn\nSign in using Google\nSign in using Facebook\nFirst time here? Create an account"))
+      .toEqual(["Sign in using Microsoft", "Sign in using LinkedIn", "Sign in using Google", "Sign in using Facebook"]);
+    expect(signInChoicesNotice("Sign in with Google\nSign in with Google")).toBeNull();
+    expect(signInChoicesNotice("Apply with LinkedIn\nSign in with Google\nFirst name\nEmail")).toBeNull();
+    expect(signInChoicesNotice("If you are a Fixture Employee, Sign in here\nSign in")).toBeNull();
   });
 });
 

@@ -8,6 +8,9 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   addCompanySource,
+  applyBoardLocationBackfill,
+  boardLocationBackfillLines,
+  evaluateAndPersistMatch,
   fetchCompanySource,
   fetchPublicBoard,
   getApplicationPackage,
@@ -15,11 +18,14 @@ import {
   plainText,
   getDiscoveryRuns,
   getReviewQueue,
+  planBoardLocationBackfill,
   processManualBatch,
+  PROTECTED_POSTING_STATUSES,
   restoreDiscoveredJob,
   skipDiscoveredJobs,
   acquirePipelineLock,
   readPipelineLock,
+  startDiscoveryTimeBudget,
   type DiscoveryFetchEvent,
   type DiscoveryRowEvent,
   type ModelProvider,
@@ -28,7 +34,9 @@ import {
 import {
   createDatabase,
   getJobPosting,
+  holdRequirementLabels,
   listDiscoverySkips,
+  listPostingsAwaitingAnalysis,
   listApplicationEvents,
   setJobStatus,
   LOCAL_CANDIDATE_ID,
@@ -774,6 +782,111 @@ describe("bulk discovery run", () => {
     });
     expect(report.jobIds).toEqual([seeded.jobId]);
     expect(getJobPosting(database, seeded.jobId)!.locations.map((location) => location.countryCode)).toContain("US");
+    database.close();
+  });
+
+  it("lists postings owed an analysis: no match, or a match older than the current snapshot, never past the approval gate, skipped, or label-held (Track 73)", async () => {
+    const database = qualifiedDatabase();
+    const text = (name: string, extra = "") => PLACELESS_POSTING.replace("Juniper Lane Robotics", name) + extra;
+    const names = ["Alder Freight", "Birch Analytics", "Cedar Robotics", "Dogwood Labs", "Elm Systems"];
+    const ids: string[] = [];
+    for (const [index, name] of names.entries()) {
+      const report = await ingestPosting({
+        title: "Software Engineering Intern", companyName: name, content: text(name), sourceUrl: `https://example.test/jobs/${index + 1}`
+      }, { database });
+      ids.push(report.jobId);
+      // A fixed creation order, so oldest first is deterministic.
+      database.prepare("UPDATE jobs SET created_at = ? WHERE id = ?").run(`2026-11-0${index + 1}T00:00:00.000Z`, report.jobId);
+    }
+    const [revised, applying, skipped, held, fresh] = ids as [string, string, string, string, string];
+    for (const id of [revised, applying, skipped, held]) evaluateAndPersistMatch(id, { database });
+    // A first snapshot and an analysis that both predate the revision below, whatever the clock's resolution.
+    for (const id of [revised, applying, skipped, held]) {
+      database.prepare("UPDATE job_snapshots SET captured_at = ? WHERE job_id = ?").run("2026-11-09T00:00:00.000Z", id);
+      database.prepare("UPDATE job_matches SET evaluated_at = ? WHERE job_id = ?").run("2026-11-10T00:00:00.000Z", id);
+    }
+    // The demo seed's own postings are left out of the comparison.
+    const owed = () => listPostingsAwaitingAnalysis(database, { excludedStatuses: [...PROTECTED_POSTING_STATUSES] })
+      .filter((id) => ids.includes(id));
+    expect(owed()).toEqual([fresh]);
+    for (const [index, id] of [revised, applying, skipped, held].entries()) {
+      const report = await ingestPosting({
+        title: "Software Engineering Intern", companyName: names[index]!, content: text(names[index]!, "\nInterns present their feature at the end of the term."),
+        sourceUrl: `https://example.test/jobs/${index + 1}`
+      }, { database });
+      expect(report.jobId).toBe(id);
+    }
+    database.prepare("UPDATE jobs SET status = ? WHERE id = ?").run("APPLYING", applying);
+    database.prepare("UPDATE jobs SET status = ? WHERE id = ?").run("READY_FOR_REVIEW", skipped);
+    skipDiscoveredJobs({ jobIds: [skipped], reason: "Wrong focus", preferenceNote: null }, database);
+    const heldSnapshot = database.prepare("SELECT id FROM job_snapshots WHERE job_id = ? AND superseded_at IS NULL").get(held) as { id: string };
+    holdRequirementLabels(database, { jobId: held, snapshotId: heldSnapshot.id, reason: "Labels pending (test)." });
+    expect(owed()).toEqual([revised, fresh]);
+    for (const id of [revised, fresh]) evaluateAndPersistMatch(id, { database });
+    expect(owed()).toEqual([]);
+    database.close();
+  });
+
+  it("plans and applies the board-location backfill: re-reads a held posting's board for its stated country and never revises one past the approval gate (Track 73)", async () => {
+    const database = qualifiedDatabase();
+    const board = addCompanySource("Juniper Lane Robotics", "https://boards.greenhouse.io/juniperlane", 6, database);
+    const ingest = async (title: string, sourceUrl: string, content = PLACELESS_POSTING, companyName = "Juniper Lane Robotics") =>
+      (await ingestPosting({ title, companyName, content, sourceUrl }, { database })).jobId;
+    const heldId = await ingest("Software Engineering Intern", "https://boards.greenhouse.io/juniperlane/jobs/7");
+    database.prepare("UPDATE jobs SET status = ? WHERE id = ?").run("READY_FOR_REVIEW", heldId);
+    const applyingId = await ingest("Data Intern", "https://boards.greenhouse.io/juniperlane/jobs/8");
+    database.prepare("UPDATE jobs SET status = ? WHERE id = ?").run("APPLYING", applyingId);
+    const noBoardId = await ingest("Platform Intern", "https://jobs.lever.co/kestrel/1", PLACELESS_POSTING.replace("Juniper Lane Robotics", "Kestrel Freight"), "Kestrel Freight");
+    const placedId = await ingest("Robotics Intern", "https://boards.greenhouse.io/juniperlane/jobs/9", "Location: Austin, TX\n\n" + PLACELESS_POSTING);
+    const offBoardId = await ingest("Firmware Intern", "https://example.test/jobs/1", PLACELESS_POSTING.replace("Juniper Lane Robotics", "Wren Systems"), "Wren Systems");
+    database.prepare("UPDATE discovery_sources SET last_fetched_at = ? WHERE id = ?").run(new Date(Date.now() - 3_600_000).toISOString(), board.id);
+
+    const plan = planBoardLocationBackfill(database);
+    expect(plan.boards).toHaveLength(1);
+    expect(plan.boards[0]!.key).toBe("greenhouse:juniperlane");
+    expect(plan.boards[0]!.reread.map((posting) => posting.jobId)).toEqual([heldId]);
+    expect(plan.boards[0]!.kept.map((posting) => posting.jobId)).toEqual([applyingId]);
+    expect(plan.noBoard.map((posting) => posting.jobId)).toEqual([noBoardId]);
+    const planned = [...plan.boards.flatMap((entry) => [...entry.reread, ...entry.kept]), ...plan.noBoard].map((posting) => posting.jobId);
+    expect(planned).not.toContain(placedId);
+    expect(planned).not.toContain(offBoardId);
+    const lines = boardLocationBackfillLines(plan);
+    expect(lines).toContain("Board Juniper Lane Robotics (greenhouse:juniperlane): re-read for 1 posting(s) without a stated location.");
+    expect(lines).toContain(`  re-read Juniper Lane Robotics — Software Engineering Intern (READY_FOR_REVIEW, job ${heldId.slice(0, 8)})`);
+    expect(lines.some((line) => line.startsWith(`  kept Juniper Lane Robotics — Data Intern (APPLYING, job ${applyingId.slice(0, 8)})`) &&
+      line.includes("past the approval gate"))).toBe(true);
+    expect(lines).toContain(`No board source: Kestrel Freight — Platform Intern (DISCOVERED, job ${noBoardId.slice(0, 8)}).`);
+    expect(lines.at(-1)).toBe("1 board(s) to re-read for 1 posting(s); 1 kept past the approval gate; 1 with no board source.");
+
+    const applyingText = () => (database.prepare("SELECT normalized_text FROM job_snapshots WHERE job_id = ? AND superseded_at IS NULL")
+      .get(applyingId) as { normalized_text: string }).normalized_text;
+    const applyingBefore = applyingText();
+    const fetched: string[] = [];
+    const log: string[] = [];
+    const result = await applyBoardLocationBackfill(database, plan, {
+      log: (line) => log.push(line), budget: startDiscoveryTimeBudget(900_000),
+      fetcher: async (url) => {
+        fetched.push(url);
+        return new Response(JSON.stringify({ jobs: [7, 8].map((id) => ({
+          title: id === 7 ? "Software Engineering Intern" : "Data Intern",
+          absolute_url: `https://boards.greenhouse.io/juniperlane/jobs/${id}`, content: PLACELESS_POSTING,
+          location: { name: "Austin, Texas, United States" }
+        })) }));
+      }
+    });
+    // The board's last check an hour ago did not stop the re-read.
+    expect(fetched).toEqual(["https://boards-api.greenhouse.io/v1/boards/juniperlane/jobs?content=true"]);
+    expect(result).toMatchObject({ failed: 0, notDue: 0 });
+    const healed = getJobPosting(database, heldId)!;
+    expect(healed.locations.map((location) => location.countryCode)).toContain("US");
+    expect(healed.snapshot.normalizedText.startsWith("Location: Austin, Texas, United States\n")).toBe(true);
+    const protectedPosting = getJobPosting(database, applyingId)!;
+    expect(protectedPosting.status).toBe("APPLYING");
+    expect(applyingText()).toBe(applyingBefore);
+    expect(protectedPosting.locations.some((location) => location.countryCode)).toBe(false);
+    const replanned = planBoardLocationBackfill(database);
+    expect(replanned.boards.map((entry) => [entry.reread.length, entry.kept.length])).toEqual([[0, 1]]);
+    expect(boardLocationBackfillLines(replanned)[0]).toBe("Board Juniper Lane Robotics (greenhouse:juniperlane): nothing to re-read.");
     database.close();
   });
 });

@@ -9,13 +9,19 @@ import {
   addCompanySource,
   boardRetryAfter,
   BOARD_MAX_BACKOFF_MS,
+  BOARD_MIN_CHECKS_PER_PASS,
   BOARD_MIN_INTERVAL_MS,
+  checkPublicBoards,
   discoveryTraceDirectory,
   fetchCompanySource,
   formatBoardImportReport,
   importBoardSources,
   planBoardChecks,
-  summarizeDiscoveryTrace
+  publicBoardKey,
+  publicBoardKeyOfPostingUrl,
+  startDiscoveryTimeBudget,
+  summarizeDiscoveryTrace,
+  type FetchBatch
 } from "@internship-agent/agent";
 import { createDatabase, listDiscoverySources } from "@internship-agent/db";
 import type { DiscoverySource } from "@internship-agent/domain";
@@ -211,6 +217,21 @@ describe("public board polling plan", () => {
     expect(plan.backedOff.map((entry) => entry.id)).toEqual(["backed-off"]);
     expect(planBoardChecks([source({ id: "edge", lastFetchedAt: ago(6) })], now).due).toHaveLength(1);
     expect(BOARD_MIN_INTERVAL_MS).toBe(6 * 3_600_000);
+    // With no interval (the board-location backfill) a board read an hour ago is due again (Track 73).
+    expect(planBoardChecks([source({ id: "hour", lastFetchedAt: ago(1) })], now, 100, 0).due).toHaveLength(1);
+    expect(BOARD_MIN_CHECKS_PER_PASS).toBe(20);
+  });
+
+  it("keys a posting link by the board it sits on, and nothing else (Track 73)", () => {
+    expect(publicBoardKeyOfPostingUrl("https://boards.greenhouse.io/Kestrel/jobs/7?gh_jid=7")).toBe("greenhouse:kestrel");
+    expect(publicBoardKeyOfPostingUrl("https://job-boards.greenhouse.io/kestrel/jobs/7")).toBe("greenhouse:kestrel");
+    expect(publicBoardKeyOfPostingUrl("https://jobs.lever.co/kestrel/0a1b")).toBe("lever:kestrel");
+    expect(publicBoardKeyOfPostingUrl("https://jobs.ashbyhq.com/kestrel/0a1b")).toBe("ashby:kestrel");
+    expect(publicBoardKeyOfPostingUrl("https://boards.greenhouse.io/kestrel")).toBeNull();
+    expect(publicBoardKeyOfPostingUrl("https://example.com/kestrel/jobs/7")).toBeNull();
+    expect(publicBoardKeyOfPostingUrl("http://jobs.lever.co/kestrel/1")).toBeNull();
+    expect(publicBoardKeyOfPostingUrl("not a url")).toBeNull();
+    expect(publicBoardKeyOfPostingUrl("https://boards.greenhouse.io/kestrel/jobs/7")).toBe(publicBoardKey("https://boards.greenhouse.io/kestrel"));
   });
 
   it("backs a failing board off from 12 hours, doubling to 7 days, and a missing board 7 days at once", () => {
@@ -224,6 +245,68 @@ describe("public board polling plan", () => {
 });
 
 describe("public board checks", () => {
+  function fiveBoards(): { database: DatabaseSync; ids: string[] } {
+    const { database } = disposableDatabase();
+    const ids = ["b1", "b2", "b3", "b4", "b5"].map((slug, index) => {
+      const board = addCompanySource(`Board ${slug}`, `https://boards.greenhouse.io/${slug}`, 6, database);
+      database.prepare("UPDATE discovery_sources SET created_at = ? WHERE id = ?").run(`2026-11-0${index + 1}T00:00:00.000Z`, board.id);
+      return board.id;
+    });
+    return { database, ids };
+  }
+
+  it("reads at least the floor of due boards past the time budget, oldest first, so every board is read within ceil(boards/floor) passes (Track 73)", async () => {
+    const { database, ids } = fiveBoards();
+    const read: string[] = [];
+    const fetchBatch: FetchBatch = async (board) => {
+      read.push(board.url);
+      return { items: [], notes: ["No internship postings on this board right now."] };
+    };
+    const url = (slug: string) => `https://boards.greenhouse.io/${slug}`;
+    const lastFetched = () => new Map(listDiscoverySources(database).map((entry) => [entry.id, entry.lastFetchedAt]));
+    const pass = async () => {
+      // Spent from the first check on: the first clock read sets the deadline, every later read is past it.
+      let t = 0;
+      const budget = startDiscoveryTimeBudget(60_000, () => (t += 100_000));
+      const log: string[] = [];
+      const result = await checkPublicBoards(database, listDiscoverySources(database), { log: (line) => log.push(line), fetchBatch, budget, minChecks: 2, concurrency: 1 });
+      return { result, log };
+    };
+
+    const first = await pass();
+    expect(read).toEqual([url("b1"), url("b2")]);
+    expect(first.result).toMatchObject({ pastBudget: 2, budgetDeferred: 3 });
+    expect(first.log).toContain("Public boards: checked 2 (0 failed), not due 0, backed off 0, left for a later pass 0, read past the time budget 2, left by the time budget 3.");
+    const afterFirst = lastFetched();
+    expect(ids.slice(2).map((id) => afterFirst.get(id))).toEqual([null, null, null]);
+
+    const second = await pass();
+    expect(read.slice(2)).toEqual([url("b3"), url("b4")]);
+    expect(second.log).toContain("Public boards: checked 2 (0 failed), not due 2, backed off 0, left for a later pass 0, read past the time budget 2, left by the time budget 1.");
+
+    const third = await pass();
+    expect(read.slice(4)).toEqual([url("b5")]);
+    expect(third.log).toContain("Public boards: checked 1 (0 failed), not due 4, backed off 0, left for a later pass 0, read past the time budget 1.");
+    expect(third.result).toMatchObject({ pastBudget: 1, budgetDeferred: 0 });
+    // Every board read exactly once across the three passes.
+    expect([...read].sort()).toEqual(["b1", "b2", "b3", "b4", "b5"].map(url));
+    expect([...lastFetched().values()].every((value) => value !== null)).toBe(true);
+    database.close();
+
+    // With an unspent budget every due board is read and nothing is read past it.
+    const fresh = fiveBoards();
+    const freshRead: string[] = [];
+    const freshLog: string[] = [];
+    const freshResult = await checkPublicBoards(fresh.database, listDiscoverySources(fresh.database), {
+      log: (line) => freshLog.push(line), budget: startDiscoveryTimeBudget(900_000), concurrency: 1,
+      fetchBatch: async (board) => { freshRead.push(board.url); return { items: [], notes: ["No internship postings on this board right now."] }; }
+    });
+    expect(freshRead).toHaveLength(5);
+    expect(freshResult).toMatchObject({ pastBudget: 0, budgetDeferred: 0 });
+    expect(freshLog).toContain("Public boards: checked 5 (0 failed), not due 0, backed off 0, left for a later pass 0.");
+    fresh.database.close();
+  });
+
   it("marks a missing or failing board and backs it off, then clears it after a successful check", async () => {
     const { database } = disposableDatabase();
     const gone = addCompanySource("Gone Robotics", "https://boards.greenhouse.io/gone", 6, database);

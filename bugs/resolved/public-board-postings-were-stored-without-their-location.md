@@ -6,6 +6,7 @@ Cause: `fetchPublicBoard` (`packages/agent/src/public-board-source.ts`) read onl
 Scale: 213 stored Greenhouse, Lever, and Ashby postings had no location line and no country on 2026-11-26.
 Fix (Track 68): the board path writes the same `Location:` and `Office:` lines as the GitHub list's resolvers, through `ashbyLocation`, `leverLocation`, `greenhouseOfficeLine`, and `withLocation` in `packages/agent/src/place-text.ts`, also for oversized boards read posting by posting or in pages, and an unexpected location shape on one job never fails the board.
 Stored postings are re-read with their location on their board's next check, because the new line changes the posting text, except postings past the approval gate (APPROVED and later, including the 3 APPLYING ones), which keep no country.
+That next check waited behind 155 never-read boards until Track 73, which also adds `pnpm backfill:board-locations` to re-read their boards on demand; the APPLYING ones still need a requeue first.
 `pnpm backfill:extraction` does not help these postings, because their stored snapshots hold no place.
 Regression: `pnpm test:jobs:local` (`testing-harness/jobs/discovery.integration.test.ts`).
 Two other postings held with the same reason have other causes.

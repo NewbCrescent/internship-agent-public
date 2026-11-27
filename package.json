@@ -29,6 +29,7 @@
     "mail:scan": "tsx --env-file-if-exists=.env packages/agent/scripts/mail-scan.ts",
     "mail:schedule": "tsx --env-file-if-exists=.env packages/agent/scripts/schedule-mail.ts",
     "backfill:extraction": "tsx packages/agent/scripts/backfill-extraction.ts",
+    "backfill:board-locations": "tsx --env-file-if-exists=.env packages/agent/scripts/backfill-board-locations.ts",
     "matches:reevaluate": "tsx --env-file-if-exists=.env packages/agent/scripts/matches-reevaluate.ts",
     "labels:hold-fallback": "tsx packages/agent/scripts/hold-fallback-labels.ts",
     "application:record": "tsx --env-file-if-exists=.env packages/agent/scripts/application-record.ts",

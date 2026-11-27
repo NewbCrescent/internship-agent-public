@@ -3635,6 +3635,44 @@ describe("runs that never reached an application form", () => {
     }
   });
 
+  it("reads SmartRecruiters' expired posting page as PostingClosed", async () => {
+    const database = disposableDatabase();
+    const jobId = qualifiedExternalJob(database);
+    const url = "https://jobs.smartrecruiters.com/FixtureRobotics/0000000000001-robotics-software-intern";
+    // Shaped like SmartRecruiters' empty state for an expired posting (captured 2026-11-27): no form and no Apply-like control.
+    const page = fakePage({ url, title: "Robotics Software Intern", controls: [], body: "Robotics Software Intern\nThis job has expired\nSorry, this job has expired\nSHARE THIS JOB" });
+    const stopped = start(database, jobId, url, page, true);
+    await expect(stopped).rejects.toBeInstanceOf(PostingClosed);
+    await expect(stopped).rejects.toThrow(/^The posting page at jobs\.smartrecruiters\.com says "This job has expired": the posting looks closed/);
+    expect(page.filled.size).toBe(0);
+    expect(getBrowserRuns(jobId, database)).toEqual([]);
+    database.close();
+  });
+
+  it("names a careers page that shows only sign-in choices, on automatic and candidate-started runs", async () => {
+    const url = "https://careers.fixturerobotics.example/careers/apply?pid=0000000000001";
+    for (const automatic of [true, false]) {
+      const database = disposableDatabase();
+      const jobId = automatic ? qualifiedExternalJob(database) : approvedExternalJob(database);
+      // Shaped like Microsoft Careers' apply page for a signed-out browser (captured 2026-11-27): named sign-in choices and no form.
+      const page = fakePage({
+        url,
+        title: "Careers at Fixture Robotics",
+        controls: [{ tag: "button", label: "Sign in using Microsoft" }, { tag: "button", label: "Sign in using Google" }],
+        body: "Sign in\nSelect a method below to Sign in.\nSign in using Microsoft\nSign in using Google\nFirst time here? Create an account"
+      });
+      const stopped = start(database, jobId, url, page, automatic);
+      await expect(stopped).rejects.toThrow(/^No application form was reached at https:\/\/careers\.fixturerobotics\.example\/careers\/apply\?pid=0000000000001: the page shows only sign-in choices \("Sign in using Microsoft", "Sign in using Google"\), and the agent does not sign in or create accounts for you\. Sign in at careers\.fixturerobotics\.example in the agent's browser/);
+      if (automatic) {
+        await expect(stopped).rejects.toBeInstanceOf(AutomaticRunStopped);
+        await expect(stopped).rejects.not.toBeInstanceOf(PostingClosed);
+      } else await expect(stopped).rejects.not.toBeInstanceOf(AutomaticRunStopped);
+      expect(page.filled.size).toBe(0);
+      expect(getBrowserRuns(jobId, database)).toEqual([]);
+      database.close();
+    }
+  });
+
   it("never applies the several-page stop to a supported adapter's site", async () => {
     const database = disposableDatabase();
     const jobId = qualifiedExternalJob(database);

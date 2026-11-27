@@ -6,13 +6,12 @@ import {
   findJobBySourceUrl,
   getDiscoverySkip,
   getDatabase,
-  getJobMatch,
   getJobPosting,
   getJobStatus,
   getRequirementLabelHold,
   listCurrentPostingIdentities,
-  listJobSummaries,
   listDiscoveryRuns,
+  listPostingsAwaitingAnalysis,
   listDiscoverySkips,
   listDiscoverySkipsWithTitles,
   listDiscoverySources,
@@ -40,7 +39,7 @@ import { ingestPosting } from "./job-ingestion-orchestrator";
 import { prepareApplication } from "./application-orchestrator";
 import { evaluateAndPersistMatch } from "./match-orchestrator";
 import { fetchPublicBoard, parsePublicBoardUrl, PublicBoardError } from "./public-board-source";
-import { BOARD_CHECK_CONCURRENCY, BOARD_CHECKS_PER_PASS, boardRetryAfter, isPublicBoardSource, planBoardChecks } from "./board-polling";
+import { BOARD_CHECK_CONCURRENCY, BOARD_CHECKS_PER_PASS, BOARD_MIN_CHECKS_PER_PASS, boardRetryAfter, isPublicBoardSource, planBoardChecks } from "./board-polling";
 import { canonicalGitHubJobListUrl, fetchGitHubJobList, postingLinkKey } from "./github-job-list-source";
 import { pipelineSettings } from "./pipeline-orchestrator";
 import { fitTargetDecision, postingTargetDecision, targetTerm } from "./application-target";
@@ -66,8 +65,8 @@ export type BatchReport = {
   traceError?: string | null;
 };
 
-/** Postings past the approval gate belong to the live pipeline, not to discovery. */
-const LIVE_STATUSES: ReadonlySet<JobPostingStatus> = new Set([
+/** Statuses past the approval gate: discovery never revises, re-analyzes, or re-prepares these postings. */
+export const PROTECTED_POSTING_STATUSES: ReadonlySet<JobPostingStatus> = new Set([
   "APPROVED",
   "APPLYING",
   "SUBMITTED",
@@ -76,6 +75,8 @@ const LIVE_STATUSES: ReadonlySet<JobPostingStatus> = new Set([
   "OFFER",
   "WITHDRAWN"
 ]);
+/** Postings past the approval gate belong to the live pipeline, not to discovery. */
+const LIVE_STATUSES = PROTECTED_POSTING_STATUSES;
 
 type FetchedBatch = { items: DiscoveredItem[]; notes: string[] };
 type Fetcher = (url: string, init?: RequestInit) => Promise<Response>;
@@ -205,8 +206,11 @@ function recordBoardFailure(database: DatabaseSync, source: DiscoverySource, err
 /**
  * A pass's public boards: only those due (see planBoardChecks), at most
  * `concurrency` fetches in flight, and one board's ingest at a time so the
- * cross-board duplicate checks stay correct. Logs only boards that stored,
- * prepared, or failed, then one summary line.
+ * cross-board duplicate checks stay correct. Once the time budget is spent,
+ * boards are still started while fewer than `minChecks` (the floor,
+ * BOARD_MIN_CHECKS_PER_PASS) have started in this pass (Track 73); the rest
+ * stay due. Logs only boards that stored, prepared, or failed, then one
+ * summary line.
  */
 export async function checkPublicBoards(
   database: DatabaseSync,
@@ -219,12 +223,16 @@ export async function checkPublicBoards(
     now?: Date;
     limit?: number;
     concurrency?: number;
-    /** The pass's discovery time budget; once it is spent no further board is started. */
+    /** The pass's discovery time budget; once it is spent no further board is started past the floor (`minChecks`). */
     budget?: DiscoveryTimeBudget | null;
+    /** Due boards still read once the budget is spent, oldest first (default BOARD_MIN_CHECKS_PER_PASS). */
+    minChecks?: number;
+    /** The shortest time between two checks of one board (default planBoardChecks's own default). */
+    minIntervalMs?: number;
   }
-): Promise<{ checked: string[]; failed: number; notDue: number; backedOff: number; deferred: number; budgetDeferred: number }> {
+): Promise<{ checked: string[]; failed: number; notDue: number; backedOff: number; deferred: number; budgetDeferred: number; pastBudget: number }> {
   const { log } = options;
-  const plan = planBoardChecks(boards, options.now ?? new Date(), options.limit ?? BOARD_CHECKS_PER_PASS);
+  const plan = planBoardChecks(boards, options.now ?? new Date(), options.limit ?? BOARD_CHECKS_PER_PASS, options.minIntervalMs);
   let tail: Promise<unknown> = Promise.resolve();
   const gate = <T>(task: () => Promise<T>): Promise<T> => {
     const run = tail.then(task);
@@ -233,9 +241,18 @@ export async function checkPublicBoards(
   };
   let failed = 0;
   const budgetDeferred = new Set<string>();
+  const floor = options.minChecks ?? BOARD_MIN_CHECKS_PER_PASS;
+  let started = 0;
+  const pastBudget = new Set<string>();
   await mapWithConcurrency(plan.due, options.concurrency ?? BOARD_CHECK_CONCURRENCY, async (source) => {
-    // Past the time budget a board is not started: it keeps its last fetch time, so it stays due and goes first next pass.
-    if (options.budget?.spent()) { options.budget.deferBoard(); budgetDeferred.add(source.id); return; }
+    // Past the time budget a board is still read while fewer than `floor` boards have started in this pass (Track 73), so every due board is read
+    // within a bounded number of passes; its new postings are stored and their analysis waits. Past the floor a board is not started:
+    // it keeps its last fetch time, so it stays due and goes first next pass.
+    if (options.budget?.spent()) {
+      if (started >= floor) { options.budget.deferBoard(); budgetDeferred.add(source.id); return; }
+      pastBudget.add(source.id);
+    }
+    started += 1;
     try {
       const { run, sourceNotes, errors, traceError, deferredJobIds } = await fetchCompanySource(source.id, {
         database, fetchBatch: options.fetchBatch, fetcher: options.fetcher, traceDirectory: options.traceDirectory, ingestGate: gate,
@@ -254,27 +271,28 @@ export async function checkPublicBoards(
   });
   log(`Public boards: checked ${plan.due.length - budgetDeferred.size} (${failed} failed), not due ${plan.notDue.length}, ` +
     `backed off ${plan.backedOff.length}, left for a later pass ${plan.deferred.length}` +
+    (pastBudget.size ? `, read past the time budget ${pastBudget.size}` : "") +
     (budgetDeferred.size ? `, left by the time budget ${budgetDeferred.size}` : "") + ".");
   return {
     checked: plan.due.filter((source) => !budgetDeferred.has(source.id)).map((source) => source.label),
     failed, notDue: plan.notDue.length, backedOff: plan.backedOff.length, deferred: plan.deferred.length,
-    budgetDeferred: budgetDeferred.size
+    budgetDeferred: budgetDeferred.size, pastBudget: pastBudget.size
   };
 }
 
 /**
  * Resumes the postings an earlier pass's time budget (or an interrupted
- * discovery run) left stored with no analysis: DISCOVERED, no match, not
- * skipped by feedback, not held for labels, oldest first. They go through
- * the same analysis and preparation as new postings, within the budget.
+ * discovery run) left unanalyzed: DISCOVERED with no match, or a revision
+ * (any status before the approval gate) whose match predates its current
+ * snapshot (Track 73); not skipped by feedback, not held for labels; oldest
+ * first. They go through the same analysis and preparation as new postings,
+ * within the budget.
  */
 export async function resumeDeferredAnalysis(
   database: DatabaseSync,
   options: { budget: DiscoveryTimeBudget; candidateId?: string }
 ): Promise<{ waiting: number; analyzed: number; prepared: number; deferred: number; errors: string[] }> {
-  const backlog = listJobSummaries(database, { status: "DISCOVERED" }).reverse()
-    .filter((job) => !getJobMatch(database, job.id) && !getDiscoverySkip(database, job.id) && !getRequirementLabelHold(database, job.id))
-    .map((job) => job.id);
+  const backlog = listPostingsAwaitingAnalysis(database, { excludedStatuses: [...PROTECTED_POSTING_STATUSES] });
   if (backlog.length === 0) return { waiting: 0, analyzed: 0, prepared: 0, deferred: 0, errors: [] };
   const result = await analyzeAndPrepare(database, backlog, { candidateId: options.candidateId ?? LOCAL_CANDIDATE_ID, budget: options.budget });
   return { waiting: backlog.length, analyzed: result.ranked.length, prepared: result.promotedJobIds.length, deferred: result.deferredJobIds.length, errors: result.errors };

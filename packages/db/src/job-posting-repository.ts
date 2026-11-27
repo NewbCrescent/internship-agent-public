@@ -4,6 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   clipStatedText,
   jobPostingSchema,
+  jobPostingStatusSchema,
   postingPublicationSchema,
   type PostingPublication,
   jobRequirementSchema,
@@ -600,6 +601,50 @@ export function listCurrentPostingTexts(database: DatabaseSync): Array<{
     ORDER BY j.created_at, j.id
   `).all() as Array<{ job_id: string; company_name: string; title: string; normalized_text: string; posted_at: string | null }>)
     .map((row) => ({ jobId: row.job_id, companyName: row.company_name, title: row.title, normalizedText: row.normalized_text, postedAt: row.posted_at }));
+}
+
+/**
+ * Postings owed an analysis, oldest first (created_at, then id): DISCOVERED
+ * with no match report, or any status not in `excludedStatuses` whose match
+ * report is older than its current snapshot (a revision whose analysis was
+ * deferred). Postings skipped by discovery feedback or held for requirement
+ * labels are left out.
+ */
+export function listPostingsAwaitingAnalysis(database: DatabaseSync, options: { excludedStatuses: readonly string[] }): string[] {
+  return (database.prepare(`
+    SELECT j.id FROM jobs j
+    JOIN job_snapshots s ON s.job_id = j.id AND s.superseded_at IS NULL
+    LEFT JOIN job_matches m ON m.job_id = j.id
+    WHERE NOT EXISTS (SELECT 1 FROM discovery_feedback f WHERE f.job_id = j.id)
+      AND NOT EXISTS (SELECT 1 FROM requirement_label_holds h WHERE h.job_id = j.id)
+      AND (
+        (m.job_id IS NULL AND j.status = 'DISCOVERED')
+        OR (m.job_id IS NOT NULL AND m.evaluated_at < s.captured_at
+            AND j.status NOT IN (SELECT value FROM json_each(?)))
+      )
+    ORDER BY j.created_at ASC, j.id ASC
+  `).all(JSON.stringify(options.excludedStatuses)) as Array<{ id: string }>).map((row) => row.id);
+}
+
+/** Current postings whose snapshot has no "Location: " line and no location row with a country, for the board-location backfill (Track 73). */
+export function listPostingsWithoutStatedLocation(database: DatabaseSync): Array<{
+  jobId: string; companyName: string; title: string; status: JobPostingStatus; sourceUrl: string;
+}> {
+  return (database.prepare(`
+    SELECT j.id, j.company_name, j.title, j.status, j.source_url FROM jobs j
+    JOIN job_snapshots s ON s.job_id = j.id AND s.superseded_at IS NULL
+    WHERE substr(s.normalized_text, 1, 10) <> 'Location: '
+      AND instr(s.normalized_text, char(10) || 'Location: ') = 0
+      AND NOT EXISTS (SELECT 1 FROM job_locations l WHERE l.job_id = j.id AND l.country_code IS NOT NULL)
+    ORDER BY j.company_name, j.title, j.id
+  `).all() as Array<{ id: string; company_name: string; title: string; status: string; source_url: string }>)
+    .map((row) => ({
+      jobId: row.id,
+      companyName: row.company_name,
+      title: row.title,
+      status: jobPostingStatusSchema.parse(row.status),
+      sourceUrl: row.source_url
+    }));
 }
 
 export function getPlaceAndPay(database: DatabaseSync, jobId: string): PlaceAndPay {

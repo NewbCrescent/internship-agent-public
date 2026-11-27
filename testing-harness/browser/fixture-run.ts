@@ -599,13 +599,17 @@ async function main(): Promise<void> {
   if (await createWorkdayPage(signInTab).enterApplication() !== "sign-in") failures.push("workday: the sign-in wall was not detected");
 
   // Workday's job page (Track 28, markers seen live 2026-11-25): Apply through the chooser,
-  // Workday's closed-posting page, an unrelated error box, and Workday's security check.
+  // Workday's closed-posting page, an unrelated error box, Workday's security check, and a signed-in
+  // candidate's saved draft, whose job page shows Continue Application in Apply's place (Track 70, seen live 2026-11-26).
   const entryUrl = pathToFileURL(join(process.cwd(), "testing-harness/browser/fixtures/workday-entry.html")).href;
-  for (const [mode, expected] of [["open", "flow"], ["closed", "closed"], ["other-error", "flow"], ["security", "challenge"], ["security-page", "challenge"]] as const) {
+  for (const [mode, expected] of [["open", "flow"], ["closed", "closed"], ["other-error", "flow"], ["security", "challenge"], ["security-page", "challenge"], ["continue", "flow"]] as const) {
     const tab = await launched.newPage();
     await tab.goto(`${entryUrl}?entry=${mode}`);
-    const entered = await createWorkdayPage(tab).enterApplication();
+    const entryPage = createWorkdayPage(tab);
+    const entered = await entryPage.enterApplication();
     if (entered !== expected) failures.push(`workday entry (${mode}): expected "${expected}", got "${entered}"`);
+    // Continue Application opens the draft at its saved step, never step 1.
+    if (mode === "continue" && (await entryPage.activeStep())?.index !== 3) failures.push("workday entry (continue): the saved draft did not open at its saved step");
     await tab.close();
   }
 

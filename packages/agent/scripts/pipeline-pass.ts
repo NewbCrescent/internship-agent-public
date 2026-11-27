@@ -70,14 +70,15 @@ export async function runPipelinePass(options: {
       `auto-apply ${settings.autoApply ? "on" : "off"}; target ${settings.target ? `${settings.target.season} ${settings.target.year}` : "none"}; ` +
       `auto-submit ${autoSubmit ? `on (AI ${autoSubmit.minFit}+, ${dailyCapLabel})` : "off"}.`);
     const budget = startDiscoveryTimeBudget(discoveryTimeBudgetMs(), options.discoveryClock);
-    const sources = listDiscoverySources(database).filter((entry) => entry.enabled && entry.url &&
-      (options.sourceIds === "all" || options.sourceIds.includes(entry.id)));
-    // Lists are checked one after another; public boards afterwards, only when due and a few at a time.
-    const lists = sources.filter((source) => !isPublicBoardSource(source));
-    const boards = sources.filter(isPublicBoardSource);
+    const enabled = listDiscoverySources(database).filter((entry) => entry.enabled && entry.url);
+    const checksSources = options.sourceIds === "all" || options.sourceIds.length > 0;
+    // Lists are checked one after another: every list, or the ones the doorbell rang for.
+    const lists = enabled.filter((source) => !isPublicBoardSource(source) && (options.sourceIds === "all" || options.sourceIds.includes(source.id)));
+    // Every pass that checks sources also checks the public boards that are due, a few at a time, so the watcher's passes read them too (Track 73).
+    const boards = checksSources ? enabled.filter(isPublicBoardSource) : [];
     let checked: string[] = [];
     // A pass that checks sources first resumes the postings earlier passes left unanalyzed, oldest first, within the budget.
-    if (options.sourceIds === "all" || options.sourceIds.length > 0) {
+    if (checksSources) {
       try {
         const resumed = await resumeDeferredAnalysis(database, { budget });
         if (resumed.waiting) {
@@ -192,9 +193,9 @@ export async function runPipelinePass(options: {
 
 /**
  * One doorbell check (what `pnpm pipeline:watch` runs each tick): ring the
- * enabled GitHub lists and run a pass only for those with a new commit.
- * Tests inject `fetcher` (the GitHub check) and `fetchBatch` (the pass's
- * source fetch).
+ * enabled GitHub lists and run a pass for those with a new commit; that
+ * pass also checks the public boards that are due. Tests inject `fetcher`
+ * (the GitHub check) and `fetchBatch` (the pass's source fetch).
  */
 export async function runWatchTick(options: {
   profile: WorkspaceProfile; log: PassLog; fetcher?: (url: string, init?: RequestInit) => Promise<Response>; fetchBatch?: FetchBatch;

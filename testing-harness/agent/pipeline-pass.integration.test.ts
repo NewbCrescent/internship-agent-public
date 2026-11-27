@@ -345,7 +345,7 @@ describe("pipeline watcher pass", () => {
     expect(discoveryTimeBudgetLine(budget)).toBe("discovery: 2 boards and 1 posting left for the next pass (budget).");
   });
 
-  it("a pass past its discovery time budget defers the rest, still runs the application step, and the next pass resumes them oldest first", async () => {
+  it("a pass past its discovery time budget defers the rest of its analysis, still reads boards up to the floor, still runs the application step, and the next pass resumes them oldest first", async () => {
     const seed = createDatabase(resolveProfileDatabasePath("real"));
     const boards = [
       addCompanySource("Alpha Freight", "https://boards.greenhouse.io/alpha", 6, seed),
@@ -365,7 +365,7 @@ describe("pipeline watcher pass", () => {
     let listCalls = 0;
     const fetchBatch = async (source: { label: string; url: string }) => {
       fetched.push(source.url);
-      if (source.url !== LIST_URL) return [];
+      if (source.url !== LIST_URL) return { items: [], notes: ["No internship postings on this board right now."] };
       listCalls += 1;
       return listCalls === 1 ? { items, notes: [] } : { items: [], notes: ["Nothing new on the list."] };
     };
@@ -390,11 +390,13 @@ describe("pipeline watcher pass", () => {
     expect(jobs.get(titles[0]!)?.matched, first.join("\n")).toBe(true);
     expect(jobs.get(titles[1]!)?.matched).toBe(true);
     for (const title of titles.slice(2)) expect(jobs.get(title)).toEqual({ status: "DISCOVERED", matched: false });
-    expect(fetched).toEqual([LIST_URL]);
-    expect(boardFetches()).toEqual([null, null, null]);
+    // Past the budget the boards are still read, up to the floor of 20 per pass (Track 73).
+    expect(fetched[0]).toBe(LIST_URL);
+    expect(fetched.slice(1).sort()).toEqual(boards.map((board) => board.url).sort());
+    expect(boardFetches().every((at) => at !== null)).toBe(true);
     expect(first).toContainEqual(expect.stringMatching(/^Simplify Summer 2027: fetched 5, duplicates 0, new 5, prepared \d+\. 3 left for the next pass \(budget\)\./));
-    expect(first).toContain("Public boards: checked 0 (0 failed), not due 0, backed off 0, left for a later pass 0, left by the time budget 3.");
-    const firstDeferred = first.indexOf("discovery: 3 boards and 3 postings left for the next pass (budget).");
+    expect(first).toContain("Public boards: checked 3 (0 failed), not due 0, backed off 0, left for a later pass 0, read past the time budget 3.");
+    const firstDeferred = first.indexOf("discovery: 0 boards and 3 postings left for the next pass (budget).");
     expect(firstDeferred).toBeGreaterThanOrEqual(0);
     expect(first.findIndex((line) => /^Analyzed 0 left over;/.test(line))).toBeGreaterThan(firstDeferred);
 
@@ -416,10 +418,92 @@ describe("pipeline watcher pass", () => {
     expect(jobs.get(titles[2]!)?.matched).toBe(true);
     expect(jobs.get(titles[3]!)).toEqual({ status: "DISCOVERED", matched: false });
     expect(second).toContainEqual(expect.stringMatching(/^Deferred postings: 3 from earlier passes; analyzed 2, prepared \d+, still waiting 1\./));
-    expect(second).toContain("discovery: 3 boards and 1 posting left for the next pass (budget).");
+    expect(second).toContain("Public boards: checked 0 (0 failed), not due 3, backed off 0, left for a later pass 0.");
+    expect(second).toContain("discovery: 0 boards and 1 posting left for the next pass (budget).");
     expect(second).toContainEqual(expect.stringMatching(/^Analyzed 0 left over;/));
-    expect(fetched).toEqual([LIST_URL, LIST_URL]);
-    expect(boardFetches()).toEqual([null, null, null]);
+    expect(fetched.slice(4)).toEqual([LIST_URL]);
+  });
+
+  it("a doorbell pass also checks the public boards that are due, and a quiet tick checks none (Track 73)", async () => {
+    const seed = createDatabase(resolveProfileDatabasePath("real"));
+    addCompanySource("Alpha Freight", "https://boards.greenhouse.io/alpha", 6, seed);
+    seed.close();
+    let tick = 0;
+    const fetcher = async () => tick === 1
+      ? new Response(sha("c"), { headers: { etag: '"cccc"' } })
+      : new Response(null, { status: 304 });
+    const fetched: string[] = [];
+    const fetchBatch = async (source: { label: string; url: string }) => {
+      fetched.push(source.url);
+      return source.url === LIST_URL ? [] : { items: [], notes: ["No internship postings on this board right now."] };
+    };
+
+    tick = 1;
+    const first: string[] = [];
+    await runWatchTick({ profile: "real", log: (line) => first.push(line), fetcher, fetchBatch });
+    expect(first, first.join("\n")).toContain("Doorbell: new commits on Simplify Summer 2027.");
+    expect(fetched.slice().sort()).toEqual(["https://boards.greenhouse.io/alpha", LIST_URL].sort());
+    expect(first).toContain("Public boards: checked 1 (0 failed), not due 0, backed off 0, left for a later pass 0.");
+
+    tick = 2;
+    const second: string[] = [];
+    await runWatchTick({ profile: "real", log: (line) => second.push(line), fetcher, fetchBatch });
+    expect(fetched).toHaveLength(2);
+    expect(second.some((line) => line.startsWith("Workspace real;")), second.join("\n")).toBe(false);
+    expect(second.some((line) => line.startsWith("Public boards:"))).toBe(false);
+  });
+
+  it("resumes a revised posting whose analysis an earlier pass's budget left (Track 73)", async () => {
+    const postingUrl = "https://boards.greenhouse.io/kestrel/jobs/301";
+    const text = "Software Engineering Intern - Kestrel Freight\nLocation: Seattle, WA\n" +
+      "Kestrel Freight builds fictional logistics software for this project's synthetic fixtures.\n" +
+      "Requirements:\n- Experience with Python or TypeScript\n- Enrolled in a Bachelor's degree program in Computer Science";
+    let listText: string | null = text;
+    const fetchBatch = async (source: { label: string; url: string }) => {
+      if (source.url !== LIST_URL || listText === null) return { items: [], notes: ["Nothing new on the list."] };
+      return { items: [{ title: "Software Engineering Intern", companyName: "Kestrel Freight", sourceUrl: postingUrl, text: listText }], notes: [] };
+    };
+    const withDatabase = <T>(read: (database: ReturnType<typeof createDatabase>) => T): T => {
+      const database = createDatabase(resolveProfileDatabasePath("real"));
+      try { return read(database); } finally { database.close(); }
+    };
+    const times = () => withDatabase((database) => database.prepare(`
+      SELECT m.evaluated_at AS evaluated, s.captured_at AS captured FROM jobs j
+      JOIN job_snapshots s ON s.job_id = j.id AND s.superseded_at IS NULL
+      LEFT JOIN job_matches m ON m.job_id = j.id WHERE j.source_url = ?
+    `).get(postingUrl) as { evaluated: string | null; captured: string });
+    const listAnHourBack = () => withDatabase((database) => {
+      database.prepare("UPDATE discovery_sources SET last_fetched_at = ? WHERE url = ?").run(new Date(Date.now() - 3_600_000).toISOString(), LIST_URL);
+    });
+
+    // Pass 1, unspent budget: the posting is stored and analyzed.
+    const first: string[] = [];
+    await runPipelinePass({ profile: "real", sourceIds: "all", log: (line) => first.push(line), fetchBatch, discoveryClock: () => 0 });
+    expect(times().evaluated, first.join("\n")).not.toBeNull();
+    // The first snapshot and its analysis both predate the revision below, whatever the clock's resolution.
+    withDatabase((database) => {
+      database.prepare("UPDATE job_snapshots SET captured_at = ?").run("2025-12-31T00:00:00.000Z");
+      database.prepare("UPDATE job_matches SET evaluated_at = ?").run("2026-01-01T00:00:00.000Z");
+    });
+
+    // Pass 2, budget spent at once: the revision is stored and its analysis waits.
+    listAnHourBack();
+    listText = text + "\nInterns present their feature to the team at the end of the term.";
+    let reads = 0;
+    const second: string[] = [];
+    await runPipelinePass({ profile: "real", sourceIds: "all", log: (line) => second.push(line), fetchBatch, discoveryClock: () => (reads += 1) * 1_000_000 });
+    expect(second, second.join("\n")).toContainEqual(expect.stringMatching(/^Simplify Summer 2027: .* 1 left for the next pass \(budget\)\./));
+    let stamps = times();
+    expect(stamps.evaluated! < stamps.captured).toBe(true);
+
+    // Pass 3, unspent budget, nothing new on the list: the revision is analyzed again.
+    listAnHourBack();
+    listText = null;
+    const third: string[] = [];
+    await runPipelinePass({ profile: "real", sourceIds: "all", log: (line) => third.push(line), fetchBatch, discoveryClock: () => 0 });
+    expect(third, third.join("\n")).toContainEqual(expect.stringMatching(/^Deferred postings: 1 from earlier passes; analyzed 1, prepared \d+, still waiting 0\./));
+    stamps = times();
+    expect(stamps.evaluated! >= stamps.captured).toBe(true);
   });
 
   it("refreshes the blocker board after every pass: one snapshot and one Board line per pass", async () => {

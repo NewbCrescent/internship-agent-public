@@ -47,7 +47,7 @@ export type WorkdayStep = { index: number; total: number; name: string };
 
 export type WorkdayPage = BrowserPage & {
   /**
-   * Opens the application (Apply → Apply Manually) unless it is already open: `closed` when Workday shows its
+   * Opens the application (Apply → Apply Manually, or Continue Application for a saved draft) unless it is already open: `closed` when Workday shows its
    * closed-posting page, `challenge` when a security check shows instead (never solved), `missing` when neither the
    * application nor either page appeared.
    */
@@ -563,11 +563,17 @@ export function createWorkdayPage(page: Page): WorkdayPage {
         return "flow";
       }
       const apply = page.locator(APPLY_BUTTON).first();
-      // The job page: Apply, Workday's closed-posting page (read twice in a row), or a security check, within 15 s.
+      // A signed-in candidate's saved draft: Workday shows "Continue Application" in Apply's place (employer-d.wd5, rockwellautomation.wd1, 2026-11-26).
+      const resume = page.getByRole("button", { name: "Continue Application", exact: true })
+        .or(page.getByRole("link", { name: "Continue Application", exact: true }))
+        .filter({ visible: true }).first();
+      let entry = apply;
+      // The job page: Apply (or Continue Application for a saved draft), Workday's closed-posting page (read twice in a row), or a security check, within 15 s.
       const landingDeadline = Date.now() + 15_000;
       let closedSightings = 0;
       for (;;) {
         if (await apply.isVisible().catch(() => false)) break;
+        if (await resume.isVisible().catch(() => false)) { entry = resume; break; }
         if (await workdaySecurityCheck(page, base)) return "challenge";
         if (await workdayClosedPage(page)) {
           closedSightings += 1;
@@ -576,7 +582,7 @@ export function createWorkdayPage(page: Page): WorkdayPage {
         if (Date.now() >= landingDeadline) return "missing";
         await page.waitForTimeout(500);
       }
-      await apply.click();
+      await entry.click();
       const manual = page.locator('[data-automation-id="applyManually"]').first();
       const continueApplication = page.locator('[data-automation-id="continueButton"]').first();
       await Promise.race([

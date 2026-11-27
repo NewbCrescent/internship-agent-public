@@ -10,6 +10,7 @@ export * from "./public-board-source";
 export * from "./board-polling";
 export * from "./discovery-time-budget";
 export * from "./board-import";
+export * from "./board-location-backfill";
 export * from "./github-job-list-source";
 export * from "./host-pacer";
 export * from "./posting-page-sources";

@@ -18,6 +18,13 @@ export const BOARD_MAX_BACKOFF_MS = 7 * 24 * 60 * 60 * 1000;
 export const BOARD_CHECK_CONCURRENCY = 4;
 /** Boards checked in one pass; the rest wait for a later pass, oldest first. */
 export const BOARD_CHECKS_PER_PASS = 100;
+/**
+ * Due boards a pass that checks sources still reads after its discovery time
+ * budget is spent (Track 73), oldest first; their new postings are stored and
+ * their analysis waits for a later pass. Real passes 26–33 read 5 to 16 boards
+ * each before the budget ran out and left 155 of 206 boards never read.
+ */
+export const BOARD_MIN_CHECKS_PER_PASS = 20;
 
 /** `kind:slug` (slug lowercased) for a public board URL, or null for anything else. */
 export function publicBoardKey(url: string | null): string | null {
@@ -32,6 +39,31 @@ export function publicBoardKey(url: string | null): string | null {
 
 export function isPublicBoardSource(source: { url: string | null }): boolean {
   return publicBoardKey(source.url) !== null;
+}
+
+/**
+ * `kind:slug` (slug lowercased) of the public board a posting link sits on
+ * (boards.greenhouse.io or job-boards.greenhouse.io/<slug>/jobs/<id>,
+ * jobs.lever.co/<slug>/<id>, jobs.ashbyhq.com/<slug>/<id>; the query is
+ * ignored), the same key `publicBoardKey` gives the board's root URL; null
+ * for a board root or any other link.
+ */
+export function publicBoardKeyOfPostingUrl(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password) return null;
+  const parts = parsed.pathname.split("/").filter(Boolean);
+  if (parts.length < 2 || !/^[a-zA-Z0-9_-]+$/.test(parts[0])) return null;
+  const host = parsed.hostname.toLowerCase();
+  const kind = host === "boards.greenhouse.io" || host === "job-boards.greenhouse.io" ? "greenhouse"
+    : host === "jobs.lever.co" ? "lever"
+      : host === "jobs.ashbyhq.com" ? "ashby"
+        : null;
+  return kind === null ? null : `${kind}:${parts[0].toLowerCase()}`;
 }
 
 /** The board's root URL on its main host; the slug's case is kept. */
@@ -53,18 +85,23 @@ export function boardRetryAfter(failureCount: number, status: number | null, at:
   return new Date(at.getTime() + delay).toISOString();
 }
 
-/** Splits boards into those this pass checks, those left for a later pass, and those not due or backed off. */
+/**
+ * Splits boards into those this pass checks, those left for a later pass, and
+ * those not due or backed off. `minIntervalMs` 0 checks every board that is
+ * not backed off, for `pnpm backfill:board-locations`.
+ */
 export function planBoardChecks(
   boards: readonly DiscoverySource[],
   now = new Date(),
-  limit = BOARD_CHECKS_PER_PASS
+  limit = BOARD_CHECKS_PER_PASS,
+  minIntervalMs = BOARD_MIN_INTERVAL_MS
 ): { due: DiscoverySource[]; deferred: DiscoverySource[]; notDue: DiscoverySource[]; backedOff: DiscoverySource[] } {
   const backedOff: DiscoverySource[] = [];
   const notDue: DiscoverySource[] = [];
   const candidates: DiscoverySource[] = [];
   for (const board of boards) {
     if (board.retryAfter && Date.parse(board.retryAfter) > now.getTime()) backedOff.push(board);
-    else if (board.lastFetchedAt && now.getTime() - Date.parse(board.lastFetchedAt) < BOARD_MIN_INTERVAL_MS) notDue.push(board);
+    else if (board.lastFetchedAt && now.getTime() - Date.parse(board.lastFetchedAt) < minIntervalMs) notDue.push(board);
     else candidates.push(board);
   }
   const compare = (a: string | null, b: string | null) => (a === b ? 0 : a === null ? -1 : b === null ? 1 : a < b ? -1 : 1);

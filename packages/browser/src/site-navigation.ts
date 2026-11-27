@@ -247,16 +247,18 @@ const MAX_HOPS = 4;
 
 /**
  * A posting page saying the job is closed or gone (Greenhouse's "no longer open", Garmin's careers 404, Paylocity's Job Not Found,
- * iCIMS's "either does not exist or is no longer open" notice, which iCIMS draws in its same-host content frame).
+ * iCIMS's "either does not exist or is no longer open" notice, which iCIMS draws in its same-host content frame, SmartRecruiters'
+ * "This job has expired").
  */
-const CLOSED_POSTING = /\b(?:the job you are looking for is no longer open|this job is no longer (?:open|available|accepting applications)|this (?:position|posting|job) (?:has been filled|is closed|has closed|is no longer available)|no longer accepting applications|(?:that|this) job does not exist or is not currently active|this job may be no longer available|the page you are looking for no longer exists|the job (?:that )?you were looking for (?:either )?does not exist or is no longer open)\b/i;
+const CLOSED_POSTING = /\b(?:the job you are looking for is no longer open|this job is no longer (?:open|available|accepting applications)|this job has expired|this (?:position|posting|job) (?:has been filled|is closed|has closed|is no longer available)|no longer accepting applications|(?:that|this) job does not exist or is not currently active|this job may be no longer available|the page you are looking for no longer exists|the job (?:that )?you were looking for (?:either )?does not exist or is no longer open)\b/i;
 
 /** Ashby's page for a posting or job board it no longer serves (seen 2026-11-26 on a board that moved to another ATS); read only on jobs.ashbyhq.com, where no other page says it. */
 const ASHBY_NOT_FOUND = /\bthe page you requested was not found\b/i;
 
 /**
  * A posting page saying the job is closed or gone (Greenhouse's "no longer open", Garmin's careers 404, Paylocity's Job Not Found,
- * iCIMS's frame notice, and, when the page's address is on jobs.ashbyhq.com, Ashby's not-found page); the matched words, or null. Pure.
+ * iCIMS's frame notice, SmartRecruiters' "This job has expired", and, when the page's address is on jobs.ashbyhq.com, Ashby's not-found
+ * page); the matched words, or null. Pure.
  */
 export function closedPostingNotice(bodyText: string, url?: string): string | null {
   const text = bodyText.replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ");
@@ -264,6 +266,24 @@ export function closedPostingNotice(bodyText: string, url?: string): string | nu
   if (closed) return closed;
   if (url !== undefined && hostOf(url) === "jobs.ashbyhq.com") return ASHBY_NOT_FOUND.exec(text)?.[0] ?? null;
   return null;
+}
+
+/** A named sign-in choice a careers site shows in place of its application ("Sign in using Microsoft", "Sign in with Google"; Microsoft Careers' apply page, captured 2026-11-27). */
+const SIGN_IN_CHOICE = /\bsign in (?:using|with) (microsoft|linkedin|google|facebook|apple)\b/gi;
+
+/**
+ * The named sign-in choices of a page that offers at least two of them (Microsoft Careers' apply page: "Sign in using Microsoft",
+ * "Sign in using LinkedIn", "Sign in using Google", "Sign in using Facebook"), in page order, each provider once, as the page words
+ * them; null when it offers fewer than two. Read only where no application form was reached. Pure.
+ */
+export function signInChoicesNotice(bodyText: string): string[] | null {
+  const text = bodyText.replace(/\s+/g, " ");
+  const choices = new Map<string, string>();
+  for (const match of text.matchAll(SIGN_IN_CHOICE)) {
+    const provider = match[1]!.toLowerCase();
+    if (!choices.has(provider)) choices.set(provider, match[0]);
+  }
+  return choices.size >= 2 ? [...choices.values()] : null;
 }
 const NAME_SHIM = "globalThis.__name = globalThis.__name || ((target) => target);";
 
