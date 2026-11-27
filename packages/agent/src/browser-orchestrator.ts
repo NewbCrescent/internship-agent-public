@@ -1340,7 +1340,7 @@ function factAliasTarget(key: string, resolution: QuestionResolution): QuestionA
 
 export type RecheckRunResult = {
   runId: string;
-  /** Open stops a saved answer answers now (Q<index + 1>). */
+  /** Open stops a saved answer or the profile answers now (Q<index + 1>): from a saved fact, a saved question-memory answer, or the profile. */
   matches: Array<{ index: number; fieldId: string; label: string; kind: SavedMatchKind }>;
   /** Open stops the re-check does not look at (safeguards, uploads, sensitive, page failures, faults, pauses without a field kind). */
   skipped: number;
@@ -1354,11 +1354,12 @@ export type RecheckRunResult = {
  * The stop re-check (Track 45): each open question on a held run is planned
  * again, one field at a time, with today's saved facts, standard answers,
  * question memory, and recorded wordings, exactly as a new run would plan it.
- * Only a fill, choice, or check that comes from a saved fact or a saved
- * question-memory answer counts; a recorded wording the AI review made is
- * left for continue. With `apply`, each match becomes an answered pause (the
- * run stays held; continue fills it), the timeline names the saved answer used
- * (never its value), and the stop's exact wording is recorded against it.
+ * Only a fill, choice, or check that comes from a saved fact, a saved
+ * question-memory answer, or the profile (Track 57) counts; a recorded wording
+ * the AI review made is left for continue. With `apply`, each match becomes an
+ * answered pause (the run stays held; continue fills it), the timeline names
+ * the saved answer or profile field used (never its value), and the stop's
+ * exact wording is recorded against a saved answer (never a profile field).
  * Without `apply` nothing is written.
  */
 export async function recheckRunPauses(
@@ -1411,8 +1412,9 @@ export async function recheckRunPauses(
     const decision = plan.decisions.find((entry) => entry.fieldId === field.id);
     const hit = hits.find((entry) => entry.fieldId === field.id);
     const basis = decision?.basis;
+    const fromProfile = basis?.kind === "profile";
     const accepted = decision !== undefined && ["fill", "choose", "check"].includes(decision.action)
-      && (basis?.kind === "fact" || basis?.kind === "question_answer") && hit?.source !== "ai_review";
+      && (fromProfile || ((basis?.kind === "fact" || basis?.kind === "question_answer") && hit?.source !== "ai_review"));
     if (!accepted || !decision || !basis) {
       result.left.push({ index, label: pause.label, aiEligible: pauseReviewEligible(pause, field) });
       continue;
@@ -1454,12 +1456,22 @@ export async function recheckRunPauses(
   const status = posting?.status ?? "APPLYING";
   const aliases = questionAliasStoreAvailable(database);
   for (const match of found) {
-    const target: QuestionAliasTarget | null = match.basis.kind === "fact"
-      ? { kind: "fact", factKey: match.basis.key, scopeKey: match.basis.scope }
-      : match.savedQuestion ? { kind: "question", questionKey: match.savedQuestion.questionKey } : null;
-    const targetText = match.basis.kind === "fact"
-      ? savedAnswerTargetText({ kind: "fact", key: match.basis.key, scope: match.basis.scope })
-      : savedAnswerTargetText({ kind: "question", answerId: match.savedQuestion?.id ?? "", question: match.savedQuestion?.question ?? "" });
+    // A profile match records no wording (Track 57): the planner reads the profile on every run.
+    let target: QuestionAliasTarget | null;
+    let targetText: string;
+    switch (match.basis.kind) {
+      case "fact":
+        target = { kind: "fact", factKey: match.basis.key, scopeKey: match.basis.scope };
+        targetText = savedAnswerTargetText({ kind: "fact", key: match.basis.key, scope: match.basis.scope });
+        break;
+      case "profile":
+        target = null;
+        targetText = savedAnswerTargetText({ kind: "profile", field: match.basis.field });
+        break;
+      default:
+        target = match.savedQuestion ? { kind: "question", questionKey: match.savedQuestion.questionKey } : null;
+        targetText = savedAnswerTargetText({ kind: "question", answerId: match.savedQuestion?.id ?? "", question: match.savedQuestion?.question ?? "" });
+    }
     logApplicationEvent(database, {
       jobId: run.jobId, fromStatus: status, toStatus: status,
       detail: savedAnswerEventDetail(match.pause.label, match.kind, targetText)
@@ -1626,6 +1638,13 @@ export async function continueBrowserRun(
       const field = form.fields.find((entry) => entry.id === decision.fieldId);
       const resolution = field ? resolutions.get(field.id) : undefined;
       if (pause?.status === "answered" && pause.answer && field) {
+        // A stop answered from the profile (the stop re-check, Track 57) keeps today's plan, with its profile basis and reason, when that plan gives the same answer.
+        const planned = fresh.get(field.id);
+        if (planned && planned.basis?.kind === "profile" && ["fill", "choose", "check"].includes(planned.action)
+          && (planned.action === "check" ? pause.answer === "yes" : planned.value === pause.answer)) {
+          decisions.push(planned);
+          continue;
+        }
         const answered = answeredPauseDecision(
           field,
           pause.answer,

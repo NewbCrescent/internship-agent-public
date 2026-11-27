@@ -165,6 +165,39 @@ describe("company-, country-, and protected-scoped answers", () => {
     database.close();
   });
 
+  it("answers age thresholds one way only: 18-or-older Yes answers 16-or-older, 16-or-older No answers 18-or-older, never the reverse (Track 57)", async () => {
+    const sixteen = "Are you 16 years or older?";
+    const eighteen = "Are you 18 or older?";
+    const global: FactScope = { kind: "global" };
+
+    const adult = workspace();
+    save(adult, "age_18_or_older", global, true);
+    expect(await resolveCandidateQuestion(sixteen, {}, { database: adult })).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes", fact: { key: "age_18_or_older" } });
+    adult.close();
+
+    const young = workspace();
+    save(young, "age_16_or_older", global, false);
+    expect(await resolveCandidateQuestion(eighteen, {}, { database: young })).toMatchObject({ status: "RESOLVED", displayAnswer: "No", fact: { key: "age_16_or_older" } });
+    young.close();
+
+    const minor = workspace();
+    save(minor, "age_18_or_older", global, false);
+    expect(await resolveCandidateQuestion(sixteen, {}, { database: minor })).toMatchObject({ status: "NEEDS_INPUT", mapping: { key: "age_16_or_older" } });
+    minor.close();
+
+    const teen = workspace();
+    save(teen, "age_16_or_older", global, true);
+    expect(await resolveCandidateQuestion(eighteen, {}, { database: teen })).toMatchObject({ status: "NEEDS_INPUT", mapping: { key: "age_18_or_older" } });
+    teen.close();
+
+    // The question's own saved answer comes first.
+    const own = workspace();
+    save(own, "age_16_or_older", global, false);
+    save(own, "age_18_or_older", global, true);
+    expect(await resolveCandidateQuestion(sixteen, {}, { database: own })).toMatchObject({ status: "RESOLVED", displayAnswer: "No", fact: { key: "age_16_or_older" } });
+    own.close();
+  });
+
   it("never resolves or stores a protected self-identification answer from a question", async () => {
     const database = workspace();
     save(database, "eeo_gender", { kind: "global" }, "female");

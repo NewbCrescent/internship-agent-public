@@ -254,6 +254,51 @@ export function sameNameKey(value: string): string {
   return tokens(value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "")).join(" ");
 }
 
+export type SchoolRelation = "same" | "different" | "ambiguous";
+
+const INSTITUTION_WORD = /\b(?:university|college|institute|polytechnic)\b/i;
+const GENERIC_SCHOOL_WORDS = new Set(["university", "college", "institute"]);
+
+/** "UC Springfield" read as "University of California, Springfield", as sameNameKey reads it; accents dropped. */
+function expandedSchoolName(value: string): string {
+  const text = plainApostrophes(value).normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+  return /^uc\s+/i.test(text) ? `University of California, ${text.replace(/^uc\s+/i, "")}` : text;
+}
+
+/** Whether a token is the initials of consecutive words of the other name ("nit" for "northwind institute technology"). */
+function initialsOf(token: string, words: string[]): boolean {
+  if (token.length < 2 || token.length > 8) return false;
+  for (let start = 0; start + token.length <= words.length; start += 1) {
+    if (words.slice(start, start + token.length).map((word) => word.charAt(0)).join("") === token) return true;
+  }
+  return false;
+}
+
+/**
+ * How a school a question names relates to the profile's school (Track 57): "same" when both have the same words
+ * (sameNameKey); "different" only when both are full institution names (University, College, Institute, or Polytechnic),
+ * neither is or contains an abbreviation (an all-capital word, or a word that is the other's initials), and they share no
+ * word besides university/college/institute; anything else ("Example University" and "Example State University", a
+ * campus and its system, "NIT" and "Northwind Institute of Technology") is "ambiguous".
+ */
+export function namedSchoolRelation(named: string, profileSchool: string): SchoolRelation {
+  const a = expandedSchoolName(named);
+  const b = expandedSchoolName(profileSchool);
+  const keyA = sameNameKey(a);
+  const keyB = sameNameKey(b);
+  if (!keyA || !keyB) return "ambiguous";
+  if (keyA === keyB) return "same";
+  if (!INSTITUTION_WORD.test(a) || !INSTITUTION_WORD.test(b)) return "ambiguous";
+  if (/\b[A-Z]{2,}\b/.test(a) || /\b[A-Z]{2,}\b/.test(b)) return "ambiguous";
+  const wordsA = keyA.split(" ");
+  const wordsB = keyB.split(" ");
+  if (wordsA.some((word) => initialsOf(word, wordsB)) || wordsB.some((word) => initialsOf(word, wordsA))) return "ambiguous";
+  const distinctA = wordsA.filter((word) => !GENERIC_SCHOOL_WORDS.has(word));
+  const distinctB = wordsB.filter((word) => !GENERIC_SCHOOL_WORDS.has(word));
+  if (distinctA.length === 0 || distinctB.length === 0) return "ambiguous";
+  return distinctA.some((word) => distinctB.includes(word)) ? "ambiguous" : "different";
+}
+
 /**
  * A deterministic alias for lists that name only the campus: "Berkeley" for
  * "University of California, Berkeley" or "UC Berkeley". The school name is

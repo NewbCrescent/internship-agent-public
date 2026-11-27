@@ -147,6 +147,15 @@ export const factDefinitions = {
     reusePolicy: "auto",
     explicitUserSourceRequired: true
   },
+  age_16_or_older: {
+    label: "16 or older",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "standard",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
   pronouns: {
     label: "Pronouns",
     valueType: "text",
@@ -499,6 +508,7 @@ export const candidateFactKeySchema = z.enum([
   "how_heard",
   "previously_worked_here",
   "age_18_or_older",
+  "age_16_or_older",
   "pronouns",
   "relatives_at_company",
   "available_end_date",

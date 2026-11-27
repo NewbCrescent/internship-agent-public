@@ -21,10 +21,10 @@ Regression: the Track 54 case in `pnpm test:agent:pause-review:local` (a mapped-
 
 fixture: modelled (a fake model provider; the next live pass with a configured model confirms the per-question lines)
 
-Open follow-ups, outside this run's files:
-- A deterministic planner rule comparing a university a question names with the profile's school.
-- A deterministic rule that a saved 18-or-older Yes answers a 16-or-older question (Lockheed Martin's "Are you 16 years or older?" was unmapped and waited).
-- A prompt hint that fields of a past job or education entry are not availability dates.
+Follow-ups, done in Track 57:
+- A deterministic planner rule comparing a university a question names with the profile's school: `bugs/resolved/a-question-naming-a-university-was-not-compared-with-the-profile-school.md`.
+- A deterministic rule that a saved 18-or-older Yes answers a 16-or-older question (Lockheed Martin's "Are you 16 years or older?" was unmapped and waited): `bugs/resolved/a-saved-18-or-older-yes-did-not-answer-a-16-or-older-question.md`.
+- A prompt hint that fields of a past job or education entry are not availability dates: `bugs/open/the-ai-pause-review-prompt-did-not-say-past-dates-are-not-availability.md`.
 
 ## Refuted causes
 

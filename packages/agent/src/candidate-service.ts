@@ -93,6 +93,16 @@ export async function resolveCandidateQuestion(
   const standard = resolveStandardAnswer(database, LOCAL_CANDIDATE_ID, question, mapping, context, today);
   if (standard) return narrowed(standard, mapping);
 
+  // Age thresholds answer each other one way only (Track 57): a saved 18-or-older Yes answers a 16-or-older question, and a saved
+  // 16-or-older No answers an 18-or-older question; an 18-or-older No or a 16-or-older Yes answers nothing else. The fill names the saved fact it came from.
+  if ((mapping.key === "age_16_or_older" || mapping.key === "age_18_or_older") && !getCurrentFact(database, LOCAL_CANDIDATE_ID, mapping.key, { kind: "global" })) {
+    const other = getCurrentFact(database, LOCAL_CANDIDATE_ID, mapping.key === "age_16_or_older" ? "age_18_or_older" : "age_16_or_older", { kind: "global" });
+    const implied = mapping.key === "age_16_or_older" ? other?.value === true : other?.value === false;
+    if (other && implied && other.reusePolicy === "auto") {
+      return { status: "RESOLVED", question, mapping, fact: other, displayAnswer: formatFactValue(other.value) };
+    }
+  }
+
   // A channel- or company-scoped question may use the global answer when the
   // channel or company has none of its own. The reverse never happens: a
   // channel or company answer is not visible to global questions, other

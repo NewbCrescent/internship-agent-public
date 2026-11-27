@@ -26,6 +26,7 @@ import {
   createPauseReviewer,
   DeterministicQuestionMapper,
   ModelInvalidOutputError,
+  PAUSE_REVIEW_INSTRUCTIONS,
   startBrowserRun,
   submitBrowserRun,
   type ModelProvider,
@@ -314,6 +315,18 @@ describe("AI review of a pause batch", () => {
     for (const value of [candidate?.email, candidate?.phone, candidate?.fullName].filter((entry): entry is string => Boolean(entry))) {
       expect(input).not.toContain(value);
     }
+    ws.database.close();
+  });
+
+  it("tells the model that past job and education dates are not availability, and availability dates do not answer history (Track 57)", async () => {
+    const rule = "the start or end month or year of a past job, internship, or education entry is history, not availability";
+    expect(PAUSE_REVIEW_INSTRUCTIONS).toContain(rule);
+    expect(PAUSE_REVIEW_INSTRUCTIONS).toContain("a question about when the candidate can start or finish is availability, which a history date never answers");
+    const ws = workspace();
+    const model = fakeModel(() => []);
+    await start(ws, [select("fulltime", FULL_TIME_LABEL), submitButton], createPauseReviewer({ provider: model.provider, database: ws.database }));
+    expect(model.requests).toHaveLength(1);
+    expect(model.requests[0]!.instructions).toContain(rule);
     ws.database.close();
   });
 

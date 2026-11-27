@@ -4,9 +4,9 @@ import type {
   PauseRecord,
   RecognizedForm
 } from "@internship-agent/domain";
-import { factOption, FACT_OPTION_KEYS, samePlace, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
+import { factOption, FACT_OPTION_KEYS, samePlace, savedYesNoOption, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
 import { asksForAllSchools, asksForHighSchool, schoolsAttendedLines, type EducationRow, type HighSchoolPlace } from "@internship-agent/domain";
-import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, fieldOfStudyCategoryOption, isStandardAnswerKey, matchOfferedOption, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption } from "@internship-agent/domain";
+import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, fieldOfStudyCategoryOption, isStandardAnswerKey, matchOfferedOption, namedSchoolRelation, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption } from "@internship-agent/domain";
 
 import { classifyFieldRole, classifyUploadRole, isSensitiveRole } from "./ats/field-roles";
 import { RACE_ONLY_DECLINE_REASON, type SelfIdentificationRule } from "./ats/self-identification";
@@ -250,6 +250,8 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
   if (gpa) return gpa;
   const csMajor = csMajorDecision(field, inputs);
   if (csMajor) return csMajor;
+  const namedSchool = namedSchoolDecision(field, inputs, resolution);
+  if (namedSchool) return namedSchool;
 
   if (field.kind === "email") {
     if (inputs.profile.email) {
@@ -444,7 +446,8 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
       const match = field.options.find((option) =>
         option.toLocaleLowerCase("en-US") === resolution.display.toLocaleLowerCase("en-US")
       ) ?? (resolution.key === "pronouns" ? matchPronounOption(resolution.display, field.options) : undefined)
-        ?? (standardAnswerOption(resolution.key, resolution.value, field.options) ?? undefined);
+        ?? (standardAnswerOption(resolution.key, resolution.value, field.options) ?? undefined)
+        ?? (savedYesNoOption(resolution.key, resolution.value, field.options) ?? undefined);
       if (!match && isStandardAnswerKey(resolution.key)) {
         // A legal or background answer is never echoed in the pause.
         return pauseDecision(field, {
@@ -567,7 +570,8 @@ function factOptionDecision(field: BrowserField, resolution: Extract<FieldResolu
   const exact = !relocation && listed?.some((option) => option.toLocaleLowerCase("en-US") === resolution.display.toLocaleLowerCase("en-US"));
   const picked = listed && !exact ? factOption(resolution.key, resolution.value, listed, {
     today: inputs.standing?.today,
-    nearPosting: samePlace(contactField("currentLocation", inputs.profile), inputs.postingLocations)
+    nearPosting: samePlace(contactField("currentLocation", inputs.profile), inputs.postingLocations),
+    degreeLevel: inputs.education?.degree && bachelorKind(inputs.education.degree) ? "bachelor" : null
   }) : null;
   if (picked) return { fieldId: field.id, action: "choose", value: picked.option, basis, reason: picked.reason, pause: null };
   if ((resolution.key === "salary_expectation_rule" || (relocation && listed)) && !exact) {
@@ -1228,6 +1232,65 @@ function csMajorDecision(field: BrowserField, inputs: PlannerInputs): FillDecisi
     reason: "Your profile's field of study is computer science and your graduation date is still ahead.",
     pause: null
   };
+}
+
+/** "Are you currently enrolled at <School>?", "Are you an undergrad, masters or PhD student from <School>?", "Do you currently attend <School>?" */
+const NAMED_SCHOOL_QUESTION = /^(?:are you\b(.{0,80}?)\b(?:(?:students?|undergrad(?:uate)?s?|enrolled)\s+(?:at|from|of|in)|attending(?:\s+at)?)|do you (?:currently |presently )?attend)\s+(.+?)[\s?.!:]*$/i;
+/** Past, future, alumni, staff, transfer, and high-school wordings are not current study at the school; they wait for the candidate. */
+const NOT_CURRENT_STUDY = /\b(?:ever|previously|formerly|former|alumn\w*|graduated|graduate of|attended|employ\w*|work(?:ed|ing|s)?|faculty|staff|affiliat\w*|transfer\w*|admitted|accepted|applied|applying|plan(?:ning)? to|intend\w*|incoming|future|prospective|high school|secondary school|exchange|visiting|study abroad)\b/i;
+/** Wordings that ask more than current study at the school; only a different school's No may answer them. */
+const STUDY_QUALIFIER = /\b(?:full[- ]?time|part[- ]?time|online|evening|honou?rs)\b/i;
+const STUDY_LEVEL = /\b(?:undergrad(?:uate)?s?|bachelor'?s?|master'?s|masters|ph\.?\s?d\.?|doctoral|doctorate|graduate|mba)\b/gi;
+const UNDERGRADUATE_LEVEL = /^(?:undergrad(?:uate)?s?|bachelor'?s?)$/i;
+
+/**
+ * A Yes/No question whether the candidate studies at one named school (Track 57), compared with the profile's school
+ * (namedSchoolRelation): another institution is No; the profile's own school is Yes only while the graduation date is
+ * still ahead, with no full-time/part-time-style qualifier, and, when the question names levels, with an undergraduate
+ * level among them for a bachelor's profile; anything ambiguous returns null so the usual rules apply (a required field
+ * pauses). A saved answer for the question (fact, question memory, or recorded wording) comes first.
+ */
+function namedSchoolDecision(field: BrowserField, inputs: PlannerInputs, resolution: FieldResolution | undefined): FillDecision | null {
+  if (field.kind !== "select" && field.kind !== "radio") return null;
+  if (field.widget === "autocomplete") return null;
+  if (resolution?.status === "RESOLVED" || resolution?.status === "REMEMBERED_ANSWER") return null;
+  const label = stripRequiredMarker(field.label.replace(/\(optional\)/gi, "")).label.replace(/\s+/g, " ").trim();
+  if (NOT_CURRENT_STUDY.test(label)) return null;
+  const match = NAMED_SCHOOL_QUESTION.exec(label);
+  if (!match) return null;
+  const named = match[2]!
+    .replace(/\s*\([^)]*\)\s*$/, "")
+    .replace(/\s+(?:this|next|for|during|as of|currently|right now|starting|beginning|in (?:the )?(?:fall|spring|summer|winter|autumn|\d{4}))\b.*$/i, "")
+    .replace(/^the\s+/i, "")
+    .trim();
+  if (!named || /\b(?:or|nor)\b|and\/or|\//i.test(named)) return null;
+  if (/^(?:a|an|any|some|your|this|that|our|one|another|accredited|four-year|two-year|2-year|4-year)\b/i.test(named)) return null;
+  if (!/\b(?:university|college|institute|polytechnic)\b/i.test(named)) return null;
+  const school = inputs.education?.school?.trim();
+  if (!school) return null;
+  const options = field.options ?? [];
+  const pick = (pattern: RegExp): string | null => {
+    const found = options.filter((option) => pattern.test(option.trim()));
+    return found.length === 1 ? found[0]! : null;
+  };
+  const relation = namedSchoolRelation(named, school);
+  const basis = { kind: "profile" as const, field: "school" };
+  if (relation === "different") {
+    const no = pick(/^no\b/i);
+    return no
+      ? { fieldId: field.id, action: "choose", value: no, basis, reason: "The school this question names is a different institution from the school on your profile.", pause: null }
+      : null;
+  }
+  if (relation !== "same" || STUDY_QUALIFIER.test(label)) return null;
+  const graduation = inputs.education?.graduation?.date;
+  const today = inputs.standing?.today;
+  if (!graduation || !today || graduation <= today) return null;
+  const levels = label.match(STUDY_LEVEL) ?? [];
+  if (levels.length > 0 && !(inputs.education?.degree && bachelorKind(inputs.education.degree) && levels.some((level) => UNDERGRADUATE_LEVEL.test(level)))) return null;
+  const yes = pick(/^yes\b/i);
+  return yes
+    ? { fieldId: field.id, action: "choose", value: yes, basis, reason: "The school this question names is the school on your profile, and your graduation date is still ahead.", pause: null }
+    : null;
 }
 
 /**

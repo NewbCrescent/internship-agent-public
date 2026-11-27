@@ -1123,6 +1123,46 @@ describe("known answers on common application questions (synthetic Greenhouse-st
       .toEqual({ question_cs: ["pause", null] });
   });
 
+  it("compares a school a question names with the profile's school: another institution No, the same school Yes while enrolled, anything ambiguous paused (Track 57)", () => {
+    const enrolledAt = (today: string, schoolName = "Example State University") => ({
+      education: { school: schoolName, degree: "B.S. Computer Science", graduation: { date: "2030-05-15", basis: { kind: "profile" as const, field: "graduationDate" } } },
+      standing: { acceptDataConsent: false, signAttestations: false, today }
+    });
+    const question = (label: string, tag: "select" | "radio" = "select") => tag === "radio"
+      ? control({ tag: "input", type: "radio", id: "question_school", label, required: true, options: ["Yes", "No"] })
+      : control({ tag: "select", id: "question_school", label, required: true, options: ["Yes", "No"] });
+    const answer = (label: string, today = "2026-11-24", schoolName?: string, tag: "select" | "radio" = "select") =>
+      actions(plan([question(label, tag)], enrolledAt(today, schoolName))).question_school;
+
+    const other = plan([question("Are you an undergrad, masters or PhD student from the Northwind Institute of Technology?", "radio")], enrolledAt("2026-11-24"));
+    expect(actions(other)).toEqual({ question_school: ["choose", "No"] });
+    expect(other.decisions[0]!.basis).toEqual({ kind: "profile", field: "school" });
+    expect(answer("Are you currently enrolled at Example State University?*")).toEqual(["choose", "Yes"]);
+    expect(answer("Are you currently enrolled at Example State University?*", "2031-01-01")).toEqual(["pause", null]);
+    expect(answer("Are you an undergrad, masters or PhD student from Example State University?")).toEqual(["choose", "Yes"]);
+    expect(answer("Are you a PhD student at Example State University?")).toEqual(["pause", null]);
+    expect(answer("Are you a PhD student at Westfield College?")).toEqual(["choose", "No"]);
+    expect(answer("Are you a full-time student at Example State University?")).toEqual(["pause", null]);
+    expect(answer("Are you a full-time student at Westfield College?")).toEqual(["choose", "No"]);
+
+    // Ambiguous names, two schools, past wording, and no named school wait for the candidate.
+    expect(answer("Are you a student at Example University?")).toEqual(["pause", null]);
+    expect(answer("Are you a student at ESU University?")).toEqual(["pause", null]);
+    expect(answer("Are you currently enrolled at the University of Example?", "2026-11-24", "University of Example, Springfield")).toEqual(["pause", null]);
+    expect(answer("Are you a student at Northwind University or Example State University?")).toEqual(["pause", null]);
+    expect(answer("Have you attended Northwind University?")).toEqual(["pause", null]);
+    expect(answer("Are you currently enrolled in a degree program?")).toEqual(["pause", null]);
+
+    // A saved answer for the question comes first.
+    const label = "Are you a PhD student at Westfield College?";
+    const remembered = plan([question(label)], {
+      ...enrolledAt("2026-11-24"),
+      resolutions: new Map([["question_school", { status: "REMEMBERED_ANSWER", answerId: "answer-1", answer: "Yes", answerKey: "yes", answerKind: "option" } as const]])
+    });
+    expect(actions(remembered)).toEqual({ question_school: ["choose", "Yes"] });
+    expect(remembered.decisions[0]!.basis?.kind).toBe("question_answer");
+  });
+
   it("offers package answers only to text boxes, never to a choice or a background-check question", () => {
     const packageAnswers = [{ prompt: "Describe your most relevant experience.", text: "Relevant experience: fixture robotics project." }];
     const years = (required: boolean) => control({
@@ -2685,5 +2725,49 @@ describe("known answers on Veeva's Lever and OpenSesame's Greenhouse forms (Trac
     const radio = control({ tag: "input", type: "radio", id: "unrestricted", label: "Do you have the unrestricted right to work in the United States?*", required: true, options: ["Yes", "No"] });
     const resolution = { status: "RESOLVED", key: "unrestricted_us_work_authorization", scope: "global", display: "Yes", value: true } as const;
     expect(actions(plan([radio], { resolutions: new Map([["unrestricted", resolution]]) }))).toEqual({ unrestricted: ["choose", "Yes"] });
+  });
+
+  it("picks the one Yes/No sentence a saved work authorization or relocation names, season pairs, and the profile degree's range option (Track 57)", () => {
+    // Fictional option lists shaped like the held Greenhouse, Workday, and Ashby runs' (2026-11-26).
+    const authorizedOptions = [
+      "Yes, I am currently legally authorized to work in the country where the job is located.",
+      "No, I am not currently legally authorized to work in the country where the job is located."
+    ];
+    const authorized = { status: "RESOLVED", key: "authorized_to_work", scope: "country:US", display: "Yes", value: true } as const;
+    const authorization = (options: string[]) => control({
+      tag: "select", id: "auth", label: "Are you legally authorized to work in the country where the job is located?*", required: true, options
+    });
+    const chosen = plan([authorization(authorizedOptions)], { resolutions: new Map([["auth", authorized]]) });
+    expect(actions(chosen)).toEqual({ auth: ["choose", authorizedOptions[0]] });
+    expect(chosen.decisions[0]!.basis).toEqual({ kind: "fact", key: "authorized_to_work", scope: "country:US" });
+    const twoYes = ["Select One", "Yes, on an unrestricted and indefinite basis", "Yes, with restrictions and/or for a fixed time period", "No"];
+    expect(actions(plan([authorization(twoYes)], { resolutions: new Map([["auth", authorized]]) }))).toEqual({ auth: ["pause", null] });
+
+    const relocate = control({
+      tag: "select", id: "relocate", label: "Are you willing to relocate?", required: true,
+      options: ["Select One", "Yes, I am willing to relocate.", "No, I am not willing to relocate.", "I am open to relocation."]
+    });
+    const willing = { status: "RESOLVED", key: "willing_to_relocate", scope: "country:US", display: "Yes", value: true } as const;
+    expect(actions(plan([relocate], { resolutions: new Map([["relocate", willing]]) }))).toEqual({ relocate: ["choose", "Yes, I am willing to relocate."] });
+
+    const graduation = { status: "RESOLVED", key: "graduation_date", scope: "global", display: "2028-05-15", value: "2028-05-15" } as const;
+    const pairs = control({
+      tag: "input", type: "radio", id: "term", label: "When is your expected graduation date (month and year)?*", required: true,
+      options: ["Spring/Summer 2027", "Fall/Winter 2027", "Spring/Summer 2028", "Fall/Winter 2028", "Spring/Summer 2029", "Winter 2029 or later"]
+    });
+    expect(actions(plan([pairs], { resolutions: new Map([["term", graduation]]) }))).toEqual({ term: ["choose", "Spring/Summer 2028"] });
+
+    const ranges = control({
+      tag: "select", id: "level", label: "Confirm the degree you are pursuing and your expected graduation.*", required: true,
+      options: [
+        "Bachelors - Senior (December 2026 - June 2027)", "Bachelors - Junior (December 2027 - June 2028)",
+        "Bachelors - Sophomore (December 2028 - June 2029)", "Masters - 1st Year (December 2027 - June 2028)", "Doctorate Student",
+        "I am not currently enrolled as a university or college student."
+      ]
+    });
+    const bachelor = plan([ranges], { resolutions: new Map([["level", graduation]]), education: { degree: "B.S. Computer Science" } });
+    expect(actions(bachelor)).toEqual({ level: ["choose", "Bachelors - Junior (December 2027 - June 2028)"] });
+    expect(bachelor.decisions[0]!.basis).toEqual({ kind: "fact", key: "graduation_date", scope: "global" });
+    expect(actions(plan([ranges], { resolutions: new Map([["level", graduation]]), education: { degree: "M.S. Computer Science" } }))).toEqual({ level: ["pause", null] });
   });
 });

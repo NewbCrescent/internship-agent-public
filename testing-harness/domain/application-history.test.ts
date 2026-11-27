@@ -11,6 +11,7 @@ import {
   highSchoolPlaceOf,
   matchFieldOfStudyOption,
   matchPromptOption,
+  namedSchoolRelation,
   planApplicationHistory,
   promptSearchTerms,
   sameNameKey,
@@ -132,6 +133,24 @@ describe("application history", () => {
     expect(campusOption("UC Davis", ["Davis", "Irvine"])).toBe("Davis");
     expect(campusOption("Example State University", ["Example", "Other"])).toBeNull();
     expect(campusOption("University of Example, Springfield", ["Springfield", "springfield"])).toBeNull();
+  });
+
+  it("tells whether a school a question names is the profile's school, another institution, or ambiguous (Track 57)", () => {
+    const cases: Array<[string, string, "same" | "different" | "ambiguous"]> = [
+      ["the Northwind Institute of Technology", "Example State University", "different"],
+      ["Example State University", "example state university", "same"],
+      ["UC Springfield", "University of California, Springfield", "same"],
+      ["UC Springfield", "Northwind Institute of Technology", "different"],
+      ["Example University", "Example State University", "ambiguous"],
+      ["University of Example", "University of Example, Springfield", "ambiguous"],
+      ["NIT", "Northwind Institute of Technology", "ambiguous"],
+      ["NIT University", "Northwind Institute of Technology", "ambiguous"],
+      ["nit university", "Northwind Institute of Technology", "ambiguous"],
+      ["Northwind College", "Westfield", "ambiguous"]
+    ];
+    for (const [named, profileSchool, relation] of cases) {
+      expect(namedSchoolRelation(named, profileSchool), `${named} / ${profileSchool}`).toBe(relation);
+    }
   });
 
   it("matches schools and fields by their words, not loose substrings", () => {

@@ -29,7 +29,8 @@ import { classifyOpenPauses } from "./application-holds";
 /**
  * The stop re-check's pure helpers (Track 45): which stops it may look at,
  * how a recorded wording (packages/db/src/question-alias-repository.ts)
- * resolves to a saved answer, how a match is named, and the timeline line.
+ * resolves to a saved answer, how a match is named (a saved answer, or a
+ * profile field the planner answered from; Track 57), and the timeline line.
  * Deterministic; no model is called, and no answer value is ever logged.
  * This file imports nothing from browser-orchestrator.ts, which imports it.
  */
@@ -40,7 +41,8 @@ export type SavedMatchKind =
   | "question_memory_exact"
   | "question_memory_normalized"
   | "alias_exact"
-  | "alias_normalized";
+  | "alias_normalized"
+  | "profile_field";
 
 export const SAVED_MATCH_KINDS: readonly SavedMatchKind[] = [
   "saved_fact",
@@ -48,7 +50,8 @@ export const SAVED_MATCH_KINDS: readonly SavedMatchKind[] = [
   "question_memory_exact",
   "question_memory_normalized",
   "alias_exact",
-  "alias_normalized"
+  "alias_normalized",
+  "profile_field"
 ];
 
 export type AliasHit = {
@@ -149,6 +152,7 @@ export function matchKindFor(
   savedQuestion: string | null,
   label: string
 ): SavedMatchKind | null {
+  if (decision.basis?.kind === "profile") return "profile_field";
   if (hit) return hit.matchedBy === "exact" ? "alias_exact" : "alias_normalized";
   if (decision.basis?.kind === "fact") {
     const parsed = candidateFactKeySchema.safeParse(decision.basis.key);
@@ -164,7 +168,36 @@ const KIND_TEXT: Record<SavedMatchKind, string> = {
   question_memory_exact: "same wording",
   question_memory_normalized: "same wording after normalization",
   alias_exact: "a recorded wording",
-  alias_normalized: "a recorded wording"
+  alias_normalized: "a recorded wording",
+  profile_field: "your profile"
+};
+
+/** How the timeline names a profile field a stop was answered from; never its value. */
+const PROFILE_FIELD_TEXT: Record<string, string> = {
+  fullName: "name",
+  preferredName: "preferred name",
+  email: "email address",
+  phone: "phone number",
+  linkedinUrl: "LinkedIn link",
+  githubUrl: "GitHub link",
+  portfolioUrl: "portfolio link",
+  legalFirstName: "legal first name",
+  legalLastName: "legal last name",
+  addressLine1: "address",
+  addressLine2: "address line 2",
+  addressCity: "city",
+  addressRegion: "state or region",
+  addressPostalCode: "postal code",
+  addressCountry: "country",
+  currentLocation: "city and state",
+  phoneType: "phone type",
+  fieldOfStudy: "field of study",
+  gpa: "GPA",
+  school: "school",
+  degree: "degree",
+  educationStartMonth: "education start month",
+  graduationDate: "graduation date",
+  education: "schools"
 };
 
 function clip(text: string, max: number): string {
@@ -172,8 +205,15 @@ function clip(text: string, max: number): string {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
-/** Names the saved answer without its value: a fact by its label and scope, question memory by its id and saved question. */
-export function savedAnswerTargetText(target: { kind: "fact"; key: string; scope: string } | { kind: "question"; answerId: string; question: string }): string {
+/** Names the saved answer without its value: a fact by its label and scope, question memory by its id and saved question, a profile field by its name. */
+export function savedAnswerTargetText(
+  target: { kind: "fact"; key: string; scope: string } | { kind: "question"; answerId: string; question: string } | { kind: "profile"; field: string }
+): string {
+  if (target.kind === "profile") {
+    const name = PROFILE_FIELD_TEXT[target.field]
+      ?? target.field.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/\./g, " ").toLocaleLowerCase("en-US");
+    return `your profile's ${name}`;
+  }
   if (target.kind === "fact") {
     const parsed = candidateFactKeySchema.safeParse(target.key);
     const label = parsed.success ? factDefinitions[parsed.data].label : target.key;

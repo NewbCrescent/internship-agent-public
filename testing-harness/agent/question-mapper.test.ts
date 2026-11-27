@@ -186,6 +186,21 @@ describe("saved answer mappings", () => {
     )).toMatchObject({ status: "UNMAPPED" });
   });
 
+  it("maps 16-or-older questions to their own key and leaves named-school student questions to the planner (Track 57)", async () => {
+    for (const question of ["Are you 16 years or older?", "Are you at least 16 years of age?", "Are you 16 years of age or older?", "16+?"]) {
+      expect(await mapper.map(question), question).toMatchObject({ status: "MAPPED", key: "age_16_or_older", scope: { kind: "global" } });
+    }
+    for (const question of ["Are you over 16?", "Are you older than 16?", "Are you under 16?"]) {
+      expect(await key(question), question).not.toBe("age_16_or_older");
+    }
+    expect(await mapper.map("Are you at least 16 (18 in some states)?")).toMatchObject({ status: "AMBIGUOUS" });
+    expect(await key("Are you 18 or older?")).toBe("age_18_or_older");
+    expect(await key("Are you a current student at Northwind University?")).toBe("UNMAPPED");
+    expect(await key("Are you a full-time student at the Northwind Institute of Technology?")).toBe("UNMAPPED");
+    expect(await key("Are you currently enrolled full-time at a college or university?")).toBe("enrolled_full_time");
+    expect(await key("Are you a full-time student?")).toBe("enrolled_full_time");
+  });
+
   it("maps age, pronouns, and relatives questions", async () => {
     expect(await key("Are you at least 18 years of age?")).toBe("age_18_or_older");
     expect(await key("Are you 18 or older?")).toBe("age_18_or_older");
@@ -607,5 +622,19 @@ describe("known-answer gaps from the 2026-11-26 pass (Track 43)", () => {
       status: "MAPPED", key: "requires_sponsorship", scope: { kind: "country", code: "US" }
     });
     expect(await mapper.map(question)).toMatchObject({ status: "AMBIGUOUS" });
+  });
+
+  it("maps an export-control status list asking for work authorization status to the export-control status, and a highest-education question not to the graduation date (Track 57)", async () => {
+    const exportControl = "U.S. Export Control laws require that access to certain technical information be limited to U.S. Persons (U.S. Citizens and Lawful Permanent Residents/Green Card Holders) and individuals granted appropriate authorization. Please indicate your current Immigration and Work Authorization status.";
+    expect(await mapper.map(exportControl, { postingCountryCode: "US" })).toMatchObject({ status: "MAPPED", key: "us_person_export_controls" });
+    expect(await mapper.map("Are you a U.S. citizen or otherwise authorized to work in the United States?", { postingCountryCode: "US" })).toMatchObject({
+      status: "MAPPED", key: "authorized_to_work", scope: { kind: "country", code: "US" }
+    });
+    expect(await mapper.map("Export control: are you legally authorized to work in the US without sponsorship?", { postingCountryCode: "US" })).toMatchObject({
+      status: "MAPPED", key: "authorized_to_work", scope: { kind: "country", code: "US" }
+    });
+    const highest = "We will verify your most recent graduation date and the highest degree or diploma received. What is the highest level of education you've received?";
+    expect(await mapper.map(highest)).not.toMatchObject({ key: "graduation_date" });
+    expect(await mapper.map("What is your expected graduation date?")).toMatchObject({ status: "MAPPED", key: "graduation_date" });
   });
 });

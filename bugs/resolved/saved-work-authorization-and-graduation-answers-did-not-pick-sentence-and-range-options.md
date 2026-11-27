@@ -1,0 +1,14 @@
+# Saved work authorization and graduation answers did not pick sentence and range options
+
+Pass 25 (2026-11-26) held applications on two "saved fact not used" blockers: b0f34511bf3 (`authorized_to_work`, 6 questions) and b0ef4b6d2aa (`graduation_date`, 3 questions).
+Airbnb's Greenhouse list ("Yes, I am currently legally authorized to work in the country where the job is located." / "No, …", run <run id>) and Rockwell Automation's Workday list ("Yes, I am authorized to work lawfully …", run <run id>) offer no option that is exactly "Yes", and Rockwell's "Are you willing to relocate?" list ("Yes, I am willing to relocate.") has the same shape.
+Cause: the planner's select branch took only an option equal to the saved display, a pronoun match, or a standard-answer option; work authorization and relocation willingness are not standard keys, so the one "Yes, …" sentence was never taken.
+Reliable Robotics' Ashby radio (run <run id>) lists season pairs ("Spring/Summer 2028", "Fall/Winter 2027"), and Airbnb's list (run <run id>) names a degree level with a month range ("Bachelors - Junior (December 2027 - June 2028)").
+Cause: `graduationTermOption` read one season or month per option, and no rule read a degree-and-range option.
+Fixed in Track 57: `savedYesNoOption` (`packages/domain/src/fact-options.ts`) lets a saved Yes/No work authorization or relocation willingness pick the one option that starts with its Yes or No and says nothing more, never an option naming sponsorship, citizenship, residence, restrictions, an employer, or a time limit (authorization) or who pays, commuting, or living nearby (relocation), and two Yes options pause; the planner's select and radio branch uses it last (`packages/browser/src/autofill-planner.ts`).
+`graduationTermMonths` reads season pairs (winter as the second season adds no months; winter alone or first stays unread), and `graduationRangeOption` takes the one option of the profile degree's level whose range holds the saved date (a profile without a bachelor's degree, or a Masters-only match, pauses).
+Regression: the Track 57 cases in `pnpm test:domain` (fact-options) and `pnpm test:browser-worker:fast` (recognition planner).
+Read-only replay (2026-11-26, `pnpm questions:recheck --profile real`, dry run): Airbnb Q3 and Q5, Rockwell Automation Q1 and Q3, and Reliable Robotics Q2 now resolve from saved facts.
+Not fixed: Vital Lyfe's Ashby list (<run id>) states authorization for any employer or the present employer and sponsorship needs, and Trimble's Workday list (<run id>) has two Yes options (unrestricted and indefinite, or restricted and fixed-term) and two relocation Yes options (living nearby or remote, or willing to relocate); the saved answers do not say which, so these stay with the candidate.
+
+fixture: captured 2026-11-26 (the stored option texts of the held runs named, replayed read-only; the tests use fictional names)

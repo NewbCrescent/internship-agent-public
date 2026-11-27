@@ -10,6 +10,7 @@ import {
   LOCAL_CANDIDATE_ID,
   recordQuestionAlias,
   saveBrowserRun,
+  saveCandidate,
   saveCandidateFact,
   saveQuestionAnswer,
   type SaveCandidateFactInput
@@ -256,6 +257,53 @@ describe("re-checking held stops after a saved answer", () => {
     ws.database.close();
   });
 
+  it("answers a held stop the profile answers (field of study, LinkedIn link), names the profile field without its value, and continue keeps the profile basis (Track 57)", async () => {
+    const ws = workspace();
+    const linkedin = "https://www.linkedin.com/in/jordan-fixture";
+    const csLabel = "Are you a current college student majoring in computer science or related field?";
+    const linkedinLabel = "Please provide a link to your LinkedIn profile.";
+    const controls: RawControl[] = [
+      { tag: "select", id: "cs-major", label: csLabel, required: true, options: ["Yes", "No"] },
+      { tag: "input", type: "text", id: "linkedin", label: linkedinLabel, required: true },
+      submitButton
+    ];
+    const run = await start(ws, controls);
+    expect(run.status).toBe("paused-needs-input");
+    expect(run.pauses.map((pause) => [pause.fieldId, pause.status])).toEqual([["cs-major", "open"], ["linkedin", "open"]]);
+
+    // The candidate fills in the profile after the run paused.
+    saveCandidate(ws.database, LOCAL_CANDIDATE_ID, {
+      fullName: "Jordan Rivera", preferredName: "Jordan", email: "jordan@example.test", school: "Example State University",
+      degree: "B.S. Computer Science", graduationDate: "2030-05-15", githubUrl: "https://github.com/example-candidate",
+      fieldOfStudy: "Computer Science", linkedinUrl: linkedin
+    });
+    saveFact(ws.database, { key: "graduation_date", scope: { kind: "global" }, value: "2030-05-15" });
+
+    const result = await recheckRunPauses(ws.database, run.id, { apply: true });
+    expect(result.matches.map((match) => [match.fieldId, match.kind])).toEqual([["cs-major", "profile_field"], ["linkedin", "profile_field"]]);
+    const held = getBrowserRun(ws.database, run.id)!;
+    expect(held.status).toBe("paused-needs-input");
+    expect(held.pauses.map((pause) => [pause.fieldId, pause.status, pause.answer, pause.suggestedKey])).toEqual([
+      ["cs-major", "answered", "Yes", null],
+      ["linkedin", "answered", linkedin, null]
+    ]);
+    const details = eventDetails(ws);
+    expect(details).toContain(`Answer to "${linkedinLabel}" found in your saved answers (your profile): your profile's LinkedIn link; it no longer waits for you.`);
+    expect(details).toContain(`Answer to "${csLabel}" found in your saved answers (your profile): your profile's field of study; it no longer waits for you.`);
+    expect(details.some((detail) => detail.includes("linkedin.com/in/jordan-fixture"))).toBe(false);
+    // A profile match records no wording: the planner reads the profile on every run.
+    expect(aliasRows(ws.database)).toEqual([]);
+
+    const page = fakePage({ controls });
+    const continued = await continueBrowserRun(run.id, { database: ws.database, dataDir: ws.dataDir, openPage: async () => page, pauseReviewer: null });
+    expect(page.filled.get("linkedin")).toBe(linkedin);
+    expect(page.filled.get("cs-major")).toBe("Yes");
+    const decision = (fieldId: string) => continued.run.decisions.find((entry) => entry.fieldId === fieldId);
+    expect(decision("linkedin")?.basis).toEqual({ kind: "profile", field: "linkedinUrl" });
+    expect(decision("cs-major")?.basis).toEqual({ kind: "profile", field: "fieldOfStudy" });
+    ws.database.close();
+  });
+
   it("writes nothing on a dry run", async () => {
     const ws = workspace();
     const run = await start(ws, [pythonSelect(), submitButton]);
@@ -354,7 +402,7 @@ describe("pnpm profile:answers and pnpm questions:recheck", () => {
     const runLine = `Run ${run.id.slice(0, 8)}: ${ws.company} — Software Engineering Intern: Q1 question_memory_exact`;
     expect(output).toEqual([
       runLine,
-      "open pauses: 2; would be answered by saved answers: 1 (saved_fact 0, standard_answer 0, question_memory_exact 1, question_memory_normalized 0, alias_exact 0, alias_normalized 0); skipped (safeguard, upload, sensitive, page failures, faults, older runs): 0; still open: 1, of which would reach AI review: 1"
+      "open pauses: 2; would be answered by saved answers: 1 (saved_fact 0, standard_answer 0, question_memory_exact 1, question_memory_normalized 0, alias_exact 0, alias_normalized 0, profile_field 0); skipped (safeguard, upload, sensitive, page failures, faults, older runs): 0; still open: 1, of which would reach AI review: 1"
     ]);
     expect(getBrowserRun(ws.database, run.id)?.pauses[0]?.status).toBe("open");
     expect(output.join("\n")).not.toContain("Yes");

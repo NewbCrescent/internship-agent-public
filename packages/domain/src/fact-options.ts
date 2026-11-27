@@ -9,7 +9,11 @@ import { booleanOption } from "./standard-answers";
  * ("2–4 weeks", "6+ weeks", "Within 1 month after offer acceptance") counted
  * from today, background-check willingness picks Yes or No, and the
  * graduation date picks the term option holding it ("Spring 2027",
- * "December 2027", "December 2028 or later"; Track 43). Each rule returns
+ * "December 2027", "December 2028 or later"; Track 43), a season pair
+ * ("Spring/Summer 2028") or a degree level with a date range ("Bachelors -
+ * Junior (December 2027 - June 2028)"; Track 57). A saved Yes/No work
+ * authorization or relocation willingness picks the one option that starts
+ * with its Yes or No and says nothing more (Track 57). Each rule returns
  * null rather than guess, so the field pauses.
  */
 
@@ -22,7 +26,7 @@ export const FACT_OPTION_KEYS: ReadonlySet<string> = new Set([
   "graduation_date"
 ]);
 
-export type FactOptionContext = { today?: string; nearPosting: boolean };
+export type FactOptionContext = { today?: string; nearPosting: boolean; degreeLevel?: "bachelor" | null };
 
 /** Option text compared: NFKC, lower case, straight quotes, "-" for dashes, whitespace collapsed. */
 function optionKey(option: string): string {
@@ -109,6 +113,25 @@ export function agreeOption(options: readonly string[]): string | null {
   return matches.length === 1 ? matches[0]! : null;
 }
 
+// Option words that say more than a Yes/No work authorization: sponsorship, visas, citizenship or residence, permanence or restrictions, an employer, a time limit.
+const BEYOND_AUTHORIZATION = /\b(?:sponsor\w*|visas?|citizen\w*|nationals?|permanent\w*|green card|residen\w*|unrestricted|restrict\w*|indefinite\w*|employers?|export\w*|clearances?|h-?1b|opt|cpt|f-?1|j-?1|temporar\w*|fixed|renew\w*|extensions?|pending)\b/;
+// Option words that say more than a Yes/No willingness to relocate: who pays, housing, commuting, already living nearby, remote or office terms, a temporary move.
+const BEYOND_RELOCATION = /\b(?:own|expenses?|costs?|assist\w*|support\w*|reimburs\w*|packages?|stipends?|housing|commut\w*|located|live|living|nearby|near|resid\w*|remote|hybrid|office|temporar\w*)\b/;
+
+/**
+ * The option a saved Yes/No work authorization or relocation willingness picks when no option is exactly "Yes"/"No"
+ * (Track 57): the one option that starts with the saved Yes or No (booleanOption) and says nothing beyond it; null
+ * when none or several start so, or the option names more (sponsorship, citizenship, restrictions, an employer;
+ * who pays, commuting, living nearby). Other keys return null.
+ */
+export function savedYesNoOption(key: string, value: boolean | string, options: readonly string[]): string | null {
+  if (typeof value !== "boolean") return null;
+  const beyond = key === "authorized_to_work" ? BEYOND_AUTHORIZATION : key === "willing_to_relocate" ? BEYOND_RELOCATION : null;
+  if (!beyond) return null;
+  const option = booleanOption(value, options);
+  return option && !beyond.test(optionKey(option)) ? option : null;
+}
+
 const LOCAL = /\b(?:located|live|living|reside|residing|based)\b.{0,40}\b(?:in|near|within|close to|around)\b/;
 const OWN = /\brelocat\w*\b.{0,60}\b(?:(?:my |your )?own (?:expense|cost)s?|without (?:relocation )?(?:assistance|support|reimbursement)|self[- ]funded)\b/;
 const NEGATED = /\b(?:not|unwilling|unable|cannot|can't|won't|will not)\b/;
@@ -155,26 +178,34 @@ export function samePlace(current: string | undefined, postingLocations: readonl
 }
 
 const MONTH_WORDS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
-// Graduation seasons as months: Spring April–June (semester and quarter ends), Summer July–August, Fall or Autumn September–December. Winter spans two years and is never read.
+// Graduation seasons as months: Spring April–June (semester and quarter ends), Summer July–August, Fall or Autumn September–December. Winter spans two years and is never read alone or first; as the second season of a pair ("Fall/Winter 2027") it adds no months.
 const SEASONS: Record<string, [number, number]> = { spring: [4, 6], summer: [7, 8], fall: [9, 12], autumn: [9, 12] };
-const TERM = /^(?:(spring|summer|fall|autumn)|(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\.?)\s+(20\d\d)(?:\s+(or later|or after|and later|and after|or earlier|or before|and earlier|and before))?$/;
+const TERM = /^(?:(spring|summer|fall|autumn)(?:\s*[\/-]\s*(spring|summer|fall|autumn|winter))?|(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\.?)\s+(20\d\d)(?:\s+(or later|or after|and later|and after|or earlier|or before|and earlier|and before))?$/;
 
-/** The months (year * 12 + month - 1) a graduation term option covers: "Spring 2027", "December 2027", "Dec 2027", "December 2028 or later", "Spring 2026 or earlier"; null when it names none. */
+/** The months (year * 12 + month - 1) a graduation term option covers: "Spring 2027", "Spring/Summer 2028", "Fall/Winter 2027", "December 2027", "Dec 2027", "December 2028 or later", "Spring 2026 or earlier"; null when it names none. */
 export function graduationTermMonths(option: string): { from: number; to: number } | null {
   const match = TERM.exec(optionKey(option));
   if (!match) return null;
-  const year = Number(match[3]);
+  const year = Number(match[4]);
   let first: number;
   let last: number;
   if (match[1]) {
-    [first, last] = SEASONS[match[1]]!;
+    first = SEASONS[match[1]]![0];
+    const second = match[2];
+    if (second && second !== "winter") {
+      const secondLast = SEASONS[second]![1];
+      if (secondLast < first) return null;
+      last = secondLast;
+    } else {
+      last = SEASONS[match[1]]![1];
+    }
   } else {
-    const word = match[2]!;
+    const word = match[3]!;
     const index = MONTH_WORDS.findIndex((name) => name.startsWith(word));
     if (index < 0) return null;
     first = last = index + 1;
   }
-  const end = match[4] ?? "";
+  const end = match[5] ?? "";
   const from = /earlier|before/.test(end) ? -Infinity : year * 12 + first - 1;
   const to = /later|after/.test(end) ? Infinity : year * 12 + last - 1;
   return { from, to };
@@ -191,6 +222,51 @@ export function graduationTermOption(options: readonly string[], date: string): 
     .filter((entry): entry is { option: string; months: { from: number; to: number } } => entry.months !== null);
   if (parsed.length < 2) return null;
   const hits = parsed.filter(({ months }) => months.from <= value && value <= months.to);
+  return hits.length === 1 ? hits[0]!.option : null;
+}
+
+const MONTH = "(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)";
+const DATE_RANGE = new RegExp(`\\b${MONTH}\\.?\\s+(20\\d\\d)\\s*(?:-|to|through)\\s*${MONTH}\\.?\\s+(20\\d\\d)\\b`);
+
+function monthIndex(word: string): number {
+  return MONTH_WORDS.findIndex((name) => name.startsWith(word));
+}
+
+/** The degree level an option names ("Bachelors - Junior", "Masters - 1st Year", "Doctorate Student"); null when it names none. */
+function optionDegreeLevel(key: string): "bachelor" | "master" | "doctorate" | null {
+  if (/\b(?:bachelor'?s?|undergrad\w*)\b/.test(key)) return "bachelor";
+  if (/\b(?:master'?s?|mba)\b/.test(key)) return "master";
+  if (/\b(?:doctor\w*|ph\.?\s?d)\b/.test(key)) return "doctorate";
+  return null;
+}
+
+/**
+ * The one degree-and-range option ("Bachelors - Junior (December 2027 - June 2028)") of the profile degree's level
+ * whose month range holds a YYYY-MM-DD graduation date (Track 57); null when fewer than two options name a range,
+ * the options name levels and the profile's level is unknown, or none or several hold it.
+ */
+export function graduationRangeOption(options: readonly string[], date: string, level: "bachelor" | null): string | null {
+  const match = /^(\d{4})-(\d{2})-\d{2}$/.exec(date);
+  if (!match) return null;
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return null;
+  const value = Number(match[1]) * 12 + month - 1;
+  const parsed: { option: string; from: number; to: number; level: "bachelor" | "master" | "doctorate" | null }[] = [];
+  for (const option of options) {
+    const key = optionKey(option);
+    const range = DATE_RANGE.exec(key);
+    if (!range) continue;
+    const m1 = monthIndex(range[1]!);
+    const m2 = monthIndex(range[3]!);
+    if (m1 < 0 || m2 < 0) continue;
+    const from = Number(range[2]) * 12 + m1;
+    const to = Number(range[4]) * 12 + m2;
+    if (to < from) continue;
+    parsed.push({ option, from, to, level: optionDegreeLevel(key) });
+  }
+  if (parsed.length < 2) return null;
+  const kept = parsed.some((entry) => entry.level !== null) ? parsed.filter((entry) => level !== null && entry.level === level) : parsed;
+  const hits = kept.filter(({ from, to }) => from <= value && value <= to);
   return hits.length === 1 ? hits[0]!.option : null;
 }
 
@@ -217,7 +293,7 @@ export function factOption(key: string, value: boolean | string, options: readon
     return option ? { option, reason: "A remembered fact matches one of the offered options." } : null;
   }
   if (key === "graduation_date" && typeof value === "string") {
-    const option = graduationTermOption(options, value);
+    const option = graduationTermOption(options, value) ?? graduationRangeOption(options, value, context.degreeLevel ?? null);
     return option ? { option, reason: `Your graduation date falls in "${option}".` } : null;
   }
   return null;

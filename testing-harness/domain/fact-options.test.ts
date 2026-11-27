@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { agreeOption, factOption, graduationTermMonths, graduationTermOption, relocationOption, samePlace, startBucketOption, startWindowDays } from "@internship-agent/domain";
+import { agreeOption, factOption, graduationRangeOption, graduationTermMonths, graduationTermOption, relocationOption, samePlace, savedYesNoOption, startBucketOption, startWindowDays } from "@internship-agent/domain";
 
 /** Deterministic option rules for saved facts (2026-11-24); fictional option lists and places. */
 const BUCKETS = ["Immediately", "2 weeks", "2–4 weeks", "4–6 weeks", "6+ weeks"];
@@ -160,5 +160,68 @@ describe("graduation term options (Track 43)", () => {
     expect(picked?.option).toBe("Spring 2027");
     expect(picked?.reason).toContain("Spring 2027");
     expect(picked?.reason).not.toContain("2027-05-15");
+  });
+
+  it("reads season pairs, where winter as the second season adds no months (Track 57)", () => {
+    // A fictional Ashby radio list shaped like the held runs' (2026-11-26).
+    const PAIRS = ["Spring/Summer 2027", "Fall/Winter 2027", "Spring/Summer 2028", "Fall/Winter 2028", "Spring/Summer 2029", "Winter 2029 or later"];
+    expect(graduationTermOption(PAIRS, "2028-05-15")).toBe("Spring/Summer 2028");
+    expect(graduationTermOption(PAIRS, "2027-12-15")).toBe("Fall/Winter 2027");
+    expect(graduationTermOption(PAIRS, "2028-02-15")).toBeNull();
+    expect(graduationTermMonths("Spring/Summer 2028")).toEqual({ from: 2028 * 12 + 3, to: 2028 * 12 + 7 });
+    expect(graduationTermMonths("Summer / Fall 2028")).toEqual({ from: 2028 * 12 + 6, to: 2028 * 12 + 11 });
+    expect(graduationTermMonths("Fall/Winter 2027")).toEqual({ from: 2027 * 12 + 8, to: 2027 * 12 + 11 });
+    expect(graduationTermMonths("Winter 2029 or later")).toBeNull();
+    expect(graduationTermMonths("Fall/Spring 2028")).toBeNull();
+  });
+
+  it("takes the one degree-and-range option of the profile degree's level holding the date (graduationRangeOption, Track 57)", () => {
+    const RANGES = [
+      "Bachelors - Senior (December 2026 - June 2027)",
+      "Bachelors - Junior (December 2027 - June 2028)",
+      "Bachelors - Sophomore (December 2028 - June 2029)",
+      "Masters - 1st Year (December 2027 - June 2028)",
+      "Masters - 2nd Year (December 2026 - June 2026)",
+      "Doctorate Student",
+      "I am not currently enrolled as a university or college student."
+    ];
+    expect(graduationRangeOption(RANGES, "2028-05-15", "bachelor")).toBe("Bachelors - Junior (December 2027 - June 2028)");
+    expect(graduationRangeOption(RANGES, "2028-05-15", null)).toBeNull();
+    expect(graduationRangeOption(RANGES, "2030-09-01", "bachelor")).toBeNull();
+    const picked = factOption("graduation_date", "2028-05-15", RANGES, { nearPosting: false, degreeLevel: "bachelor" });
+    expect(picked?.option).toBe("Bachelors - Junior (December 2027 - June 2028)");
+    expect(picked?.reason).toContain("Bachelors - Junior (December 2027 - June 2028)");
+    expect(picked?.reason).not.toContain("2028-05-15");
+  });
+});
+
+describe("saved Yes/No options (savedYesNoOption, Track 57)", () => {
+  // Fictional sentence lists shaped like the held runs' Greenhouse and Workday options (2026-11-26).
+  const AUTHORIZED = [
+    "Yes, I am currently legally authorized to work in the country where the job is located.",
+    "No, I am not currently legally authorized to work in the country where the job is located."
+  ];
+
+  it("picks the one work-authorization option that starts with the saved Yes or No and says nothing more", () => {
+    expect(savedYesNoOption("authorized_to_work", true, AUTHORIZED)).toBe(AUTHORIZED[0]);
+    expect(savedYesNoOption("authorized_to_work", false, AUTHORIZED)).toBe(AUTHORIZED[1]);
+  });
+
+  it("returns null for two Yes options, an option naming sponsorship, or options without a Yes/No lead", () => {
+    expect(savedYesNoOption("authorized_to_work", true, ["Yes, on an unrestricted and indefinite basis", "Yes, with restrictions", "No"])).toBeNull();
+    expect(savedYesNoOption("authorized_to_work", true, ["Yes, I am authorized and will not require sponsorship", "No"])).toBeNull();
+    expect(savedYesNoOption("authorized_to_work", true, ["I am authorized to work for any employer", "I am not authorized"])).toBeNull();
+  });
+
+  it("picks the one plain relocation option, never one naming who pays, commuting, or living nearby", () => {
+    expect(savedYesNoOption("willing_to_relocate", true, ["Select One", "Yes, I am willing to relocate.", "No, I am not willing to relocate.", "I am open to relocation."]))
+      .toBe("Yes, I am willing to relocate.");
+    expect(savedYesNoOption("willing_to_relocate", true, ["Yes: I live nearby or the role is remote", "Yes: I am willing to relocate", "No"])).toBeNull();
+    expect(savedYesNoOption("willing_to_relocate", true, ["Yes, at my own expense", "No"])).toBeNull();
+  });
+
+  it("decides no other key and no string value", () => {
+    expect(savedYesNoOption("requires_sponsorship", true, AUTHORIZED)).toBeNull();
+    expect(savedYesNoOption("authorized_to_work", "yes", AUTHORIZED)).toBeNull();
   });
 });

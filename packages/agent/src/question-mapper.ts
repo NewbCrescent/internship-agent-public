@@ -19,6 +19,8 @@ const ELIGIBLE_TO_WORK = /\b(?:legally )?eligible to work\b|\blegally (?:able|pe
 // "Eligible to work" also opens government, export-control, and clearance questions, which only their own saved answers decide.
 const NOT_WORK_AUTHORIZATION = /\b(?:government|federal|public sector|dod|department of defense|defen[cs]e|export\w*|itar|ear|citizen\w*|u\.?\s?s\.? (?:person|national)|clearances?|security|contracts?|contractors?|projects?)\b/i;
 const AUTHORIZED_TO_WORK = /\b(?:legally )?authori[sz]ed to work\b|\bwork authori[sz]ation\b/i;
+// An export-control list that also asks for "work authorization" status (Muon Space, 2026-11-26) is the export-control question: the candidate's saved export-control status decides it, never work authorization.
+const EXPORT_CONTROL = /\bexport[- ]?control\w*|\bitar\b|\bu\.?\s?s\.? persons?\b/i;
 // Ashby's short-titled form: "Visa Support: Do you require any visa support to work in the U.S.?" (Track 22).
 const SPONSORSHIP = /\b(?:require|need).{0,30}(?:sponsor|sponsorship)\b|\bvisa sponsorship\b|\b(?:require|need)\b.{0,30}\bvisa support\b/i;
 // Start-date questions in other words ("earliest date you can start", "when can you start", "timeline for starting",
@@ -40,6 +42,10 @@ const UNRESTRICTED_WORK = /\bunrestricted\s+(?:right|authori[sz]ation|eligibilit
 const CURRENT_STUDENT = /\bare you (?:a |an )?(?:current(?:ly)?|presently) (?:a |an )?(?:enrolled )?(?:college |university |undergraduate )?student\b|\bare you (?:currently|presently) enrolled (?:as a student )?(?:in|at) (?:a|an|any) (?:college|university|accredited)\b/i;
 // A level, major, country, schedule, or timing narrows the question beyond enrollment; it stays with the candidate.
 const NOT_CURRENT_STUDENT = /\b(?:master'?s|ph\.?\s?d|doctoral|mba|graduate (?:student|program|degree|school)|law school|medical school|high school|bootcamp|part[- ]?time|major\w*|studying|degree in|pursuing|returning|remaining|graduating|semesters?|quarters?|international|f-?1|visa|united states|america\w*|canada|in-state|after the internship)\b|\bu\.s\./i;
+// A student question naming one school ("… a current student at Fictional University?") is compared with the profile's school by the planner (Track 57), never answered from enrollment.
+const NAMED_SCHOOL = /\b(?:at|from|of|attending|attend)\s+(?!(?:a|an|any|your|this|that|our)\b)(?:the\s+)?(?:[a-z0-9][\w.'&-]*\s+){0,6}?(?:university|college|institute|polytechnic)\b/i;
+// "Are you 16 years or older?" (Lockheed Martin, 2026-11-25); inclusive wordings only ("over 16" and "older than 16" ask for more).
+const AGE_16 = /\bat\s+least\s+(?:the\s+age\s+of\s+)?(?:16|sixteen)\b|\b(?:16|sixteen)\s*(?:\+|(?:years?(?:\s+of\s+age|\s+old)?\s+)?(?:or|and)\s+(?:older|over|above)\b)/i;
 const EMPLOYER_REFERENCE = /\b(?:here|for us|with us|(?:this|our|the)\s+(?:company|organization|organisation|firm|employer))\b/i;
 
 export class DeterministicQuestionMapper implements SemanticQuestionMapper {
@@ -136,6 +142,11 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
       };
     }
 
+    if (EXPORT_CONTROL.test(normalized) && (AUTHORIZED_TO_WORK.test(normalized) || ELIGIBLE_TO_WORK.test(normalized))) {
+      const standard = mapStandardQuestion(trimmed, context);
+      if (standard?.status === "MAPPED") return standard;
+    }
+
     const authorization = AUTHORIZED_TO_WORK.exec(normalized) ?? (!NOT_WORK_AUTHORIZATION.test(normalized) ? ELIGIBLE_TO_WORK.exec(normalized) : null);
     const sponsorship = SPONSORSHIP.exec(normalized);
     // "Will you require sponsorship … or any immigration work authorization requiring …?" asks about sponsorship:
@@ -202,7 +213,7 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
     }
 
     // Before graduation: "Are you a full-time student graduating in 2028?" asks about enrollment.
-    if (/\bfull[- ]?time\b.{0,30}\b(?:student|enrolled|enrollment|undergraduate)\b|\b(?:student|enrolled|enrollment)\b.{0,30}\bfull[- ]?time\b/i.test(normalized)) {
+    if (/\bfull[- ]?time\b.{0,30}\b(?:student|enrolled|enrollment|undergraduate)\b|\b(?:student|enrolled|enrollment)\b.{0,30}\bfull[- ]?time\b/i.test(normalized) && !NAMED_SCHOOL.test(normalized)) {
       return {
         status: "MAPPED",
         key: "enrolled_full_time",
@@ -214,7 +225,7 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
     }
 
     // Less than full-time enrollment: only a saved Yes answers it (broader); a saved No could be part-time study.
-    if (CURRENT_STUDENT.test(normalized) && !NOT_CURRENT_STUDENT.test(normalized)) {
+    if (CURRENT_STUDENT.test(normalized) && !NOT_CURRENT_STUDENT.test(normalized) && !NAMED_SCHOOL.test(normalized)) {
       return {
         status: "MAPPED",
         key: "enrolled_full_time",
@@ -226,7 +237,7 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
       };
     }
 
-    if (/\b(?:graduate|graduation|degree completion).{0,24}(?:date|when|expected)|\bexpected graduation\b/i.test(normalized)) {
+    if (/\b(?:graduate|graduation|degree completion).{0,24}(?:date|when|expected)|\bexpected graduation\b/i.test(normalized) && !/\bhighest\s+(?:level\s+of\s+)?(?:education|degree|diploma)\b/i.test(normalized)) {
       // A channel-specific application asks for the channel's answer; the
       // resolver falls back to the global answer only inside that channel.
       return {
@@ -293,6 +304,18 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
 
     const standard = mapStandardQuestion(trimmed, context);
     if (standard) return standard;
+
+    if (AGE_16.test(normalized) && !/\b(?:under|younger|below|less\s+than|not\s+yet)\b/i.test(normalized)) {
+      if (/\b(?:18|eighteen)\b/.test(normalized)) return { status: "AMBIGUOUS", reason: "The question names two age thresholds; answer it directly." };
+      return {
+        status: "MAPPED",
+        key: "age_16_or_older",
+        scope: { kind: "global" },
+        confidence: 0.96,
+        method: "deterministic",
+        explanation: "Age 16 or older question; a saved 18-or-older Yes also answers it."
+      };
+    }
 
     if (/\b(?:at\s+least|over|older\s+than|above)\s+(?:the\s+age\s+of\s+)?(?:18|eighteen)\b|\b(?:18|eighteen)\s*(?:\+|years?(?:\s+of\s+age|\s+old)?\s+or\s+older|or\s+older)|\blegal(?:\s+working)?\s+age\b/i.test(normalized) &&
       !/\b(?:under|younger|below|less\s+than|not\s+yet)\b/i.test(normalized)) {

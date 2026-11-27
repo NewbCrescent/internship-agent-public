@@ -90,6 +90,7 @@ export const PAUSE_REVIEW_INSTRUCTIONS = [
   "saved_answer: only when one savedAnswers key answers the question exactly as asked (the same meaning and the same scope); set key to that key, and option to the offered option it maps to (null for a text box).",
   "needs_candidate: otherwise; reason is one plain sentence saying what the candidate must decide.",
   "draft: only for an open-ended writing prompt; draft is a short suggestion that uses only the posting and savedAnswers and claims no experience, skill, or fact that is not given (null if you cannot).",
+  "Dates are not interchangeable: the start or end month or year of a past job, internship, or education entry is history, not availability, so an available start or end date never answers it, and a question about when the candidate can start or finish is availability, which a history date never answers.",
   "Never invent facts about the candidate, never choose an option that is not offered, and never answer for the candidate a question savedAnswers does not settle."
 ].join("\n");
 

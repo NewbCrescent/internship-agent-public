@@ -203,6 +203,8 @@ describe("company scope, text facts, and saved self-identification keys", () => 
     expect(parseFactAnswer("available_end_date", "2030-08-15")).toBe("2030-08-15");
     expect(() => parseFactAnswer("available_end_date", "mid August")).toThrow();
     expect(parseFactAnswer("age_18_or_older", "yes")).toBe(true);
+    expect(parseFactAnswer("age_16_or_older", "yes")).toBe(true);
+    expect(factDefinitions.age_16_or_older).toMatchObject({ sensitivity: "standard", allowedScopes: ["global"], reusePolicy: "auto" });
   });
 });
 
