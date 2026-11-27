@@ -63,6 +63,11 @@
  * and no list menu is left open. A Greenhouse question description is
  * appended to a short heading label ("HISTORY WITH FIXTURE ROBOTICS: Have you
  * previously applied …?") but not to a label whose description asks nothing.
+ * Ashby's form drawn again after the Resume upload (fixture ?rerender=1,
+ * modelled from run traces, Track 71): the location box, which lost its
+ * data-ia-control tag, is found again by its unique label, the profile's
+ * "City, Region" picks the one matching suggestion, and a value two
+ * suggestions match is left unfilled with no suggestion matched, never guessed.
  * Ashby's location box (no id or name, as on the 2026-11-20 Fernwave capture) is
  * located by its data-ia-control tag, which stays the same across
  * recognitions; its Yes/No button pairs are radio questions with a `_required`
@@ -595,6 +600,48 @@ async function main(): Promise<void> {
         `?code=1 with two codes: ${two instanceof Error ? two.constructor.name : "submitted"} ambiguous=${two instanceof Error && two.message.includes("not found unambiguously")}`);
       check(!twoState.submitted && twoState.securitySubmits === 0, `?code=1 with two codes: submitted=${twoState.submitted} securitySubmits=${twoState.securitySubmits}`);
       await twoTab.close();
+    }
+
+    // Track 71: Ashby draws its form again after the Resume upload (?rerender=1), so the Location box loses the
+    // data-ia-control tag the recognition gave it; it is found again by its unique label, the profile's "City, Region"
+    // is typed, and the one matching suggestion is picked.
+    {
+      const redrawTab = await open(`${ASHBY}?rerender=1`);
+      const redraw = createPlaywrightPage(redrawTab);
+      const redrawForm = await recognizeCurrentForm(redraw);
+      const redrawLocation = redrawForm.fields.find((field) => field.label === "Location");
+      check(/^ia-control-\d+$/.test(redrawLocation?.id ?? ""), `Ashby redraw: location id ${redrawLocation?.id}`);
+      const redrawPlan = planAutofill(redrawForm, { profile: PROFILE, resolutions: new Map(), packageAnswers: [], variantId: VARIANT_ID });
+      const redrawDecisions = redrawPlan.decisions.filter((decision) => decision.fieldId === "_systemfield_resume" || decision.fieldId === redrawLocation?.id);
+      const locationDecision = redrawDecisions.find((decision) => decision.fieldId === redrawLocation?.id);
+      check(locationDecision?.action === "choose" && locationDecision.value === "Berkeley, CA" && JSON.stringify(locationDecision.basis) === JSON.stringify({ kind: "profile", field: "currentLocation" }),
+        `Ashby redraw: location decision ${JSON.stringify(locationDecision)}`);
+      const redrawResult = await applyDecisions(redraw, redrawForm, redrawDecisions, (decision) => (decision.action === "upload" ? resumePdf : null));
+      check(redrawResult.unfilled.length === 0, `Ashby redraw unfilled: ${JSON.stringify(redrawResult.unfilled)}`);
+      type RedrawState = { uploads: Record<string, string | null>; location: string | null; redraws: number };
+      const redrawState = await redrawTab.evaluate(() => (window as unknown as { fixture: RedrawState }).fixture);
+      check(redrawState.redraws === 1 && redrawState.uploads._systemfield_resume === "resume.pdf", `Ashby redraw state: ${JSON.stringify(redrawState)}`);
+      check(redrawState.location === "Berkeley, California, United States", `Ashby redraw: location picked ${redrawState.location}`);
+      await redrawTab.close();
+    }
+    // Track 71: after the same redraw, a value two suggestions match ("Berkeley": Berkeley, California and Berkeley Heights)
+    // is left unfilled with Ashby's no-match reason and the typed text cleared, never guessed.
+    {
+      const twinTab = await open(`${ASHBY}?rerender=1`);
+      const twin = createPlaywrightPage(twinTab);
+      const twinForm = await recognizeCurrentForm(twin);
+      const twinLocation = twinForm.fields.find((field) => field.label === "Location");
+      const twinResume = planAutofill(twinForm, { profile: PROFILE, resolutions: new Map(), packageAnswers: [], variantId: VARIANT_ID })
+        .decisions.filter((decision) => decision.fieldId === "_systemfield_resume");
+      const twinResult = await applyDecisions(twin, twinForm, [
+        ...twinResume,
+        { fieldId: twinLocation?.id ?? "missing-location", action: "choose", value: "Berkeley", basis: null, reason: "fixture", pause: null }
+      ], (decision) => (decision.action === "upload" ? resumePdf : null));
+      check(twinResult.unfilled.length === 1 && twinResult.unfilled[0]!.reason === 'no suggestion matched "Berkeley"', `Ashby redraw, two matches: ${JSON.stringify(twinResult.unfilled)}`);
+      const twinState = await twinTab.evaluate(() => (window as unknown as { fixture: { location: string | null; redraws: number } }).fixture);
+      check(twinState.redraws === 1 && twinState.location === null, `Ashby redraw, two matches, state: ${JSON.stringify(twinState)}`);
+      check(await twinTab.inputValue(".ashby-application-form-input-autocomplete") === "", "Ashby redraw, two matches: the typed text was left in the box");
+      await twinTab.close();
     }
 
     // Ashby: recognized, labels read, the resume and profile fields filled, the location picked from its suggestions,

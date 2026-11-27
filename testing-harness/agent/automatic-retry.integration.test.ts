@@ -915,6 +915,29 @@ describe("verified job-level hold requeue (--job)", () => {
     database.close();
   });
 
+  it("requeues a job-level iCIMS account stop the same way", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-job-hold-");
+    const { jobId } = await jobStoppedBeforeRun(database, dataDir);
+    // A later pass waited at the iCIMS account step (as the content-frame stops of 2026-11-21 did).
+    logApplicationEvent(database, {
+      jobId, fromStatus: "READY_FOR_REVIEW", toStatus: "READY_FOR_REVIEW",
+      detail: "Automatic browser run waiting: iCIMS careers-fixture.icims.com: the account step stopped (a page the agent does not recognize). Finish the step at careers-fixture.icims.com yourself."
+    });
+    const hold = refreshApplicationHolds(database, dataDir).find((item) => item.jobId === jobId)!;
+    expect(hold).toMatchObject({ key: `job:${jobId}`, runId: null, owner: "manager", reason: "account-stop" });
+    // The older stop still blocks every later pass.
+    expect((await pass(database, dataDir, neverOpen)).started).toEqual([]);
+    const { deps, lines } = commandDeps(database, { dataDir: () => dataDir });
+    expect(await runRetryCommand(jobArgs(jobId, hold.revision), deps)).toBe(0);
+    expect(lines).toContain("Retried 1; skipped 0.");
+    expect(details(database, jobId).at(-1)).toBe(`Automatic run retried after a fix: ${REASON}`);
+    expect(refreshApplicationHolds(database, dataDir).filter((item) => item.jobId === jobId)).toEqual([]);
+    const next = await pass(database, dataDir, async () => fakePage());
+    expect(next.started).toEqual([{ jobId, runStatus: "awaiting-approval" }]);
+    database.close();
+  });
+
   it("requeues a job whose stop before any run saved a Track 42 capture, never reading it as a submit attempt", async () => {
     const database = disposableDatabase();
     const dataDir = disposableDirectory("internship-agent-job-hold-");

@@ -486,4 +486,28 @@ describe("iCIMS's account step on an automatic run", () => {
     expect(readJobEvidence(dataDir, jobId).map((entry) => entry.outcome)).toEqual(["icims-account"]);
     database.close();
   });
+
+  it("keeps a posting on the employer's careers site waiting on its held iCIMS host without opening a browser", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = approvedJobId(database, "qualified");
+    prepareApplication(jobId, { database });
+    // The posting sits on the employer's own careers site; its Apply leads to the iCIMS host (the page fake reports LOGIN).
+    const CAREERS = "https://careers.fixturerobotics.example/jobs/1004?icims=1";
+    database.prepare("UPDATE jobs SET source_url = ?, external_application_url = ? WHERE id = ?").run(CAREERS, CAREERS, jobId);
+    const file = accountsFile();
+    const page = icimsPage(file, "existing");
+    const settings: PipelineSettings = { minFit: 0, autoApply: true, icimsAccounts: { email: EMAIL, file, mailbox: null } };
+    vi.stubEnv("INTERNSHIP_AGENT_ACCEPT_DATA_CONSENT", "1");
+    const first = await advancePipeline({ database, dataDir, settings, voiceDrafter: null, renderPdf: async () => ({ pages: 1 }), openPage: async () => page });
+    const held = `iCIMS ${HOST}: an iCIMS account exists for your email at ${HOST} but no password is saved. Sign in at ${HOST} yourself, then start the run yourself.`;
+    expect(first.waiting).toEqual([{ jobId, siteKey: `icims:${HOST}`, reason: "icims-account", detail: held }]);
+    expect(getIcimsAccount(file, HOST)?.hold?.kind).toBe("exists-no-password");
+    const opened = vi.fn(async (): Promise<BrowserPage> => { throw new Error("must not open a browser while the host is held"); });
+    const second = await advancePipeline({ database, dataDir, settings, voiceDrafter: null, renderPdf: async () => ({ pages: 1 }), openPage: opened });
+    expect(opened).not.toHaveBeenCalled();
+    expect(second.waiting).toEqual([{ jobId, siteKey: `icims:${HOST}`, reason: "icims-account", detail: held }]);
+    expect(readJobEvidence(dataDir, jobId).map((entry) => entry.outcome)).toEqual(["icims-account"]);
+    database.close();
+  });
 });

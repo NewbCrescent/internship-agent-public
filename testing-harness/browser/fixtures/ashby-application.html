@@ -59,6 +59,10 @@
     pane's "Upload file". Query switch ?diagnostics=1 (SYNTHETIC, Track 27): the submit click logs a
     console error and throws a page error naming the typed Name and Email, POSTs to reCAPTCHA's
     /recaptcha/enterprise/clr with a query, and draws a toast naming the Name; it sends no submit.
+    MODELLED (Track 71, from run traces of 2026-11-27 where Ashby redrew its form after a resume
+    upload): query switch ?rerender=1 draws the location box again as a new element once the Resume
+    file is chosen, as React does on a redraw, so a data-ia-control tag put on the old element is
+    gone; `fixture.redraws` counts the redraws.
   -->
   <div id="root">
     <h1 class="ashby-job-posting-heading">Robotics Software Intern</h1>
@@ -144,7 +148,7 @@
   <script>
     const params = new URLSearchParams(location.search);
     const SAVING = params.get("saving");
-    const state = { uploads: {}, location: null, typed: [], yesno: {}, radio: null, pendingSaves: 0, busyClicks: 0, submitClicks: 0, autofillClicks: 0, submitted: false };
+    const state = { uploads: {}, location: null, typed: [], yesno: {}, radio: null, pendingSaves: 0, busyClicks: 0, submitClicks: 0, autofillClicks: 0, submitted: false, redraws: 0 };
     window.fixture = state;
     // The autofill pane's "Upload file" button opens nothing here; its clicks are counted.
     document.querySelector("._ctaButton").addEventListener("click", () => { state.autofillClicks += 1; });
@@ -178,23 +182,26 @@
     }
     const PLACES = ["Berkeley, California, United States", "Berkeley Heights, New Jersey, United States", "South San Francisco, California, United States"];
     // The location box has no id or name, as on the captured page: found by its class.
-    const input = document.querySelector(".ashby-application-form-input-autocomplete");
+    let input = document.querySelector(".ashby-application-form-input-autocomplete");
     const listbox = document.querySelector(".ashby-application-form-input-autocomplete-popup");
     let timer = null;
-    input.addEventListener("input", () => {
-      state.location = null;
-      clearTimeout(timer);
-      listbox.innerHTML = "";
-      const typed = input.value.trim().toLowerCase();
-      if (!typed) return;
-      state.typed.push(input.value);
-      // Suggestions arrive from a search request, a moment after typing stops.
-      timer = setTimeout(() => {
-        listbox.innerHTML = PLACES.filter((place) => place.toLowerCase().includes(typed))
-          .map((place) => `<div class="ashby-application-form-input-autocomplete-popup-result">${place}</div>`).join("");
-        input.setAttribute("aria-expanded", listbox.children.length ? "true" : "false");
-      }, 300);
-    });
+    const bindLocation = (box) => {
+      box.addEventListener("input", () => {
+        state.location = null;
+        clearTimeout(timer);
+        listbox.innerHTML = "";
+        const typed = box.value.trim().toLowerCase();
+        if (!typed) return;
+        state.typed.push(box.value);
+        // Suggestions arrive from a search request, a moment after typing stops.
+        timer = setTimeout(() => {
+          listbox.innerHTML = PLACES.filter((place) => place.toLowerCase().includes(typed))
+            .map((place) => `<div class="ashby-application-form-input-autocomplete-popup-result">${place}</div>`).join("");
+          box.setAttribute("aria-expanded", listbox.children.length ? "true" : "false");
+        }, 300);
+      });
+    };
+    bindLocation(input);
     listbox.addEventListener("click", (event) => {
       const option = event.target.closest(".ashby-application-form-input-autocomplete-popup-result");
       if (!option) return;
@@ -263,6 +270,15 @@
       if (event.target.type === "file") {
         state.uploads[event.target.id || "autofill"] = event.target.files[0]?.name ?? null;
         if (SAVING !== null && SAVING !== "forever" && !Number.isNaN(Number(SAVING))) save(Number(SAVING));
+        if (params.get("rerender") === "1" && event.target.id === "_systemfield_resume") {
+          const fresh = input.cloneNode(false);
+          fresh.removeAttribute("data-ia-control");
+          fresh.value = "";
+          input.replaceWith(fresh);
+          input = fresh;
+          bindLocation(fresh);
+          state.redraws += 1;
+        }
       }
       if (event.target.type === "radio") state.radio = document.querySelector(`label[for="${CSS.escape(event.target.id)}"]`).textContent;
     });

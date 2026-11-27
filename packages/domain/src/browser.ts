@@ -97,8 +97,26 @@ export const decisionBasisSchema = z.discriminatedUnion("kind", [
   })
 ]);
 
+/** The longest text a decision's reason or a pause question holds (fillDecisionSchema, pauseSuggestionSchema, pauseRecordSchema). */
+export const DECISION_TEXT_MAX = 500;
+
+/**
+ * A decision's reason or a pause question bounded to DECISION_TEXT_MAX, a
+ * shortened one ending with an ellipsis (Track 72: a pause that quoted a saved
+ * coursework answer and a long label stopped a whole run). Only explanatory
+ * text is bounded here: a statement accepted or signed under the standing
+ * settings keeps its exact text in its basis and timeline line.
+ */
+export function clipDecisionText(text: string, max: number = DECISION_TEXT_MAX): string {
+  if (text.length <= max) return text;
+  let kept = text.slice(0, max - 1);
+  // Never leave half of a surrogate pair before the ellipsis.
+  if (/[\uD800-\uDBFF]$/.test(kept)) kept = kept.slice(0, -1);
+  return `${kept.trimEnd()}…`;
+}
+
 export const pauseSuggestionSchema = z.object({
-  question: z.string().min(1).max(500),
+  question: z.string().min(1).max(DECISION_TEXT_MAX),
   key: z.string().min(1).max(80).nullable(),
   scope: z.string().min(1).max(160).nullable(),
   safeguard: z.boolean()
@@ -109,7 +127,7 @@ export const fillDecisionSchema = z.object({
   action: fillActionSchema,
   value: z.string().max(4_000).nullable(),
   basis: decisionBasisSchema.nullable(),
-  reason: z.string().min(1).max(500),
+  reason: z.string().min(1).max(DECISION_TEXT_MAX),
   pause: pauseSuggestionSchema.nullable()
 });
 
@@ -118,7 +136,7 @@ export const pauseStatusSchema = z.enum(["open", "answered"]);
 export const pauseRecordSchema = z.object({
   fieldId: z.string().min(1).max(200),
   label: z.string().min(1).max(300),
-  question: z.string().min(1).max(500),
+  question: z.string().min(1).max(DECISION_TEXT_MAX),
   suggestedKey: z.string().min(1).max(80).nullable(),
   suggestedScope: z.string().min(1).max(160).nullable(),
   safeguard: z.boolean(),
@@ -182,6 +200,20 @@ export type PauseSuggestion = z.infer<typeof pauseSuggestionSchema>;
 export type FillDecision = z.infer<typeof fillDecisionSchema>;
 export type PauseStatus = z.infer<typeof pauseStatusSchema>;
 export type PauseRecord = z.infer<typeof pauseRecordSchema>;
+/** A decision with its reason and pause question bounded by clipDecisionText; the run-save safety net (Track 72). */
+export function boundDecisionText(decision: FillDecision): FillDecision {
+  return {
+    ...decision,
+    reason: clipDecisionText(decision.reason),
+    pause: decision.pause ? { ...decision.pause, question: clipDecisionText(decision.pause.question) } : null
+  };
+}
+
+/** A pause record with its question bounded by clipDecisionText; the run-save safety net (Track 72). */
+export function boundPauseQuestion(pause: PauseRecord): PauseRecord {
+  return { ...pause, question: clipDecisionText(pause.question) };
+}
+
 export type BrowserRunStatus = z.infer<typeof browserRunStatusSchema>;
 export type BrowserRun = z.infer<typeof browserRunSchema>;
 export type ApplicationProfile = z.infer<typeof applicationProfileSchema>;

@@ -120,6 +120,21 @@ function stoppedSinceRetry(events: ReadonlyArray<{ detail: string | null }>): bo
   return stopped;
 }
 
+/** "Automatic browser run waiting: iCIMS <host>: …", logged when an iCIMS account step held its host. */
+const ICIMS_WAIT = /^Automatic browser run waiting: iCIMS ([a-z0-9-]+(?:\.[a-z0-9-]+)*\.icims\.com):/i;
+
+/**
+ * The iCIMS host the job's newest iCIMS wait named (events oldest first), or null: a posting on the employer's own
+ * careers site whose Apply leads to iCIMS is held with that host, so a held host opens no browser for it either.
+ */
+function lastIcimsWaitHost(events: ReadonlyArray<{ detail: string | null }>): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const match = ICIMS_WAIT.exec(events[index]!.detail ?? "");
+    if (match) return icimsHostOf(`https://${match[1]}/`);
+  }
+  return null;
+}
+
 export function pipelineSettings(env: Record<string, string | undefined> = process.env): PipelineSettings {
   const raw = env.INTERNSHIP_AGENT_PREPARE_MIN_FIT?.trim();
   const minFit = raw && /^\d+$/.test(raw) ? Math.min(100, Number.parseInt(raw, 10)) : 0;
@@ -358,7 +373,7 @@ export async function advancePipeline(options: {
       }
     }
     // With the iCIMS account opt-in, a held iCIMS host waits without opening a browser.
-    const icimsHost = icimsHostOf(url);
+    const icimsHost = icimsHostOf(url) ?? lastIcimsWaitHost(listApplicationEvents(database, job.id));
     if (icimsHost && icimsAccounts) {
       const held = icimsAccountWait(icimsAccounts, icimsHost, getCandidate(database, candidateId)?.email, new Date(), acceptDataConsent, standingSettings.signAttestations);
       if (held) {
@@ -395,7 +410,7 @@ export async function advancePipeline(options: {
         continue;
       }
       if (waiting && workday && !icimsHeld) report.waiting.push({ jobId: job.id, siteKey: workdaySiteKey(workday), reason: "workday-account", detail: reason });
-      else if (icimsHeld) report.waiting.push({ jobId: job.id, siteKey: `icims:${icimsHost ?? "unknown"}`, reason: "icims-account", detail: reason });
+      else if (icimsHeld) report.waiting.push({ jobId: job.id, siteKey: `icims:${icimsHost ?? lastIcimsWaitHost([{ detail: AUTOMATIC_WAIT + reason }]) ?? "unknown"}`, reason: "icims-account", detail: reason });
       else report.stopped.push({ jobId: job.id, reason });
       // Keep enough of the error to diagnose it (validation errors span lines).
       const prefix = waiting ? AUTOMATIC_WAIT : error instanceof AutomaticRunStopped ? AUTOMATIC_STOP : AUTOMATIC_FAILURE;

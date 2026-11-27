@@ -3,7 +3,7 @@ import type { Locator, Page } from "playwright-core";
 import { promptSearchTerms, type AtsKind, type BrowserField, type FillDecision, type PauseRecord, type RecognizedForm, type StandingConsentSettings } from "@internship-agent/domain";
 
 import { dismissAnnouncementDialog, readCoveringDialogsIn, visibleModalDialogIn, type CoveringDialog } from "./announcement-dialog";
-import { chooseApplyEntry, clickApplyEntry, dismissCookieBanner, embedSourcesOf, greenhouseEmbedTarget, type ApplyEntryCandidate } from "./apply-entry";
+import { chooseApplyEntry, clickApplyEntry, dismissCookieBanner, embedSourcesOf, greenhouseEmbedTarget, icimsPostingPage, type ApplyEntryCandidate } from "./apply-entry";
 import { isDoverOrAshby } from "./ats/adapters";
 import {
   ASHBY_ACCEPTED_CONFIRMATION,
@@ -192,7 +192,9 @@ export type BrowserPage = {
 
 export async function recognizeCurrentForm(page: BrowserPage): Promise<RecognizedForm> {
   await page.waitForFormReady?.();
-  const controls = await page.collectControls();
+  // An iCIMS posting page: the career-site wrapper's boxes (a site search, a newsletter signup) are never the
+  // application, which starts behind the posting's Apply entry, so none is read (the Apply entry is then followed).
+  const controls = icimsPostingPage(page.url()) ? [] : await page.collectControls();
   return recognizeForm(page.url(), await page.title(), controls);
 }
 
@@ -809,6 +811,21 @@ export function createPlaywrightPage(page: Page): BrowserPage {
   let ashbyNetwork: AshbyNetworkRecorder | null = null;
   // Ashby's read-only submit diagnostics, started with the network record (ats/ashby-diagnostics.ts).
   let ashbyDiagnostics: AshbyDiagnosticsRecorder | null = null;
+  // The page drew a tagged control again (Ashby redraws its form after a resume upload; Track 71, run traces <run id>,
+  // <run id>, <run id>): the new element has no tag, and Ashby's label[for] names no element, so the label lookup would
+  // wait out its timeout. The controls are collected again; the one field with the same label, when it is a tagged
+  // control, is the redrawn element. Two fields with that label, or an untagged one, find nothing here.
+  const redrawnTagged = async (field: BrowserField): Promise<Locator | null> => {
+    try {
+      await ensureNameShim(page);
+      const same = recognizeFields(await root().evaluate(collectControlsIn)).filter((candidate) => candidate.label === field.label);
+      if (same.length !== 1 || !TAGGED_CONTROL.test(same[0]!.id)) return null;
+      const located = within().locator(`[data-ia-control="${cssValue(same[0]!.id)}"]`);
+      return (await located.count()) === 1 ? located : null;
+    } catch {
+      return null;
+    }
+  };
   // The field's own element by id, so two fields with one label ("Attach")
   // never hit the same control; the label is the fallback.
   const locateField = async (field: BrowserField): Promise<Locator> => {
@@ -820,6 +837,10 @@ export function createPlaywrightPage(page: Page): BrowserPage {
     // A control with neither (Ashby's location box) carries the tag collectControlsIn gave it.
     const byRef = within().locator(`[data-ia-control="${cssValue(field.id)}"]`);
     if ((await byRef.count().catch(() => 0)) === 1) return byRef;
+    if (TAGGED_CONTROL.test(field.id)) {
+      const redrawn = await redrawnTagged(field);
+      if (redrawn) return redrawn;
+    }
     return within().getByLabel(field.label, { exact: false }).first();
   };
   return {
@@ -1354,6 +1375,9 @@ function collectApplyEntriesIn(root: Element): Array<Omit<ApplyEntryCandidate, "
   }
   return entries;
 }
+
+/** A tag collectControlsIn gives a control with neither id nor name (refOf). */
+const TAGGED_CONTROL = /^ia-control-\d+$/;
 
 /** A value for a quoted CSS attribute selector (Lever names look like `cards[<uuid>][field0]`). */
 function cssValue(value: string): string {

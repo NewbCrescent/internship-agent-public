@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { BrowserField, RecognizedForm } from "@internship-agent/domain";
+import { boundDecisionText, boundPauseQuestion, clipDecisionText, DECISION_TEXT_MAX, fillDecisionSchema, pauseRecordSchema } from "@internship-agent/domain";
 import { planAutofill, unfilledPause, type ContactProfile, type FieldResolution, type StandingInputs } from "@internship-agent/browser";
 
 /**
@@ -146,5 +147,42 @@ describe("a demographic field the page would not take", () => {
     expect(held.pause.sensitive).toBe(true);
     expect(held.pause.question).toContain(gender.label);
     expect(unfilledPause(list("q", "Preferred office", ["North", "South"]), "the page did not accept the value").pause.sensitive).toBe(false);
+  });
+});
+
+describe("a pause that quotes a long label and a long saved answer (Track 72)", () => {
+  // Fictional: a Yes/No list mapped to the saved coursework, whose answer lists ten courses (about 800 characters).
+  const label = "Have you used a server-side programming language, such as Fixturelang, Mocklang, or Testscript, to build a back-end service for a Fixture Robotics project? Experience through coursework, personal projects, or internships qualifies.";
+  const courses = Array.from({ length: 10 }, (_, index) => `FIX ${101 + index}: Fixture Systems Engineering Topic ${index + 1} (Fall 2026, completed)`).join("; ");
+
+  it("is planned without a schema error, with its reason and question at most 500 characters", () => {
+    expect(courses.length).toBeGreaterThan(DECISION_TEXT_MAX);
+    const field = list("question_7100", label, ["Yes", "No", "Not Sure"]);
+    const { decision, pauses } = decide(field, { resolution: resolved("relevant_coursework", courses, courses) });
+    expect(decision.action).toBe("pause");
+    expect(() => fillDecisionSchema.parse(decision)).not.toThrow();
+    expect(decision.reason.length).toBeLessThanOrEqual(DECISION_TEXT_MAX);
+    expect(decision.pause!.question.length).toBeLessThanOrEqual(DECISION_TEXT_MAX);
+    expect(decision.reason).toBe(decision.pause!.question);
+    expect(decision.reason.endsWith("…")).toBe(true);
+    expect(pauses).toHaveLength(1);
+    expect(() => pauseRecordSchema.parse(pauses[0])).not.toThrow();
+    expect(pauses[0]!.question).toBe(decision.pause!.question);
+  });
+
+  it("leaves text within the limit as it is", () => {
+    expect(clipDecisionText("How should \"Fixture\" be answered?")).toBe("How should \"Fixture\" be answered?");
+    expect(clipDecisionText("x".repeat(DECISION_TEXT_MAX))).toHaveLength(DECISION_TEXT_MAX);
+    expect(clipDecisionText("x".repeat(DECISION_TEXT_MAX + 1))).toBe(`${"x".repeat(DECISION_TEXT_MAX - 1)}…`);
+  });
+
+  it("bounds any decision and pause record at the run save, whichever step wrote them", () => {
+    const long = `Keeps the resume attached from your account ("${courses}") once you confirm it is current.`;
+    const decision = boundDecisionText({ fieldId: "q", action: "pause", value: null, basis: null, reason: long, pause: { question: long, key: null, scope: null, safeguard: false } });
+    expect(() => fillDecisionSchema.parse(decision)).not.toThrow();
+    expect(decision.reason.endsWith("…")).toBe(true);
+    const record = boundPauseQuestion({ fieldId: "q", label: "Resume", question: long, suggestedKey: null, suggestedScope: null, safeguard: false, sensitive: false, upload: false, status: "open", answer: null, draft: null });
+    expect(() => pauseRecordSchema.parse(record)).not.toThrow();
+    expect(record.question).toBe(decision.pause!.question);
   });
 });

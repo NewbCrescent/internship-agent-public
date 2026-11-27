@@ -105,6 +105,8 @@ import {
   applicationChannelFor,
   AUTO_SUBMIT_EVENT,
   autoSubmitBlockers,
+  boundDecisionText,
+  boundPauseQuestion,
   factDefinitions,
   highSchoolPlaceOf,
   isWorkdayErrorPauseId,
@@ -1095,8 +1097,9 @@ export async function startBrowserRun(
       atsConfidence: classification.confidence,
       suggestedAtsKind: flow === "auto" ? null : classification.kind === "unknown" ? null : classification.kind,
       atsConfirmed: flow === "auto",
-      decisions: filled.decisions,
-      pauses: filled.pauses,
+      // Track 72: an over-long reason or question is shortened, never a failed run.
+      decisions: filled.decisions.map(boundDecisionText),
+      pauses: filled.pauses.map(boundPauseQuestion),
       submittedAnswers: null,
       confirmationText: null,
       submissionApprovedAt: null,
@@ -2221,7 +2224,7 @@ async function startWorkdayRun(
     const run = saveBrowserRun(database, {
       id: randomUUID(), jobId: input.jobId, applicationUrl: input.applicationUrl, status, packageId: input.current.package.id,
       variantId: input.variantId, baseResumeId: uploadedBaseResumeId(walk.decisions), applicationProfile: walk.transcript ? "transcript" : "default", atsKind: "workday", atsConfidence: 1, suggestedAtsKind: null, atsConfirmed: true,
-      decisions: walk.decisions, pauses, submittedAnswers: null, confirmationText: null, submissionApprovedAt: null, createdAt: now, updatedAt: now
+      decisions: walk.decisions.map(boundDecisionText), pauses: pauses.map(boundPauseQuestion), submittedAnswers: null, confirmationText: null, submissionApprovedAt: null, createdAt: now, updatedAt: now
     });
     runTraceOf(page)?.setRun(run.id);
     if (walk.outcome === "blocked") {

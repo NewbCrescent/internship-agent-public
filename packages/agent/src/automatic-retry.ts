@@ -26,6 +26,7 @@ import {
   updateBrowserRun,
   withApplicationHoldTransaction,
   type ApplicationHold,
+  type HoldReason,
   type ReceiptResult
 } from "@internship-agent/db";
 import { isGreenhouseBoardUrl, SECURITY_CODE_FIELD_ID } from "@internship-agent/browser";
@@ -693,10 +694,14 @@ function jobSubmitAttempt(database: DatabaseSync, dataDir: string, jobId: string
   return null;
 }
 
+/** The job-level hold reasons `--job --verified-hold` may release: an automation fault or an account stop. */
+const JOB_LEVEL_REQUEUE: ReadonlySet<HoldReason> = new Set<HoldReason>(["automation-fault", "account-stop"]);
+
 /**
  * The job-level hold a verified requeue may release (a manager-owned
- * automation fault on a job with no run that is not cancelled, the stop
- * logged before any run was saved), or why not: the job is ready for review,
+ * automation fault or account stop (a Workday or iCIMS account step that
+ * waited) on a job with no run that is not cancelled, the stop logged before
+ * any run was saved), or why not: the job is ready for review,
  * no submit was ever attempted (no approval or submit note, no submit
  * approval, confirmation, or receipt check on any run, no post-submit
  * evidence, no employer outcome), the hold is at the given revision, the
@@ -711,7 +716,7 @@ function verifiedJobHold(database: DatabaseSync, dataDir: string, jobId: string,
   const attempted = jobSubmitAttempt(database, dataDir, jobId);
   if (attempted) return attempted;
   const hold = getApplicationHold(database, jobId, null);
-  if (!hold?.active || hold.owner !== "manager" || hold.reason !== "automation-fault") return "there is no active manager-owned job-level automation fault.";
+  if (!hold?.active || hold.owner !== "manager" || !JOB_LEVEL_REQUEUE.has(hold.reason)) return "there is no active manager-owned job-level automation fault or account stop.";
   if (hold.revision !== fix.revision) return "the hold revision changed.";
   const current = observeApplicationHolds(database, dataDir).observations.find((item) => item.jobId === jobId && item.runId === null);
   if (!current || current.owner !== hold.owner || current.reason !== hold.reason || current.identity !== hold.identity) {
@@ -728,7 +733,8 @@ export function verifiedJobHoldBlocker(database: DatabaseSync, dataDir: string, 
 }
 
 /**
- * Releases one verified job-level automation fault (no run was saved: the
+ * Releases one verified job-level automation fault or account stop (a
+ * Workday or iCIMS account step that waited; no run was saved: the
  * stop came before one), in one transaction: logs "Automatic run retried
  * after a fix: <reason>" on the job (it stays READY_FOR_REVIEW; the note ends
  * the stop for the next pass and for the hold observation), records the
@@ -974,7 +980,8 @@ function resolveRef(database: DatabaseSync, typed: string): BrowserRun | string 
  * holds left as "unexpected" (releasableWorkdayHolds), one line per host.
  * `--run <ref> --verified-hold` requeues one run's manager-owned pre-submit
  * fault (requeueVerifiedHold); `--job <ref> --verified-hold` releases one
- * job-level automation fault for a job with no run that is not cancelled and
+ * job-level automation fault or account stop (a Workday or iCIMS account
+ * step that waited) for a job with no run that is not cancelled and
  * no submit ever attempted (requeueVerifiedJobHold). Both print `requeued`
  * (`would requeue` in a dry run) or `skipped`.
  * Returns 0, 1 (lock, retry, accounts file, or pass failure), or 2 (usage).

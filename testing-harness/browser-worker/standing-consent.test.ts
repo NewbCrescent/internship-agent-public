@@ -10,6 +10,7 @@ import {
   COVERING_DIALOG_REASON,
   FieldUnfillable,
   icimsHostOf,
+  icimsPostingPage,
   MARKETING_QUESTION,
   planAutofill,
   SIGNATURE_QUESTION,
@@ -244,6 +245,22 @@ describe("Jobvite residence and the application walls", () => {
     expect(icimsHostOf("https://Careers-Fixture.icims.com/jobs/9001/job")).toBe("careers-fixture.icims.com");
     expect(icimsHostOf("https://icims.com.example.test/jobs")).toBe(null);
     expect(icimsHostOf("not a url")).toBe(null);
+  });
+
+  it("tells an iCIMS posting page from its Apply address and its account step", () => {
+    for (const url of [
+      "https://careers-fixture.icims.com/jobs/9001/job",
+      "https://careers-fixture.icims.com/jobs/9001/intern/job",
+      "https://careers-fixture.icims.com/jobs/9001/intern/job?in_iframe=1"
+    ]) expect(icimsPostingPage(url)).toBe(true);
+    for (const url of [
+      "https://careers-fixture.icims.com/jobs/9001/intern/job?mode=apply&apply=yes&in_iframe=1",
+      "https://careers-fixture.icims.com/jobs/9001/intern/job?mode=submit_apply&in_iframe=1",
+      "https://careers-fixture.icims.com/jobs/9001/intern/login?in_iframe=1",
+      "https://careers.fixturerobotics.example/jobs/9001/job",
+      "https://careers-fixture.icims.com/jobs/search?ss=1",
+      "not a url"
+    ]) expect(icimsPostingPage(url)).toBe(false);
   });
 });
 

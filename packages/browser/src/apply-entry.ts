@@ -304,6 +304,19 @@ export function icimsHostOf(url: string): string | null {
 }
 
 /**
+ * An iCIMS job page (`/jobs/<number>/job` or `/jobs/<number>/<slug>/job` on a `*.icims.com` host) that carries no
+ * `mode` parameter (iCIMS's Apply and application steps, such as `mode=apply`, carry one): the posting, never the
+ * application. Its own boxes belong to the employer's career-site wrapper (a site search, a newsletter signup);
+ * iCIMS's application starts behind its Apply entry.
+ */
+export function icimsPostingPage(url: string): boolean {
+  const parsed = parsedUrl(url);
+  if (!parsed || !icimsHostOf(url)) return false;
+  if (parsed.searchParams.has("mode")) return false;
+  return /^\/jobs\/\d+(?:\/[^/]+)?\/job\/?$/i.test(parsed.pathname);
+}
+
+/**
  * A step in front of the application form that stops the run unless the
  * run's settings take it: iCIMS's email-first account step (taken only with
  * INTERNSHIP_AGENT_ICIMS_ACCOUNTS on an automatic run) and Jobvite's

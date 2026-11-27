@@ -851,6 +851,37 @@ describe("real ATS labels, contact fields, choices, and type-aheads (Lever, Ashb
     expect(required.decisions[0]!.action).toBe("pause");
   });
 
+  it("answers current-location questions from the profile, a city of residence from the profile city, and leaves office and work-location choices paused (Track 71)", () => {
+    const result = plan([
+      control({ tag: "input", type: "text", id: "location", label: "Location", required: true }),
+      control({ tag: "input", type: "text", id: "located", label: "Where are you located?", required: true }),
+      control({ tag: "input", type: "text", id: "reside-city", label: "What city do you currently reside in?", required: true }),
+      control({ tag: "input", type: "text", id: "live-city", label: "Which city do you live in?", required: true }),
+      control({ tag: "select", id: "office-first", label: "Which of the following office locations would be your first preference?", required: true, options: ["Berkeley, California", "Exampleville, Texas"] }),
+      control({ tag: "select", id: "applying-for", label: "Which location are you applying for?", required: true, options: ["Berkeley, California", "Exampleville, Texas"] }),
+      control({ tag: "select", id: "program-location", label: "Where would you be located during the internship program?", required: true, options: ["United States", "Canada"] }),
+      control({ tag: "input", type: "text", id: "work-city", label: "What city would you like to work in?", required: true }),
+      control({ tag: "input", type: "text", id: "preferred-office", label: "Preferred office", required: true })
+    ]);
+    expect(Object.fromEntries(result.decisions.map((decision) => [decision.fieldId, [decision.action, decision.value]]))).toEqual({
+      location: ["fill", "Berkeley, California"], located: ["fill", "Berkeley, California"],
+      "reside-city": ["fill", "Berkeley"], "live-city": ["fill", "Berkeley"],
+      "office-first": ["pause", null], "applying-for": ["pause", null], "program-location": ["pause", null],
+      "work-city": ["pause", null], "preferred-office": ["pause", null]
+    });
+    expect(result.decisions.find((decision) => decision.fieldId === "location")!.basis).toEqual({ kind: "profile", field: "currentLocation" });
+    expect(result.decisions.find((decision) => decision.fieldId === "reside-city")!.basis).toEqual({ kind: "profile", field: "addressCity" });
+    // With no city and state on the profile, a saved question-memory answer is typed into a Location type-ahead instead.
+    const remembered = planAutofill(recognizeForm("https://jobs.ashbyhq.com/fixture/1/application", "Apply", [
+      control({ tag: "input", type: "text", ref: "ia-control-1", label: "Location", required: true, widget: "autocomplete" })
+    ]), {
+      profile: {},
+      resolutions: new Map([["ia-control-1", { status: "REMEMBERED_ANSWER", answerId: "answer-1", answer: "Fixture City, CA", answerKey: "fixture city ca", answerKind: "text" } as const]]),
+      packageAnswers: [], variantId: null
+    });
+    expect(remembered.decisions[0]).toMatchObject({ action: "choose", value: "Fixture City, CA", basis: { kind: "question_answer", answerId: "answer-1" } });
+  });
+
   it("matches a suggestion exactly or uniquely, never by guessing", () => {
     expect(matchSuggestion("Seattle", ["Seattle", "Seattle, Washington, United States"])).toBe("Seattle");
     expect(matchSuggestion("South San Francisco", ["South San Francisco, California, United States", "San Francisco, California, United States"]))

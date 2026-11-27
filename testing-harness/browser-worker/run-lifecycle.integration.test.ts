@@ -3175,10 +3175,14 @@ describe("retrying a browser run", () => {
 describe("posting pages behind an Apply link", () => {
   const POSTING_URL = "https://careers.fixturerobotics.example/jobs/1001";
   type Step = { url: string; controls: RawControl[]; body?: string };
-  /** A posting page with no form whose followApplyEntry lands on `next` (or finds no entry when `next` is null). */
-  function postingPage(next: Step | null) {
+  /**
+   * A posting page with no form whose followApplyEntry lands on `next` (or finds no entry when `next` is null);
+   * `start`, when given, replaces the posting page's address, controls, and text (the title stays).
+   */
+  function postingPage(next: Step | null, start?: Step) {
     const state: { url: string; controls: RawControl[]; body?: string; title: string } = {
-      url: POSTING_URL, controls: [{ tag: "button", label: "Apply" }], body: "Robotics Software Intern\nApply", title: "Robotics Software Intern"
+      url: POSTING_URL, controls: [{ tag: "button", label: "Apply" }], body: "Robotics Software Intern\nApply", title: "Robotics Software Intern",
+      ...start
     };
     const page = fakePage(state);
     const follows: string[] = [];
@@ -3209,6 +3213,16 @@ describe("posting pages behind an Apply link", () => {
       { tag: "input", type: "submit", label: "Next" }
     ],
     body: "Enter Your Information\nEmail\nI agree\nSoftware Powered by iCIMS"
+  };
+  /** An iCIMS posting page inside a fictional career-site wrapper: its own boxes are a site search and a newsletter signup. */
+  const icimsPostingStep: Step = {
+    url: "https://careers-fixture.icims.com/jobs/9003/job",
+    controls: [
+      { tag: "input", type: "text", id: "s", label: "Search" },
+      { tag: "input", type: "email", id: "email-00000000-0000-4000-8000-000000000001", label: "Email*", required: true },
+      { tag: "input", type: "submit", label: "Submit" }
+    ],
+    body: "Search\nSign up for our newsletter\nEmail*\nSubmit\nAI Engineering Intern"
   };
   const jobviteStep: Step = {
     url: "https://jobs.jobvite.com/fixturerobotics/job/oFixture1/apply",
@@ -3248,6 +3262,31 @@ describe("posting pages behind an Apply link", () => {
     const stopped = automaticStart(database, jobId, page);
     await expect(stopped).rejects.toBeInstanceOf(AutomaticRunStopped);
     await expect(stopped).rejects.toThrow(/iCIMS needs an account at careers-fixture\.icims\.com/);
+    expect(page.filled.size).toBe(0);
+    expect(getBrowserRuns(jobId, database)).toEqual([]);
+    database.close();
+  });
+
+  it("follows an iCIMS posting's Apply entry past the career site's newsletter box to the account step", async () => {
+    const database = disposableDatabase();
+    const jobId = qualifiedExternalJob(database);
+    const page = postingPage(icimsStep, icimsPostingStep);
+    const stopped = automaticStart(database, jobId, page);
+    await expect(stopped).rejects.toBeInstanceOf(AutomaticRunStopped);
+    await expect(stopped).rejects.toThrow(/iCIMS needs an account at careers-fixture\.icims\.com/);
+    expect(page.follows).toEqual(["https://careers-fixture.icims.com/jobs/9003/job"]);
+    expect(page.filled.size).toBe(0);
+    expect(getBrowserRuns(jobId, database)).toEqual([]);
+    database.close();
+  });
+
+  it("never saves a run from an iCIMS posting's newsletter box when no Apply entry is found", async () => {
+    const database = disposableDatabase();
+    const jobId = qualifiedExternalJob(database);
+    const page = postingPage(null, icimsPostingStep);
+    const stopped = automaticStart(database, jobId, page);
+    await expect(stopped).rejects.toBeInstanceOf(AutomaticRunStopped);
+    await expect(stopped).rejects.toThrow(/No application form was found/);
     expect(page.filled.size).toBe(0);
     expect(getBrowserRuns(jobId, database)).toEqual([]);
     database.close();

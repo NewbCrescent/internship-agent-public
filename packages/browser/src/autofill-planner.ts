@@ -6,6 +6,7 @@ import type {
 } from "@internship-agent/domain";
 import { citizenAuthorizationOption, factOption, FACT_OPTION_KEYS, samePlace, savedYesNoOption, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
 import { asksForAllSchools, asksForHighSchool, schoolsAttendedLines, type EducationRow, type HighSchoolPlace } from "@internship-agent/domain";
+import { clipDecisionText } from "@internship-agent/domain";
 import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, fieldOfStudyCategoryOption, isStandardAnswerKey, matchOfferedOption, namedSchoolRelation, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption } from "@internship-agent/domain";
 
 import { classifyFieldRole, classifyUploadRole, isSensitiveRole } from "./ats/field-roles";
@@ -851,7 +852,9 @@ function skip(field: BrowserField, reason: string): FillDecision {
 }
 
 function pauseDecision(field: BrowserField, pause: FillDecision["pause"]): FillDecision {
-  return { fieldId: field.id, action: "pause", value: null, basis: null, reason: pause?.question ?? "Paused.", pause };
+  // Every planner pause is bounded here (Track 72): a question quoting a long label and a long saved answer (the coursework list) failed the whole run.
+  const bounded = pause ? { ...pause, question: clipDecisionText(pause.question) } : null;
+  return { fieldId: field.id, action: "pause", value: null, basis: null, reason: bounded?.question ?? "Paused.", pause: bounded };
 }
 
 /** "United States" matches exactly one "United States +1" / "United States (+1)" / "+1 (United States)" option of a phone-country list. */
@@ -1455,7 +1458,7 @@ const CONTACT_LABELS: Array<{ key: ContactKey; pattern: RegExp }> = [
   { key: "legalLastName", pattern: /^(legal )?(last|family|last\/family) name$|^surname$/ },
   { key: "addressLine1", pattern: /^(street )?address( line)? ?1$|^street address$|^address$/ },
   { key: "addressLine2", pattern: /^address( line)? ?2$|^(apartment|apt|suite|unit)(,? (suite|unit|etc\.?))*$/ },
-  { key: "addressCity", pattern: /^city$|^town\/city$|^city\/town$/ },
+  { key: "addressCity", pattern: /^city$|^town\/city$|^city\/town$|^(?:what|which) city do you (?:currently )?(?:reside|live) in\??$|^(?:current )?city of residence$/ },
   { key: "addressRegion", pattern: /^(state|province|region)$|^state\/province$|^state or province$|^(?:what|which) state do you (?:currently )?(?:reside|live) in\??$|^(?:current )?state of residence$|^state abbreviation$/ },
   { key: "addressPostalCode", pattern: /^(postal|zip)( code)?$|^zip\/postal code$|^postal\/zip code$/ },
   { key: "addressCountry", pattern: /^country$|^country \/ territory$|^country\/territory$|^(?:phone )?country(?: phone| dialing)? code(?: picker)?$/ },
