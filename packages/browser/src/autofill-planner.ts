@@ -4,7 +4,7 @@ import type {
   PauseRecord,
   RecognizedForm
 } from "@internship-agent/domain";
-import { factOption, FACT_OPTION_KEYS, samePlace, savedYesNoOption, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
+import { citizenAuthorizationOption, factOption, FACT_OPTION_KEYS, samePlace, savedYesNoOption, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
 import { asksForAllSchools, asksForHighSchool, schoolsAttendedLines, type EducationRow, type HighSchoolPlace } from "@internship-agent/domain";
 import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, fieldOfStudyCategoryOption, isStandardAnswerKey, matchOfferedOption, namedSchoolRelation, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption } from "@internship-agent/domain";
 
@@ -16,7 +16,15 @@ import { isListSearchBox, isSafeguardField, isSignupField, stripRequiredMarker }
 import { standingFieldDecision, textMessageConsentDecision, type StandingInputs } from "./standing-fields";
 
 export type FieldResolution =
-  | { status: "RESOLVED"; key: string; scope: string; display: string; value: boolean | string }
+  | {
+      status: "RESOLVED";
+      key: string;
+      scope: string;
+      display: string;
+      value: boolean | string;
+      /** (Track 62) the candidate saved U.S. citizenship as Yes and this is a Yes to U.S. work authorization; it may pick the one option citizenship makes true. */
+      usCitizen?: true;
+    }
   | { status: "NEEDS_INPUT"; key: string | null; scope: string | null }
   | {
       status: "UNAVAILABLE";
@@ -440,6 +448,10 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
           ?? (resolution.key === "pronouns" ? matchPronounOption(resolution.display, field.options) : undefined)
           ?? (standardAnswerOption(resolution.key, resolution.value, field.options) ?? undefined)
         : undefined;
+      if (offered === undefined) {
+        const citizen = citizenOption(field, resolution);
+        if (citizen) return suggest(field, citizen, CITIZEN_BASIS);
+      }
       return suggest(field, offered ?? resolution.display, { kind: "fact", key: resolution.key, scope: resolution.scope });
     }
     if ((field.kind === "select" || field.kind === "radio") && field.options) {
@@ -448,6 +460,10 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
       ) ?? (resolution.key === "pronouns" ? matchPronounOption(resolution.display, field.options) : undefined)
         ?? (standardAnswerOption(resolution.key, resolution.value, field.options) ?? undefined)
         ?? (savedYesNoOption(resolution.key, resolution.value, field.options) ?? undefined);
+      if (!match) {
+        const citizen = citizenOption(field, resolution);
+        if (citizen) return { fieldId: field.id, action: "choose", value: citizen, basis: CITIZEN_BASIS, reason: CITIZEN_OPTION_REASON, pause: null };
+      }
       if (!match && isStandardAnswerKey(resolution.key)) {
         // A legal or background answer is never echoed in the pause.
         return pauseDecision(field, {
@@ -748,6 +764,14 @@ const TEXT_KINDS: ReadonlySet<BrowserField["kind"]> = new Set(["text", "email", 
 const CHOICE_KINDS: ReadonlySet<BrowserField["kind"]> = new Set(["radio", "checkbox", "select", "file"]);
 
 /** A type-ahead: the value is typed and the matching suggestion picked by the executor (matchSuggestion). */
+const CITIZEN_BASIS = { kind: "fact", key: "us_citizen", scope: "global" } as const;
+const CITIZEN_OPTION_REASON = "Your saved U.S. citizenship answer makes this the one true work-authorization option.";
+
+/** (Track 62) The one work-authorization option the saved U.S. citizenship makes true, for a U.S. authorization Yes marked `usCitizen`; null otherwise. */
+function citizenOption(field: BrowserField, resolution: Extract<FieldResolution, { status: "RESOLVED" }>): string | null {
+  return resolution.usCitizen && resolution.value === true && field.options?.length ? citizenAuthorizationOption(field.options) : null;
+}
+
 function suggest(field: BrowserField, value: string, basis: FillDecision["basis"]): FillDecision {
   return {
     fieldId: field.id,

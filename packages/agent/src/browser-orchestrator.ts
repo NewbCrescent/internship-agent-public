@@ -150,7 +150,7 @@ import { assertHandshakeSignedIn } from "./handshake-session-service";
 import { applyVoiceDrafts, createDefaultVoiceDrafter, draftSourcesFor, type VoiceDrafter } from "./voice-drafting";
 import { createDefaultPauseReviewer, type PauseReviewer } from "./pause-review";
 import { AutomaticRunStopped, IcimsAccountHeld, PostingClosed, WorkdayAccountHeld, WorkdayEntryStopped } from "./run-errors";
-import { postingLocationNames, postingQuestionContext, savedSelfIdentification } from "./saved-answers";
+import { postingLocationNames, postingQuestionContext, savedSelfIdentification, usCitizenSettles } from "./saved-answers";
 import {
   failureStop,
   fillStops,
@@ -746,7 +746,8 @@ async function resolveFields(
         key: resolution.fact.key,
         scope: scopeKey(resolution.fact.scope),
         display: resolution.displayAnswer,
-        value: resolution.fact.value as boolean | string
+        value: resolution.fact.value as boolean | string,
+        ...(usCitizenSettles(database, LOCAL_CANDIDATE_ID, resolution.fact) ? { usCitizen: true as const } : {})
       });
     } else if (resolution.status === "NEEDS_INPUT" && resolution.mapping) {
       resolutions.set(field.id, {

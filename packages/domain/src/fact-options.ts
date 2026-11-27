@@ -13,8 +13,12 @@ import { booleanOption } from "./standard-answers";
  * ("Spring/Summer 2028") or a degree level with a date range ("Bachelors -
  * Junior (December 2027 - June 2028)"; Track 57). A saved Yes/No work
  * authorization or relocation willingness picks the one option that starts
- * with its Yes or No and says nothing more (Track 57). Each rule returns
- * null rather than guess, so the field pauses.
+ * with its Yes or No and says nothing more (Track 57). When several options
+ * start with Yes, a saved relocation Yes picks the one Yes option that names
+ * relocating and says nothing more, a saved U.S. citizenship picks the one
+ * work-authorization option citizenship makes true (citizenAuthorizationOption),
+ * and `relocationQuestionParts` reads what else a relocation question asks
+ * (Track 62). Each rule returns null rather than guess, so the field pauses.
  */
 
 /** Keys whose saved value picks an offered option by a rule (planner: factOptionDecision). */
@@ -121,15 +125,114 @@ const BEYOND_RELOCATION = /\b(?:own|expenses?|costs?|assist\w*|support\w*|reimbu
 /**
  * The option a saved Yes/No work authorization or relocation willingness picks when no option is exactly "Yes"/"No"
  * (Track 57): the one option that starts with the saved Yes or No (booleanOption) and says nothing beyond it; null
- * when none or several start so, or the option names more (sponsorship, citizenship, restrictions, an employer;
- * who pays, commuting, living nearby). Other keys return null.
+ * when none start so, or the option names more (sponsorship, citizenship, restrictions, an employer; who pays,
+ * commuting, living nearby). When several options start with Yes, a saved relocation Yes picks the one that names
+ * relocating and says nothing more ("Yes: I am willing to relocate" beside "Yes: I live nearby or the role is
+ * remote"; Track 62); otherwise null. Other keys return null.
  */
 export function savedYesNoOption(key: string, value: boolean | string, options: readonly string[]): string | null {
   if (typeof value !== "boolean") return null;
   const beyond = key === "authorized_to_work" ? BEYOND_AUTHORIZATION : key === "willing_to_relocate" ? BEYOND_RELOCATION : null;
   if (!beyond) return null;
   const option = booleanOption(value, options);
-  return option && !beyond.test(optionKey(option)) ? option : null;
+  if (option) return !beyond.test(optionKey(option)) ? option : null;
+  if (key !== "willing_to_relocate" || value !== true) return null;
+  const plain = options.filter((candidate) => {
+    const text = optionKey(candidate);
+    return /^yes\b/.test(text) && /\brelocat\w*/.test(text) && !BEYOND_RELOCATION.test(text);
+  });
+  return plain.length === 1 ? plain[0]! : null;
+}
+
+// An option that affirms work authorization: it starts with a Yes, "Authorized", "Eligible", "Unrestricted" or "U.S. citizen", or says "I am authorized / eligible / permitted / a citizen".
+const CITIZEN_AFFIRMS = [
+  /^(?:yes|authori[sz]ed|eligible|unrestricted|(?:u\.?s\.? )?citizen)\b/,
+  /\b(?:i am|i'm|i have)\b.{0,30}\b(?:authori[sz]ed|eligible|permitted|the (?:legal )?right|a (?:u\.?s\.? )?citizen)\b/
+];
+// Words citizenship does not settle: a No or a negation, restrictions or a time limit, one employer, a visa or permit class, an unknown status, a clearance or export-control status, another country.
+const CITIZEN_DENIES = [
+  /^no\b/,
+  /\bnot\b.{0,25}\b(?:authori[sz]ed|eligible|permitted|legally|able|a citizen)\b/,
+  /\b(?:restrict(?:ed|ion|ions|s)?|limited|fixed|temporar\w*|conditional|time[- ]limited|expir\w*)\b/,
+  /\brequir\w*\b.{0,30}\b(?:extensions?|renewals?)\b/,
+  /\b(?:present|current|my|one|a single|specific|this)\s+employer\b/,
+  /\b(?:opt|cpt|h-?1b|f-?1|j-?1|tn visa|e-?3|ead|daca|tps|asylum|asylee|refugee|work permit)\b/,
+  /\b(?:pending|unknown|unsure|not sure|other|explain|prefer not)\b/,
+  /\b(?:clearances?|export\w*|itar|u\.?s\.? persons?)\b/,
+  /\b(?:canada|united kingdom|uk|britain|european union|eu|mexico|india|australia|germany|ireland|china|japan)\b/
+];
+const SPONSORSHIP = /\bsponsor\w*|\bvisas?\b/;
+const NO_SPONSORSHIP = /\b(?:will not|won't|do not|don't|does not|doesn't|never|without)\b.{0,30}\b(?:sponsor\w*|visas?)\b/;
+const PERMANENT_RESIDENCE = /\b(?:permanent resident\w*|lawful permanent|green card)\b/;
+const NATIONAL = /\bnationals?\b/;
+const CITIZEN_WORD = /\bcitizen\w*/;
+// A qualified or changing claim ("… now but will in the future", "until …"): citizenship does not make the whole option true.
+const CITIZEN_CHANGING_CLAIM = /\b(?:but|however|although|though|until|except|unless)\b/;
+// A need for sponsorship, a visa or another status later ("I will need it later", "may require sponsorship in the future").
+const CITIZEN_FUTURE_NEED = /\b(?:will|may|might|could|would|expect to|going to|plan to)\s+(?:(?:eventually|later|soon|also)\s+)?(?:need|require)\b/;
+
+function citizenSettles(key: string): boolean {
+  if (!CITIZEN_AFFIRMS.some((pattern) => pattern.test(key))) return false;
+  if (CITIZEN_DENIES.some((pattern) => pattern.test(key))) return false;
+  if (CITIZEN_CHANGING_CLAIM.test(key) || CITIZEN_FUTURE_NEED.test(key)) return false;
+  if (SPONSORSHIP.test(key) && !NO_SPONSORSHIP.test(key)) return false;
+  if (PERMANENT_RESIDENCE.test(key) && !CITIZEN_WORD.test(key)) return false;
+  if (NATIONAL.test(key) && !CITIZEN_WORD.test(key)) return false;
+  return true;
+}
+
+/**
+ * The one U.S. work-authorization option that U.S. citizenship makes true (Track 62; the candidate's statement,
+ * 2026-11-27: "I am a citizen"): an option that affirms authorization and names nothing citizenship does not settle
+ * (restrictions or a time limit, one employer, a visa or permit class, needed sponsorship, permanent residence or
+ * nationality alone, a clearance or export-control status, another country, an unknown status, a qualified or changing
+ * claim (but, until, unless …) or a need stated for later). Never an option
+ * citizenship does not settle; null when none or several qualify. Placeholders ("Select One") never qualify.
+ */
+export function citizenAuthorizationOption(options: readonly string[]): string | null {
+  const hits = options.filter((option) => citizenSettles(optionKey(option)));
+  return hits.length === 1 ? hits[0]! : null;
+}
+
+const RELOCATION_ON_SITE = /\b(?:in[- ]office|on[- ]?site|in[- ]person|office|hybrid)\b|\b(?:\d+|one|two|three|four|five)\s+days?\s+(?:a|per|each|every)\s+week\b/;
+const RELOCATION_LOCAL_WORDS = /\b(?:commut\w*|located|live|living|lives|reside|residing|resident|based|nearby|near|local(?:ly)?)\b/;
+const RELOCATION_DISJUNCTION = [
+  /\b(?:commut\w*|located|live|living|reside|residing|based|nearby|near|local)\b.{0,80}?\b(?:or|if not)\b.{0,40}?\brelocat/,
+  /\brelocat\w*.{0,40}?\bor\b.{0,80}?\b(?:commut\w*|located|live|living|reside|residing|based|nearby|near|local)\b/
+];
+const RELOCATION_TEMPORARY = /\btemporar\w*/;
+const RELOCATION_LATER = /\bpermanent\w*|\bfull[- ]?time (?:role|position|job|offer|employment|opportunit\w*)\b|\bupon (?:completion|graduation)\b|\bafter (?:you )?graduat\w*|\bpost[- ]?graduat\w*/;
+const RELOCATION_SUPPORT = /\b(?:support|assistance|assist|reimburs\w*|packages?|stipends?|housing|expenses?|costs?|pay for|own expense)\b/;
+const RELOCATION_DATES = [
+  /\b(?:january|february|march|april|june|july|august|september|october|november|december|jan|feb|apr|jun|jul|aug|sept?|oct|nov|dec)\b/,
+  /\bmay\b(?=\s*(?:-|to\b|through\b|and\b|or\b|\d))|\b(?:between|from|in|starting|until|through|by|of)\s+may\b/,
+  /\b(?:\d+|one|two|three|four|five|six|eight|ten|twelve)[- ](?:consecutive[- ])?(?:weeks?|months?)\b/,
+  /\b20\d\d\b/,
+  /\b\d{1,2}\/\d{1,2}\b/
+];
+const RELOCATION_REMOTE = /\bremote(?:ly)?\b/;
+
+/**
+ * What else a relocation question asks besides relocating (Track 62): `onSite` when it names office or on-site work
+ * or a number of days a week, `local` when it offers living nearby or commuting joined to relocating by "or", and
+ * `held` the reason a part the saved relocation answer cannot settle stays open (a temporary or permanent move, who
+ * pays, stated dates or lengths, remote work, or living nearby asked alongside relocating). Only the relocation part
+ * is answered from the saved relocation answer.
+ */
+export function relocationQuestionParts(question: string): { onSite: boolean; local: boolean; held: string | null } {
+  const text = optionKey(question);
+  const onSite = RELOCATION_ON_SITE.test(text);
+  const localWords = RELOCATION_LOCAL_WORDS.test(text);
+  const disjunction = RELOCATION_DISJUNCTION.some((pattern) => pattern.test(text));
+  const local = localWords && disjunction;
+  let held: string | null = null;
+  if (RELOCATION_TEMPORARY.test(text)) held = "It asks about a temporary move.";
+  else if (RELOCATION_LATER.test(text)) held = "It asks about a permanent move or one after the internship.";
+  else if (RELOCATION_SUPPORT.test(text)) held = "It also says who pays for the move or what support comes with it.";
+  else if (RELOCATION_DATES.some((pattern) => pattern.test(text))) held = "It also asks about your availability on stated dates or for a stated length.";
+  else if (RELOCATION_REMOTE.test(text)) held = "It also asks about remote work.";
+  else if (localWords && !disjunction) held = "It also asks whether you already live nearby or can commute.";
+  return { onSite, local, held };
 }
 
 const LOCAL = /\b(?:located|live|living|reside|residing|based)\b.{0,40}\b(?:in|near|within|close to|around)\b/;

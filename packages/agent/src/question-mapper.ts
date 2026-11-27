@@ -1,6 +1,6 @@
 import { isHearAboutQuestion } from "@internship-agent/browser";
-import { mentionsCompany, mentionsCompanyLead, mentionsSiteTenant, normalizeCompanyName, type CandidateFactKey, type FactScope, type QuestionContext, type QuestionMapping } from "@internship-agent/domain";
-import { readPlace } from "@internship-agent/jobs";
+import { mentionsCompany, mentionsCompanyLead, mentionsSiteTenant, normalizeCompanyName, relocationQuestionParts, type CandidateFactKey, type FactScope, type QuestionContext, type QuestionMapping } from "@internship-agent/domain";
+import { readPlace, readWellKnownCity } from "@internship-agent/jobs";
 
 import { mapStandardQuestion } from "./standard-question-mapper";
 
@@ -15,7 +15,8 @@ const PREVIOUS_EMPLOYMENT = /\b(?:(?:have|had)\s+you\s+(?:ever\s+)?(?:previously
 const COURSEWORK = /\b(?:relevant|related|completed|applicable)\s+(?:course\s*work|courses|classes)\b|\bcourse\s*work\b|\b(?:courses|classes)\s+(?:that\s+)?(?:you(?:'ve|\s+have)?\s+)?(?:taken|completed)\b|\b(?:which|what|list(?:\s+any)?)\s+(?:relevant\s+)?(?:courses|classes)\b/i;
 // Grades, GPA, transcripts, credit counts, and non-academic courses are never answered with the course list.
 const NOT_COURSEWORK = /\b(?:gpa|grade|grades|graded|grading|grade\s+point|marks?|scores?|transcripts?|credits?|units|honou?rs|online|certifications?|certificates?|bootcamps?|training)\b/i;
-const ELIGIBLE_TO_WORK = /\b(?:legally )?eligible to work\b|\blegally (?:able|permitted) to work\b/i;
+// "Are you legally eligible for employment in the United States?" (Track 62) is work authorization; eligibility for work-study is not.
+const ELIGIBLE_TO_WORK = /\b(?:legally )?eligible (?:to work|for (?:employment|work(?![- ]?study)))\b|\blegally (?:able|permitted) to work\b/i;
 // "Eligible to work" also opens government, export-control, and clearance questions, which only their own saved answers decide.
 const NOT_WORK_AUTHORIZATION = /\b(?:government|federal|public sector|dod|department of defense|defen[cs]e|export\w*|itar|ear|citizen\w*|u\.?\s?s\.? (?:person|national)|clearances?|security|contracts?|contractors?|projects?)\b/i;
 const AUTHORIZED_TO_WORK = /\b(?:legally )?authori[sz]ed to work\b|\bwork authori[sz]ation\b/i;
@@ -81,11 +82,21 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
 
     // Relocation is recorded per country: a named place readable as a country,
     // else the question's own country words, else the posting's one country.
+    // The named destination is cleaned of what follows it ("for the Summer
+    // internship", "(June-August)") and dropped when it is a purpose ("meet this
+    // requirement") or an unnamed site ("the site location"); a stored pause's
+    // `context.location` is cleaned the same way (Track 62). A plain relocation
+    // question that also asks about on-site work, living nearby, or another part
+    // (relocationQuestionParts) is broader: only a saved Yes answers it.
     if (/\b(relocat(?:e|ion|ing)|move)\b/i.test(normalized)) {
       const ownExpense = OWN_EXPENSE.test(normalized);
       const relocationKey: CandidateFactKey = ownExpense ? "willing_to_relocate_at_own_expense" : "willing_to_relocate";
       const suffix = ownExpense ? " (at own expense)" : "";
-      const named = context.location ?? extractRelocationLocation(trimmed);
+      const parts = relocationKey === "willing_to_relocate" ? relocationQuestionParts(trimmed) : null;
+      const broader = parts !== null && (parts.onSite || parts.local || parts.held !== null);
+      const broaderFields = broader ? { broader: true } : {};
+      const broaderNote = broader ? " Asks more than relocation; only a saved Yes answers it." : "";
+      const named = relocationPlace(context.location ?? extractRelocationLocation(trimmed));
       if (named) {
         const country = countryOfPlace(named);
         if (country) {
@@ -95,7 +106,8 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
             scope: { kind: "country", code: country },
             confidence: 0.96,
             method: "deterministic",
-            explanation: `Relocation question naming ${named}, a place in ${country}${suffix}.`
+            explanation: `Relocation question naming ${named}, a place in ${country}${suffix}.${broaderNote}`,
+            ...broaderFields
           };
         }
         return {
@@ -104,7 +116,8 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
           scope: { kind: "location", name: named },
           confidence: 0.98,
           method: "deterministic",
-          explanation: `Relocation question scoped to ${named}${suffix}.`
+          explanation: `Relocation question scoped to ${named}${suffix}.${broaderNote}`,
+          ...broaderFields
         };
       }
       const country = relocationCountry(trimmed, context);
@@ -117,7 +130,8 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
         scope: { kind: "country", code: country },
         confidence: 0.95,
         method: "deterministic",
-        explanation: `General relocation question for ${country}${suffix}.`
+        explanation: `General relocation question for ${country}${suffix}.${broaderNote}`,
+        ...broaderFields
       };
     }
 
@@ -390,6 +404,43 @@ function countryOfPlace(place: string): string | null {
     else if (reading?.kind === "country") codes.add(reading.code);
   }
   return codes.size === 1 ? [...codes][0]! : null;
+}
+
+const PLACE_TAIL = /\s*\(.*$|\s+(?:for|during|starting|beginning|from|by|within|until|through)\b.*$/i;
+// A destination that is a purpose ("meet this requirement"), not a place.
+const PLACE_PURPOSE = /^(?:meet|fulfil+|satisfy|comply|accommodate|work|join|start|begin|attend|support|complete|perform|participate|be)\b/i;
+// An unnamed site ("the site location", "the role's primary site location", "our office").
+const GENERIC_PLACE = /^(?:the|our|your|this|that|a|an)\s+(?:(?:role|job|position|company|team|internship)(?:'s|’s)?\s+)?(?:(?:primary|main|nearest|assigned|work)\s+)?(?:site|office|worksite|work site|location|headquarters|hq|campus|facility)\b/i;
+
+/**
+ * A relocation destination without what follows it ("Fixture Bay for the Summer internship (June-August)" is
+ * "Fixture Bay"); null when nothing usable is left, it is a purpose ("meet this requirement"), or an unnamed site
+ * ("the site location") (Track 62).
+ */
+function relocationPlace(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const place = raw.replace(PLACE_TAIL, "").trim().replace(/[,;:]+$/, "").trim();
+  if (place.length < 2 || place.length > 120) return null;
+  if (PLACE_PURPOSE.test(place) || GENERIC_PLACE.test(place)) return null;
+  return place;
+}
+
+/**
+ * Whether a relocation question's named place is inside the United States (Track 62): a place readable as the
+ * U.S. ("Austin, TX"); else, when posting places share its city name, only when every one of them is in the U.S.;
+ * else a well-known U.S. city ("Denver"). A same-name posting place in another country refuses.
+ */
+export function placeInUnitedStates(name: string, context: QuestionContext): boolean {
+  const key = cityKey(name);
+  if (!key) return false;
+  if (countryOfPlace(name) === "US") return true;
+  const same = (context.postingPlaces ?? []).filter((place) => cityKey(place.city) === key);
+  if (same.length > 0) return same.every((place) => place.countryCode.toUpperCase() === "US");
+  return readWellKnownCity(name)?.code === "US";
+}
+
+function cityKey(name: string): string {
+  return name.normalize("NFKC").toLocaleLowerCase("en-US").replace(/\s+/g, " ").trim().replace(/[.,;:!?]+$/, "").trim();
 }
 
 /** A pause answer's country, then the question's own country words, then the posting's one stated country. */

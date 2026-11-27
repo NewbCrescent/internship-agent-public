@@ -13,6 +13,11 @@ export const questionContextSchema = z.object({
   companyName: z.string().trim().min(1).max(200).optional(),
   /** The posting's one stated country; used only by relocation questions. */
   postingCountryCode: z.string().trim().length(2).transform((value) => value.toUpperCase()).optional(),
+  /** The posting's cities with their countries (Track 62); read only to tell whether a relocation question's named city is inside the United States. */
+  postingPlaces: z.array(z.object({
+    city: z.string().trim().min(1).max(120),
+    countryCode: z.string().trim().length(2).transform((value) => value.toUpperCase())
+  })).max(50).optional(),
   /** The form field's kind, when the question comes from a browser run's field. */
   fieldKind: browserFieldKindSchema.optional(),
   /** The posting's stated pay; only the salary rule reads it. */

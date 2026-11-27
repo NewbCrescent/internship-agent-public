@@ -322,6 +322,72 @@ describe("re-checking held stops after a saved answer", () => {
   });
 });
 
+describe("U.S. citizenship and U.S.-wide relocation answer held stops (Track 62)", () => {
+  // Fictional wordings and options shaped like the held runs' (2026-11-26).
+  const FIVE_DAYS = "This position requires you to work 5 days per week for the duration of the internship. Are you currently located in, or willing to relocate to Fixture Bay?";
+  const SUMMER = "Can you relocate to Fixture Bay for the Summer internship (June-August)?";
+  const AUTHORIZED = "Are you legally authorized to work in the United States?";
+  const STATUSES = [
+    "I am authorized to work in the United States for any employer",
+    "I am authorized to work in the United States for my present employer",
+    "I require sponsorship to work in the United States",
+    "I am not authorized to work in the United States",
+    "My status to work in the United States is unknown",
+    "If Other, please explain:"
+  ];
+
+  // The job's-country wording a posting outside the United States stores with its own country scope.
+  const JOB_COUNTRY = "Are you legally authorized to work in the country in which this job is located?";
+  const JOB_COUNTRY_STATUSES = [
+    "I am authorized to work in this country for any employer",
+    "I am authorized to work in this country for my present employer",
+    "I require sponsorship to work in this country"
+  ];
+
+  function citizenWorkspace(countryCode: "US" | "CA"): Workspace {
+    const ws = workspace();
+    ws.database.prepare("UPDATE job_locations SET city = 'Fixture Bay', country_code = ? WHERE job_id = ?").run(countryCode, ws.jobId);
+    saveFact(ws.database, { key: "willing_to_relocate", scope: { kind: "country", code: "US" }, value: true });
+    saveFact(ws.database, { key: "work_arrangement", scope: { kind: "global" }, value: true });
+    saveFact(ws.database, { key: "us_citizen", scope: { kind: "global" }, value: true });
+    return ws;
+  }
+
+  async function heldStops(ws: Workspace, authorization: PauseRecord): Promise<BrowserRun> {
+    const run = await start(ws, [pythonSelect(), submitButton]);
+    return heldRun(ws, run, [
+      questionPause(FIVE_DAYS, "relocate", { fieldKind: "radio", suggestedKey: "willing_to_relocate", suggestedScope: "location:fixture bay" }),
+      authorization,
+      questionPause(SUMMER, "summer", { fieldKind: "radio", suggestedKey: "willing_to_relocate", suggestedScope: "location:fixture bay for the summer internship (june-august)" })
+    ]);
+  }
+
+  it("matches the relocation and authorization stops on a U.S. posting and writes nothing on a dry run", async () => {
+    const ws = citizenWorkspace("US");
+    expect(getJobPosting(ws.database, ws.jobId)!.locations.some((location) => location.city === "Fixture Bay" && location.countryCode === "US")).toBe(true);
+    const held = await heldStops(ws, questionPause(AUTHORIZED, "authorized", { fieldKind: "radio", suggestedKey: "authorized_to_work", suggestedScope: "country:US", options: STATUSES }));
+    const before = ws.database.prepare("SELECT id, updated_at, pauses_json FROM browser_runs ORDER BY id").all();
+    const result = await recheckRunPauses(ws.database, held.id, { apply: false });
+    expect(result.matches.map((match) => [match.fieldId, match.kind])).toEqual([["relocate", "saved_fact"], ["authorized", "standard_answer"]]);
+    expect(result.left.map((entry) => entry.label)).toEqual([SUMMER]);
+    expect(ws.database.prepare("SELECT id, updated_at, pauses_json FROM browser_runs ORDER BY id").all()).toEqual(before);
+    expect(aliasRows(ws.database)).toEqual([]);
+    ws.database.close();
+  });
+
+  it("matches neither stop on a posting outside the United States", async () => {
+    const ws = citizenWorkspace("CA");
+    saveFact(ws.database, { key: "authorized_to_work", scope: { kind: "country", code: "CA" }, value: true });
+    const held = await heldStops(ws, questionPause(JOB_COUNTRY, "authorized", {
+      fieldKind: "radio", suggestedKey: "authorized_to_work", suggestedScope: "country:CA", options: JOB_COUNTRY_STATUSES
+    }));
+    const result = await recheckRunPauses(ws.database, held.id, { apply: false });
+    expect(result.matches).toEqual([]);
+    expect(result.left.map((entry) => entry.label)).toEqual([FIVE_DAYS, JOB_COUNTRY, SUMMER]);
+    ws.database.close();
+  });
+});
+
 describe("recorded wordings never widen a saved answer's scope", () => {
   it("answers an unmapped wording through a country-scoped fact only on a posting in that country", async () => {
     const ws = workspace();

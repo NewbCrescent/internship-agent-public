@@ -20,6 +20,7 @@ import {
   formatFactValue,
   localCalendarDate,
   parseFactAnswer,
+  relocationQuestionParts,
   rememberAnswerInputSchema,
   STANDARD_ANSWER_KEYS,
   type CandidatePreferenceInput,
@@ -31,7 +32,7 @@ import {
 } from "@internship-agent/domain";
 
 import { courseworkAnswerFact } from "./coursework";
-import { DeterministicQuestionMapper, type SemanticQuestionMapper } from "./question-mapper";
+import { DeterministicQuestionMapper, placeInUnitedStates, type SemanticQuestionMapper } from "./question-mapper";
 import { formerEmployerNamed, resolveStandardAnswer } from "./standard-answers";
 
 export function getCandidateWorkspace(database: DatabaseSync = getDatabase()) {
@@ -106,11 +107,13 @@ export async function resolveCandidateQuestion(
   // A channel- or company-scoped question may use the global answer when the
   // channel or company has none of its own. The reverse never happens: a
   // channel or company answer is not visible to global questions, other
-  // channels, or other companies.
+  // channels, or other companies. A relocation question naming a U.S. place
+  // may use the saved U.S.-wide relocation Yes (usWideRelocationFact).
   const fact = getCurrentFact(database, LOCAL_CANDIDATE_ID, mapping.key, mapping.scope)
     ?? (mapping.scope.kind === "application_channel" || mapping.scope.kind === "company"
       ? getCurrentFact(database, LOCAL_CANDIDATE_ID, mapping.key, { kind: "global" })
-      : null);
+      : null)
+    ?? usWideRelocationFact(database, mapping, context);
   if (!fact) {
     return {
       status: "NEEDS_INPUT",
@@ -118,6 +121,11 @@ export async function resolveCandidateQuestion(
       mapping,
       reason: `No remembered ${factDefinitions[mapping.key].label.toLocaleLowerCase("en-US")} fact exists for this scope.`
     };
+  }
+  // A relocation question that also asks something the saved relocation answer does not settle stays with the candidate (Track 62).
+  if (mapping.key === "willing_to_relocate") {
+    const held = relocationPartsHold(database, question);
+    if (held) return { status: "NEEDS_INPUT", question, mapping, reason: held };
   }
   // A No never answers a previous-employment question that names a company the candidate has a saved Yes for.
   if (mapping.key === "previously_worked_here" && fact.value === false && formerEmployerNamed(database, LOCAL_CANDIDATE_ID, question)) {
@@ -139,6 +147,36 @@ export async function resolveCandidateQuestion(
     fact,
     displayAnswer: formatFactValue(fact.value)
   }, mapping);
+}
+
+/**
+ * The saved U.S.-wide relocation Yes for a relocation question naming a place inside the United States (Track 62;
+ * the candidate's words, 2026-11-27: "Yes I would relocate anywhere in the US"). One way only: the place's own
+ * answer is read first, a city answer never answers the country, a saved No never widens, and a place in another or
+ * an unknown country gets nothing.
+ */
+function usWideRelocationFact(database: DatabaseSync, mapping: MappedQuestion, context: QuestionContext) {
+  if (mapping.key !== "willing_to_relocate" || mapping.scope.kind !== "location") return null;
+  if (!placeInUnitedStates(mapping.scope.name, context)) return null;
+  const fact = getCurrentFact(database, LOCAL_CANDIDATE_ID, "willing_to_relocate", { kind: "country", code: "US" });
+  return fact && fact.value === true && fact.source === "user" ? fact : null;
+}
+
+/**
+ * Why a relocation question's other parts keep it paused (Track 62): a temporary or permanent move, who pays,
+ * stated dates, remote work, or living nearby not joined by "or" (relocationQuestionParts), or an on-site part
+ * without a saved Yes to on-site work. Null when only the relocation part is left.
+ */
+function relocationPartsHold(database: DatabaseSync, question: string): string | null {
+  const parts = relocationQuestionParts(question);
+  if (parts.held) return parts.held;
+  if (parts.onSite) {
+    const onSite = getCurrentFact(database, LOCAL_CANDIDATE_ID, "work_arrangement", { kind: "global" });
+    if (!onSite || onSite.value !== true || onSite.reusePolicy !== "auto") {
+      return "It also asks about working on site, and no saved answer says you are open to it.";
+    }
+  }
+  return null;
 }
 
 /**

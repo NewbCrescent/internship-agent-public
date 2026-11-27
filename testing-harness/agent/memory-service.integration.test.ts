@@ -165,6 +165,64 @@ describe("company-, country-, and protected-scoped answers", () => {
     database.close();
   });
 
+  it("answers a relocation question naming a U.S. place from the saved U.S.-wide Yes, one way only (Track 62)", async () => {
+    const database = workspace();
+    save(database, "willing_to_relocate", { kind: "country", code: "US" }, true);
+    const usPosting: QuestionContext = { postingCountryCode: "US", postingPlaces: [{ city: "Fixture Bay", countryCode: "US" }] };
+    expect(await resolveCandidateQuestion("Are you willing to relocate to Fixture Bay?", usPosting, { database })).toMatchObject({
+      status: "RESOLVED", displayAnswer: "Yes", fact: { scope: { kind: "country", code: "US" } }
+    });
+    // A well-known U.S. city counts when no posting place has its name.
+    expect(await resolveCandidateQuestion("Would you relocate to Denver?", {}, { database })).toMatchObject({
+      status: "RESOLVED", displayAnswer: "Yes", fact: { scope: { kind: "country", code: "US" } }
+    });
+    // Another or an unknown country gets nothing; a same-name city outside the U.S. refuses.
+    expect(await resolveCandidateQuestion("Would you relocate to Fixture Harbour?", { postingPlaces: [{ city: "Fixture Harbour", countryCode: "CA" }] }, { database }))
+      .toMatchObject({ status: "NEEDS_INPUT" });
+    expect(await resolveCandidateQuestion("Would you relocate to Toronto?", {}, { database })).toMatchObject({ status: "NEEDS_INPUT" });
+    expect(await resolveCandidateQuestion("Would you relocate to Fixture Bay?", {
+      postingPlaces: [{ city: "Fixture Bay", countryCode: "US" }, { city: "Fixture Bay", countryCode: "CA" }]
+    }, { database })).toMatchObject({ status: "NEEDS_INPUT" });
+    // The city's own answer wins over the U.S.-wide one.
+    save(database, "willing_to_relocate", { kind: "location", name: "Fixture Bay" }, false);
+    expect(await resolveCandidateQuestion("Are you willing to relocate to Fixture Bay?", usPosting, { database })).toMatchObject({
+      status: "RESOLVED", displayAnswer: "No", fact: { scope: { kind: "location", name: "Fixture Bay" } }
+    });
+    database.close();
+
+    // A saved U.S.-wide No never widens to a city.
+    const refused = workspace();
+    save(refused, "willing_to_relocate", { kind: "country", code: "US" }, false);
+    expect(await resolveCandidateQuestion("Are you willing to relocate to Fixture Bay?", usPosting, { database: refused })).toMatchObject({ status: "NEEDS_INPUT" });
+    refused.close();
+  });
+
+  it("answers a compound relocation question only when its other parts are settled (Track 62)", async () => {
+    const database = workspace();
+    save(database, "willing_to_relocate", { kind: "country", code: "US" }, true);
+    const usPosting: QuestionContext = { postingCountryCode: "US", postingPlaces: [{ city: "Fixture Bay", countryCode: "US" }] };
+    const fiveDays = "This position requires you to work 5 days per week for the duration of the internship. Are you currently located in, or willing to relocate to Fixture Bay?";
+    const inOffice = "This role is fully in-office, five days a week. Are you able to meet this requirement, and/or are you open to relocating to meet this requirement?";
+    // Without a saved on-site Yes, the on-site part holds it.
+    expect(await resolveCandidateQuestion(fiveDays, usPosting, { database })).toMatchObject({ status: "NEEDS_INPUT" });
+    save(database, "work_arrangement", { kind: "global" }, true);
+    expect(await resolveCandidateQuestion(fiveDays, usPosting, { database })).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
+    expect(await resolveCandidateQuestion(inOffice, { postingCountryCode: "US" }, { database })).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
+    // Stated dates and a temporary move stay with the candidate.
+    expect(await resolveCandidateQuestion("Can you relocate to Fixture Bay for the Summer internship (June-August)?", usPosting, { database })).toMatchObject({
+      status: "NEEDS_INPUT", reason: "It also asks about your availability on stated dates or for a stated length."
+    });
+    expect(await resolveCandidateQuestion("Will you be willing to commute/drive or temporarily relocate to state/cities where there is a Fixture Dynamics office in your region during the program?NOTE: Fixture Dynamics does not provide relocation support or housing.", usPosting, { database }))
+      .toMatchObject({ status: "NEEDS_INPUT" });
+    expect(await resolveCandidateQuestion("Would you be willing to temporarily relocate?", usPosting, { database }))
+      .toMatchObject({ status: "NEEDS_INPUT", reason: "It asks about a temporary move." });
+    // An answer typed for a compound question is used once and never saved.
+    const before = factCount(database);
+    expect(await answerCandidateQuestion({ question: fiveDays, answer: "yes", remember: true, context: usPosting }, { database })).toMatchObject({ status: "ANSWERED_ONCE" });
+    expect(factCount(database)).toBe(before);
+    database.close();
+  });
+
   it("answers age thresholds one way only: 18-or-older Yes answers 16-or-older, 16-or-older No answers 18-or-older, never the reverse (Track 57)", async () => {
     const sixteen = "Are you 16 years or older?";
     const eighteen = "Are you 18 or older?";

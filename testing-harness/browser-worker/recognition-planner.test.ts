@@ -2770,4 +2770,64 @@ describe("known answers on Veeva's Lever and OpenSesame's Greenhouse forms (Trac
     expect(bachelor.decisions[0]!.basis).toEqual({ kind: "fact", key: "graduation_date", scope: "global" });
     expect(actions(plan([ranges], { resolutions: new Map([["level", graduation]]), education: { degree: "M.S. Computer Science" } }))).toEqual({ level: ["pause", null] });
   });
+
+  it("picks the one work-authorization option a saved U.S. citizenship makes true, and the relocating Yes among several (Track 62)", () => {
+    // Fictional option lists shaped like the held Workday and Greenhouse runs' (2026-11-26).
+    const ELIGIBLE = [
+      "Select One",
+      "Yes, I am eligible for employment in the US (includes US Citizenship & Permanent Residency).",
+      "Yes, I am legally eligible to work in the US but I require Fixture Dynamics to sponsor or support a work visa now OR in the future.",
+      "No, I am not eligible for US employment."
+    ];
+    const UNRESTRICTED = [
+      "Select One",
+      "Yes, on an unrestricted and indefinite basis (regardless of extensions/renewals)",
+      "Yes, with restrictions and/or for a fixed time period (requiring extensions/renewals for right-to-work maintenance)",
+      "No"
+    ];
+    const STATUSES = [
+      "I am authorized to work in the United States for any employer",
+      "I am authorized to work in the United States for my present employer",
+      "I require sponsorship to work in the United States",
+      "I am not authorized to work in the United States",
+      "My status to work in the United States is unknown",
+      "If Other, please explain:"
+    ];
+    const TWO = ["Yes, I am a U.S. citizen", "I am authorized to work for any employer", "No"];
+    const CITIZEN = { kind: "fact", key: "us_citizen", scope: "global" };
+    const citizen = { status: "RESOLVED", key: "authorized_to_work", scope: "country:US", display: "Yes", value: true, usCitizen: true } as const;
+    const plain = { status: "RESOLVED", key: "authorized_to_work", scope: "country:US", display: "Yes", value: true } as const;
+    const select = (options: string[]) => control({ tag: "select", id: "auth", label: "Are you legally eligible for employment in the United States?*", required: true, options });
+    const radio = (options: string[]) => control({ tag: "input", type: "radio", id: "auth", label: "Are you legally authorized to work in the United States?*", required: true, options });
+    const run = (field: RawControl, resolution: FieldResolution) => plan([field], { resolutions: new Map([["auth", resolution]]) });
+
+    const granite = run(select(ELIGIBLE), citizen);
+    expect(actions(granite)).toEqual({ auth: ["choose", ELIGIBLE[1]] });
+    expect(granite.decisions[0]!.basis).toEqual(CITIZEN);
+    expect(actions(run(select(UNRESTRICTED), citizen))).toEqual({ auth: ["choose", UNRESTRICTED[1]] });
+    const statuses = run(radio(STATUSES), citizen);
+    expect(actions(statuses)).toEqual({ auth: ["choose", STATUSES[0]] });
+    expect(statuses.decisions[0]!.basis).toEqual(CITIZEN);
+    expect(actions(run(select(TWO), citizen))).toEqual({ auth: ["pause", null] });
+    expect(actions(run(select(["Select One", "Yes, I do not require sponsorship now but will in the future", "No"]), citizen))).toEqual({ auth: ["pause", null] });
+    for (const options of [ELIGIBLE, UNRESTRICTED, STATUSES]) {
+      expect(actions(run(select(options), plain))).toEqual({ auth: ["pause", null] });
+    }
+
+    const searched = run(control({ tag: "select", widget: "autocomplete", id: "auth", label: "Are you legally eligible for employment in the United States?", required: true, options: ELIGIBLE }), citizen);
+    expect(actions(searched)).toEqual({ auth: ["choose", ELIGIBLE[1]] });
+    expect(searched.decisions[0]!.basis).toEqual(CITIZEN);
+
+    const unrestricted = { status: "RESOLVED", key: "unrestricted_us_work_authorization", scope: "global", display: "Yes", value: true, usCitizen: true } as const;
+    expect(actions(run(select(UNRESTRICTED), unrestricted))).toEqual({ auth: ["choose", UNRESTRICTED[1]] });
+
+    const relocate = control({
+      tag: "select", id: "relocate", label: "If this position requires being in the office, are you within a 60-minute commute or willing to relocate?", required: true,
+      options: ["Select One", "Yes: I live nearby or the role is remote", "Yes: I am willing to relocate", "No"]
+    });
+    const willing = { status: "RESOLVED", key: "willing_to_relocate", scope: "country:US", display: "Yes", value: true } as const;
+    const moved = plan([relocate], { resolutions: new Map([["relocate", willing]]) });
+    expect(actions(moved)).toEqual({ relocate: ["choose", "Yes: I am willing to relocate"] });
+    expect(moved.decisions[0]!.basis).toEqual({ kind: "fact", key: "willing_to_relocate", scope: "country:US" });
+  });
 });

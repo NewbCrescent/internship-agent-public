@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { agreeOption, factOption, graduationRangeOption, graduationTermMonths, graduationTermOption, relocationOption, samePlace, savedYesNoOption, startBucketOption, startWindowDays } from "@internship-agent/domain";
+import { agreeOption, citizenAuthorizationOption, factOption, graduationRangeOption, graduationTermMonths, graduationTermOption, relocationOption, relocationQuestionParts, samePlace, savedYesNoOption, startBucketOption, startWindowDays } from "@internship-agent/domain";
 
 /** Deterministic option rules for saved facts (2026-11-24); fictional option lists and places. */
 const BUCKETS = ["Immediately", "2 weeks", "2–4 weeks", "4–6 weeks", "6+ weeks"];
@@ -216,12 +216,96 @@ describe("saved Yes/No options (savedYesNoOption, Track 57)", () => {
   it("picks the one plain relocation option, never one naming who pays, commuting, or living nearby", () => {
     expect(savedYesNoOption("willing_to_relocate", true, ["Select One", "Yes, I am willing to relocate.", "No, I am not willing to relocate.", "I am open to relocation."]))
       .toBe("Yes, I am willing to relocate.");
-    expect(savedYesNoOption("willing_to_relocate", true, ["Yes: I live nearby or the role is remote", "Yes: I am willing to relocate", "No"])).toBeNull();
     expect(savedYesNoOption("willing_to_relocate", true, ["Yes, at my own expense", "No"])).toBeNull();
+  });
+
+  it("picks the one Yes option naming relocating when several start with Yes (Track 62)", () => {
+    const NEARBY = ["Yes: I live nearby or the role is remote", "Yes: I am willing to relocate", "No"];
+    expect(savedYesNoOption("willing_to_relocate", true, NEARBY)).toBe("Yes: I am willing to relocate");
+    expect(savedYesNoOption("willing_to_relocate", false, NEARBY)).toBe("No");
+    expect(savedYesNoOption("willing_to_relocate", true, ["Yes, I am willing to relocate", "Yes, I would relocate", "No"])).toBeNull();
+    expect(savedYesNoOption("authorized_to_work", true, ["Yes, on an unrestricted and indefinite basis", "Yes, with restrictions", "No"])).toBeNull();
   });
 
   it("decides no other key and no string value", () => {
     expect(savedYesNoOption("requires_sponsorship", true, AUTHORIZED)).toBeNull();
     expect(savedYesNoOption("authorized_to_work", "yes", AUTHORIZED)).toBeNull();
+  });
+});
+
+describe("work-authorization option U.S. citizenship makes true (citizenAuthorizationOption, Track 62)", () => {
+  // Fictional lists shaped like the held runs' Workday and Greenhouse options (2026-11-26).
+  const ELIGIBLE = [
+    "Select One",
+    "Yes, I am eligible for employment in the US (includes US Citizenship & Permanent Residency).",
+    "Yes, I am legally eligible to work in the US but I require Fixture Dynamics to sponsor or support a work visa now OR in the future.",
+    "No, I am not eligible for US employment."
+  ];
+  const UNRESTRICTED = [
+    "Select One",
+    "Yes, on an unrestricted and indefinite basis (regardless of extensions/renewals)",
+    "Yes, with restrictions and/or for a fixed time period (requiring extensions/renewals for right-to-work maintenance)",
+    "No"
+  ];
+  const STATUSES = [
+    "I am authorized to work in the United States for any employer",
+    "I am authorized to work in the United States for my present employer",
+    "I require sponsorship to work in the United States",
+    "I am not authorized to work in the United States",
+    "My status to work in the United States is unknown",
+    "If Other, please explain:"
+  ];
+
+  it("picks the one option citizenship makes true", () => {
+    expect(citizenAuthorizationOption(ELIGIBLE)).toBe(ELIGIBLE[1]);
+    expect(citizenAuthorizationOption(UNRESTRICTED)).toBe(UNRESTRICTED[1]);
+    expect(citizenAuthorizationOption(STATUSES)).toBe(STATUSES[0]);
+    expect(citizenAuthorizationOption(["Yes, I am authorized and will not require sponsorship", "No"])).toBe("Yes, I am authorized and will not require sponsorship");
+  });
+
+  it("returns null when several qualify or none citizenship settles", () => {
+    expect(citizenAuthorizationOption(["Yes, I am a U.S. citizen", "I am authorized to work for any employer", "No"])).toBeNull();
+    expect(citizenAuthorizationOption(["Yes, I am a permanent resident", "No"])).toBeNull();
+    expect(citizenAuthorizationOption(["Yes, I hold an active security clearance", "No"])).toBeNull();
+    expect(citizenAuthorizationOption(["I am authorized to work in Canada for any employer", "No"])).toBeNull();
+    expect(citizenAuthorizationOption(["Select One", "Please select", "No"])).toBeNull();
+  });
+
+  it("returns null for a qualified or changing claim or a need stated for later (Track 62 round 2)", () => {
+    expect(citizenAuthorizationOption(["Yes, I do not require sponsorship now but will in the future", "No"])).toBeNull();
+    expect(citizenAuthorizationOption(["Yes, I do not currently require sponsorship but may in the future", "No"])).toBeNull();
+    expect(citizenAuthorizationOption(["Yes, I do not require sponsorship today; I will need it later", "No"])).toBeNull();
+    expect(citizenAuthorizationOption(["Yes, I am authorized to work until my status expires", "No"])).toBeNull();
+    expect(citizenAuthorizationOption(["Yes, I will not require sponsorship now or in the future", "No"])).toBe("Yes, I will not require sponsorship now or in the future");
+    expect(citizenAuthorizationOption(["Yes, I am authorized to work in the US and do not require sponsorship", "No"])).toBe("Yes, I am authorized to work in the US and do not require sponsorship");
+  });
+});
+
+describe("what else a relocation question asks (relocationQuestionParts, Track 62)", () => {
+  it("reads on-site and nearby-or-relocate parts without holding them", () => {
+    expect(relocationQuestionParts("This position requires you to work 5 days per week for the duration of the internship. Are you currently located in, or willing to relocate to Fixture Bay?"))
+      .toEqual({ onSite: true, local: true, held: null });
+    expect(relocationQuestionParts("This role is fully in-office, five days a week. Are you able to meet this requirement, and/or are you open to relocating to meet this requirement?"))
+      .toEqual({ onSite: true, local: false, held: null });
+    expect(relocationQuestionParts("If this position requires being in the office, are you within a 60-minute commute or willing to relocate?"))
+      .toEqual({ onSite: true, local: true, held: null });
+  });
+
+  it("holds parts the saved relocation answer cannot settle", () => {
+    const AVAILABILITY = "It also asks about your availability on stated dates or for a stated length.";
+    expect(relocationQuestionParts("Can you relocate to Fixture Bay for the Summer internship (June-August)?").held).toBe(AVAILABILITY);
+    expect(relocationQuestionParts("Are you available and willing to relocate to the site location for the full duration of a 12-consecutive-week, in-person internship starting between May and July?").held).toBe(AVAILABILITY);
+    expect(relocationQuestionParts("Will you be willing to commute/drive or temporarily relocate to state/cities where there is a Fixture Dynamics office in your region during the program?NOTE: Fixture Dynamics does not provide relocation support or housing.").held)
+      .toBe("It asks about a temporary move.");
+    expect(relocationQuestionParts("If offered a full-time role upon completion of your degree, would you be willing to relocate permanently?").held)
+      .toBe("It asks about a permanent move or one after the internship.");
+    expect(relocationQuestionParts("Do you live within 50 miles of Fixture Bay and are you willing to relocate?").held)
+      .toBe("It also asks whether you already live nearby or can commute.");
+    expect(relocationQuestionParts("Are you willing to relocate? Relocation assistance is not provided.").held)
+      .toBe("It also says who pays for the move or what support comes with it.");
+  });
+
+  it("reads nothing more in a plain relocation question", () => {
+    expect(relocationQuestionParts("Are you willing to relocate?")).toEqual({ onSite: false, local: false, held: null });
   });
 });

@@ -637,4 +637,34 @@ describe("known-answer gaps from the 2026-11-26 pass (Track 43)", () => {
     expect(await mapper.map(highest)).not.toMatchObject({ key: "graduation_date" });
     expect(await mapper.map("What is your expected graduation date?")).toMatchObject({ status: "MAPPED", key: "graduation_date" });
   });
+
+  it("maps eligibility for employment to work authorization, never federal or work-study eligibility (Track 62)", async () => {
+    expect(await mapper.map("3. Are you legally eligible for employment in the United States? (Proof of identity and employment eligibility will be required within 3 days of hire).")).toMatchObject({
+      status: "MAPPED", key: "authorized_to_work", scope: { kind: "country", code: "US" }
+    });
+    expect(await mapper.map("Are you eligible for employment with the federal government?")).not.toMatchObject({ key: "authorized_to_work" });
+    expect(await mapper.map("Are you eligible for work-study?", { postingCountryCode: "US" })).not.toMatchObject({ key: "authorized_to_work" });
+  });
+
+  it("cleans relocation destinations and marks relocation questions that ask more (Track 62)", async () => {
+    expect(await mapper.map("Can you relocate to Fixture Bay for the Summer internship (June-August)?")).toMatchObject({
+      status: "MAPPED", key: "willing_to_relocate", scope: { kind: "location", name: "Fixture Bay" }, broader: true
+    });
+    const inOffice = "This role is fully in-office, five days a week. Are you able to meet this requirement, and/or are you open to relocating to meet this requirement?";
+    expect(await mapper.map(inOffice, { postingCountryCode: "US" })).toMatchObject({
+      status: "MAPPED", key: "willing_to_relocate", scope: { kind: "country", code: "US" }, broader: true
+    });
+    expect(await mapper.map(inOffice, { postingCountryCode: "US", location: "meet this requirement" })).toMatchObject({
+      status: "MAPPED", key: "willing_to_relocate", scope: { kind: "country", code: "US" }
+    });
+    expect(await mapper.map("Can you relocate to Fixture Bay for the Summer internship (June-August)?", { location: "fixture bay for the summer internship (june-august)" })).toMatchObject({
+      status: "MAPPED", key: "willing_to_relocate", scope: { kind: "location", name: "fixture bay" }
+    });
+    expect(await mapper.map("Are you willing to relocate to the site location?", { postingCountryCode: "US" })).toMatchObject({
+      status: "MAPPED", key: "willing_to_relocate", scope: { kind: "country", code: "US" }
+    });
+    const plain = await mapper.map("Are you willing to relocate?", { postingCountryCode: "US" });
+    expect(plain).toMatchObject({ status: "MAPPED", key: "willing_to_relocate" });
+    expect(plain.status === "MAPPED" ? plain.broader : "unmapped").toBeUndefined();
+  });
 });
