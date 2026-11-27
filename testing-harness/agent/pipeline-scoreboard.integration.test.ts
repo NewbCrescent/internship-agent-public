@@ -25,6 +25,10 @@ import {
   blockerId,
   buildScoreboard,
   normalizeStopReason,
+  passBoardLine,
+  pruneScoreboardSnapshots,
+  refreshScoreboardSnapshot,
+  SNAPSHOT_RETENTION_COUNT,
   snapshotFileName,
   stopReasonCategory,
   type Scoreboard
@@ -404,6 +408,45 @@ describe("command", () => {
     expect(names).not.toContain(snapshotFileName(expired));
     expect(names).toContain(snapshotFileName(kept));
     expect(names).toContain(snapshotFileName(later(2)));
+  });
+
+  it("keeps at most the newest 200 snapshots as well as the 30-day window, since every pass saves one", () => {
+    const folder = join(dataDir(), "scoreboard");
+    mkdirSync(folder, { recursive: true, mode: 0o700 });
+    const minutes = (count: number) => new Date(NOW.getTime() - count * 60_000);
+    // 250 snapshots five minutes apart (under a day), one 31 days old, and files that are not snapshots.
+    for (let index = 0; index < 250; index += 1) writeFileSync(join(folder, snapshotFileName(minutes(index * 5 + 1))), "{}", { mode: 0o600 });
+    const expired = new Date(NOW.getTime() - 31 * 24 * HOUR);
+    writeFileSync(join(folder, snapshotFileName(expired)), "{}", { mode: 0o600 });
+    writeFileSync(join(folder, "claims.json"), JSON.stringify({ version: 1, claims: [], history: [] }), { mode: 0o600 });
+    writeFileSync(join(folder, "notes.txt"), "kept", { mode: 0o600 });
+
+    const removed = pruneScoreboardSnapshots(dataDir(), NOW);
+    expect(SNAPSHOT_RETENTION_COUNT).toBe(200);
+    expect(removed).toHaveLength(51);
+    expect(removed).toContain(snapshotFileName(expired));
+    const names = readdirSync(folder);
+    const kept = names.filter((name) => name.startsWith("snapshot-"));
+    expect(kept).toHaveLength(200);
+    expect(kept).toContain(snapshotFileName(minutes(1)));
+    expect(kept).toContain(snapshotFileName(minutes(199 * 5 + 1)));
+    expect(kept).not.toContain(snapshotFileName(minutes(200 * 5 + 1)));
+    expect(names).toContain("claims.json");
+    expect(names).toContain("notes.txt");
+
+    // The pass's refresh writes one more and keeps the bound.
+    const database = openSeed();
+    try {
+      const { board, saveError } = refreshScoreboardSnapshot({ database, dataDir: dataDir(), now: NOW });
+      expect(saveError).toBeNull();
+      expect(passBoardLine(board, saveError)).toBe("Board: 0 applications held; no blockers (snapshot saved)");
+    } finally {
+      database.close();
+    }
+    const after = readdirSync(folder).filter((name) => name.startsWith("snapshot-"));
+    expect(after).toHaveLength(200);
+    expect(after).toContain(snapshotFileName(NOW));
+    expect(after).not.toContain(snapshotFileName(minutes(199 * 5 + 1)));
   });
 
   it("claims, renews, refuses, releases with a reason, finishes, and takes over stale claims", async () => {

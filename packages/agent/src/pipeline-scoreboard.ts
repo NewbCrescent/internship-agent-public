@@ -33,6 +33,8 @@ import { claimAgeHours, claimIsStale, readScoreboardClaims, scoreboardDirectory 
 export const SCOREBOARD_DEFAULT_DAYS = 7;
 export const SCOREBOARD_MAX_DAYS = 90;
 export const SNAPSHOT_RETENTION_DAYS = 30;
+/** Every pipeline pass saves a snapshot, so the folder also keeps only the newest this many. */
+export const SNAPSHOT_RETENTION_COUNT = 200;
 
 const DAY_MS = 86_400_000;
 const LABEL_MAX = 140;
@@ -713,25 +715,59 @@ export function readPreviousSnapshot(dataDir: string, now: Date): ScoreboardSnap
   return null;
 }
 
-/** Removes snapshots more than SNAPSHOT_RETENTION_DAYS before `now`; returns the removed names and never throws. */
+/**
+ * Removes snapshots more than SNAPSHOT_RETENTION_DAYS before `now` and all but the newest
+ * SNAPSHOT_RETENTION_COUNT; returns the removed names and never throws.
+ */
 export function pruneScoreboardSnapshots(dataDir: string, now: Date): string[] {
   const removed: string[] = [];
   try {
     const cutoff = now.getTime() - SNAPSHOT_RETENTION_DAYS * DAY_MS;
-    for (const name of readdirSync(scoreboardDirectory(dataDir))) {
+    const snapshots = readdirSync(scoreboardDirectory(dataDir)).flatMap((name) => {
       const time = snapshotTime(name);
-      if (time === null || time >= cutoff) continue;
+      return time === null ? [] : [{ name, time }];
+    }).sort((a, b) => b.time - a.time || b.name.localeCompare(a.name));
+    snapshots.forEach(({ name, time }, index) => {
+      if (time >= cutoff && index < SNAPSHOT_RETENTION_COUNT) return;
       try {
         rmSync(join(scoreboardDirectory(dataDir), name), { force: true });
         removed.push(name);
       } catch {
         // Pruning never fails the command.
       }
-    }
+    });
   } catch {
     // A missing folder has nothing to prune.
   }
   return removed;
+}
+
+/**
+ * What every pipeline pass runs at its end: builds the board with the scoreboard command's
+ * code, saves its snapshot, and prunes the folder. A failed build throws; a failed save is
+ * returned as its error code, so the caller can log one line and carry on.
+ */
+export function refreshScoreboardSnapshot(input: { database: DatabaseSync; dataDir: string; now: Date }): { board: Scoreboard; saveError: string | null } {
+  const board = buildScoreboard({ database: input.database, dataDir: input.dataDir, now: input.now, days: SCOREBOARD_DEFAULT_DAYS });
+  try {
+    writeScoreboardSnapshot(input.dataDir, board);
+  } catch (error) {
+    return { board, saveError: error && typeof error === "object" && "code" in error ? String(error.code) : "write failed" };
+  }
+  pruneScoreboardSnapshots(input.dataDir, input.now);
+  return { board, saveError: null };
+}
+
+const PASS_BOARD_BLOCKERS = 3;
+const PASS_BOARD_LABEL_LIMIT = 80;
+
+/** The pass summary's one board line: held applications and the top blockers with their counts. */
+export function passBoardLine(board: Scoreboard, saveError: string | null): string {
+  const label = (text: string) => text.length > PASS_BOARD_LABEL_LIMIT ? `${text.slice(0, PASS_BOARD_LABEL_LIMIT - 1)}…` : text;
+  const top = board.blockers.slice(0, PASS_BOARD_BLOCKERS).map((blocker) => `${label(blocker.label)} ${blocker.applications}`);
+  return `Board: ${plural(board.heldApplications, "application")} held; `
+    + (top.length ? `top blockers: ${top.join(", ")}` : "no blockers")
+    + (saveError === null ? " (snapshot saved)" : ` (snapshot not saved: ${saveError})`);
 }
 
 /** The changes since `previous`; every label it returns is withheld when `matches` finds a candidate value in it. */

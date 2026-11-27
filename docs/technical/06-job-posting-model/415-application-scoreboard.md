@@ -29,7 +29,11 @@ The values are matched as whole words in memory only; short numbers and generic 
 Ruled-out reason heads are checked the same way.
 Labels read back from an older snapshot and claim labels and release reasons read from the claims file are checked the same way before they print.
 Blockers whose labels changed this way (history entries, sensitive questions, digits) get new ids, so the first run after the change shows them as cleared and new.
-Each run saves a snapshot under `<workspace data>/scoreboard/` (folder mode 700, file mode 600) unless `--no-save`, prints what grew and shrank since the previous snapshot, and prunes snapshots older than 30 days.
+Each run saves a snapshot under `<workspace data>/scoreboard/` (folder mode 700, file mode 600) unless `--no-save`, prints what grew and shrank since the previous snapshot, and prunes snapshots older than 30 days and all but the newest 200.
+Every pipeline pass (`pnpm pipeline:run`, the watcher's pass, and `pipeline:retry --start`) also builds the board with the same code at its end, after the hold refresh, saves its snapshot, prunes the folder the same way, and logs one line such as `Board: 3 applications held; top blockers: <label> 2, <label> 1 (snapshot saved)` (track 61).
+That line lists at most three blockers, each label cut at 80 characters, and is never sent to Discord.
+A board that cannot be built logs `Board: not refreshed (<error code>); the pass is unaffected.`, and a snapshot that cannot be saved ends the line with `(snapshot not saved: <code>)`; neither fails the pass.
+So the 200-snapshot cap holds about a day of passes, and "Since the last scoreboard" in a manual run compares with the last pass's snapshot.
 A fix track claims a blocker with `--claim <id> --track "<track>"`, which is refused for an id that is not on the current board.
 A track holds one claim at a time and renews it by claiming it again; a claim with no renewal for 24 hours shows as stale and another track may take it over.
 `--release <id> --reason "<text>"` gives the claim up with a stated reason, and `--done <id>` marks it finished.

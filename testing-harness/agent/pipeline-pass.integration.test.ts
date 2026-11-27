@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -420,6 +420,73 @@ describe("pipeline watcher pass", () => {
     expect(second).toContainEqual(expect.stringMatching(/^Analyzed 0 left over;/));
     expect(fetched).toEqual([LIST_URL, LIST_URL]);
     expect(boardFetches()).toEqual([null, null, null]);
+  });
+
+  it("refreshes the blocker board after every pass: one snapshot and one Board line per pass", async () => {
+    const dataDir = resolveProfileDataDirectory("real");
+    const database = createDatabase(resolveProfileDatabasePath("real"));
+    const pauseFields = { suggestedKey: null, suggestedScope: null, safeguard: false, sensitive: false, upload: false, status: "open" as const, answer: null, draft: null };
+    for (const [index, labels] of [["Are you over 18?", "What is your expected graduation term?"], ["Are you over 18?"]].entries()) {
+      const sourceUrl = `https://example.test/jobs/board-${index}`;
+      const { jobId } = persistNormalizedPosting(database, {
+        companyName: `Board Employer ${index}`, title: "Intern", employmentType: "INTERNSHIP", applicationType: "EXTERNAL_ATS",
+        sourceUrl, externalApplicationUrl: null, companyCareersUrl: null, contentHash: `board-${index}`, normalizedText: "Fixture application",
+        locations: [], compensation: null, requirements: [], technologies: [],
+        constraints: { graduation: null, authorization: null, sponsorship: null, availability: null }
+      });
+      setJobStatus(database, jobId, "DISCOVERED", "APPLYING");
+      const now = new Date().toISOString();
+      const packageId = randomUUID();
+      saveApplicationPackage(database, { id: packageId, jobId, createdAt: now, summary: "Fixture", answers: [], bullets: [], claims: [] });
+      saveBrowserRun(database, {
+        id: randomUUID(), jobId, applicationUrl: sourceUrl, status: "paused-needs-input", packageId, variantId: null, baseResumeId: null,
+        applicationProfile: "default", atsKind: "greenhouse", atsConfidence: 1, atsConfirmed: true, suggestedAtsKind: null,
+        pauses: labels.map((label) => ({ ...pauseFields, fieldId: randomUUID(), label, question: label })),
+        decisions: [], submittedAnswers: null, confirmationText: null, submissionApprovedAt: null, createdAt: now, updatedAt: now
+      });
+    }
+    database.close();
+    const advance = async (): Promise<PipelineReport> => ({ analyzed: [], prepared: [], started: [], stopped: [], waiting: [], held: [], skipped: [], submitted: [], errors: [] });
+    const snapshots = () => existsSync(join(dataDir, "scoreboard"))
+      ? readdirSync(join(dataDir, "scoreboard")).filter((name) => name.startsWith("snapshot-")) : [];
+    expect(snapshots()).toEqual([]);
+
+    const first: string[] = [];
+    await runPipelinePass({ profile: "real", sourceIds: [], log: (line) => first.push(line), advance });
+    expect(snapshots()).toHaveLength(1);
+    expect(first.filter((line) => line.startsWith("Board:")), first.join("\n")).toEqual([
+      'Board: 2 applications held; top blockers: question: "are you over 18" 2, question: "what is your expected graduation term" 1 (snapshot saved)'
+    ]);
+    const saved = JSON.parse(readFileSync(join(dataDir, "scoreboard", snapshots()[0]!), "utf8")) as { heldApplications: number; blockers: unknown[] };
+    expect(saved.heldApplications).toBe(2);
+    expect(saved.blockers).toHaveLength(2);
+    // The scoreboard reads the pass's own pipeline-status.json, written before the board.
+    expect(existsSync(join(dataDir, "pipeline-status.json"))).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second: string[] = [];
+    await runPipelinePass({ profile: "real", sourceIds: [], log: (line) => second.push(line), advance });
+    expect(snapshots()).toHaveLength(2);
+    expect(second.filter((line) => line.startsWith("Board:"))).toHaveLength(1);
+    expect(existsSync(join(dataDir, "pipeline.lock"))).toBe(false);
+  });
+
+  it("a board failure is one log line and never fails the pass", async () => {
+    const dataDir = resolveProfileDataDirectory("real");
+    const report: PipelineReport = { analyzed: [], prepared: [], started: [], stopped: [], waiting: [], held: [], skipped: [], submitted: [], errors: [] };
+    const advance = async () => report;
+    const lines: string[] = [];
+    const scoreboard = () => { throw Object.assign(new Error("no such table: browser_runs"), { code: "ERR_SQLITE_ERROR" }); };
+    await expect(runPipelinePass({ profile: "real", sourceIds: [], log: (line) => lines.push(line), advance, scoreboard })).resolves.toBe(report);
+    expect(lines.filter((line) => line.startsWith("Board:"))).toEqual(["Board: not refreshed (ERR_SQLITE_ERROR); the pass is unaffected."]);
+    expect(existsSync(join(dataDir, "pipeline.lock"))).toBe(false);
+    expect(existsSync(join(dataDir, "pipeline-status.json"))).toBe(true);
+
+    // A snapshot folder that cannot be written keeps the board line and the pass.
+    writeFileSync(join(dataDir, "scoreboard"), "not a folder");
+    const blocked: string[] = [];
+    await expect(runPipelinePass({ profile: "real", sourceIds: [], log: (line) => blocked.push(line), advance })).resolves.toBe(report);
+    expect(blocked.filter((line) => line.startsWith("Board:"))).toEqual(["Board: 0 applications held; no blockers (snapshot not saved: EEXIST)"]);
   });
 });
 

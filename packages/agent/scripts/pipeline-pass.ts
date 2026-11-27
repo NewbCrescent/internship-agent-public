@@ -17,6 +17,7 @@ import { discordFailureStatus, discordSettings, type DiscordTransport } from "..
 import { notifyPass, passNoticeItems, type NoticeItem } from "../src/pass-notice";
 import { recordApplicationHoldFailures, refreshApplicationHolds } from "../src/application-holds";
 import { dailyDigestTick, type DigestTickOptions } from "../src/daily-digest";
+import { passBoardLine, refreshScoreboardSnapshot } from "../src/pipeline-scoreboard";
 
 export type PassLog = (line: string) => void;
 
@@ -41,6 +42,8 @@ export async function runPipelinePass(options: {
   notify?: DiscordTransport;
   /** Tests inject the discovery time budget's clock; production uses Date.now. */
   discoveryClock?: () => number;
+  /** Tests replace the end-of-pass board refresh; production runs refreshScoreboardSnapshot. */
+  scoreboard?: typeof refreshScoreboardSnapshot;
 }): Promise<PipelineReport> {
   const { profile, log } = options;
   const dataDir = resolveProfileDataDirectory(profile);
@@ -159,6 +162,14 @@ export async function runPipelinePass(options: {
       }
     } catch (error) {
       safeLog(`Hold refresh failed: ${discordFailureStatus(error)}`);
+    }
+    // The blocker board and its snapshot, refreshed after every pass; a board failure is one line and never fails the pass.
+    try {
+      const { board, saveError } = (options.scoreboard ?? refreshScoreboardSnapshot)({ database, dataDir, now: new Date() });
+      safeLog(passBoardLine(board, saveError));
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : error instanceof Error ? error.name : "unexpected error";
+      safeLog(`Board: not refreshed (${code.slice(0, 40)}); the pass is unaffected.`);
     }
   } catch (error) {
     failure = { error };
