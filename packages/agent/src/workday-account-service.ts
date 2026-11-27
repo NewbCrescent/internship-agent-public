@@ -86,6 +86,9 @@ export function resolveWorkdayAccounts(
 const emailMatches = (candidateEmail: string | null | undefined, email: string) =>
   Boolean(candidateEmail) && candidateEmail!.trim().toLocaleLowerCase("en-US") === email.trim().toLocaleLowerCase("en-US");
 
+/** Mailbox reads in a row that find no verification email before the host stops (Workday's real emails arrive within seconds of the create, 2026-11-26). */
+const EMPTY_VERIFY_READS = 3;
+
 /** Retried email-verification holds wait 1 h, doubling per attempt, at most 24 h. */
 function verifyDue(at: string, attempts: number, now: Date): boolean {
   const wait = Math.min(86_400_000, 3_600_000 * 2 ** (attempts - 1));
@@ -260,6 +263,10 @@ export async function ensureWorkdayAccount(
       return unconfirmedFallback();
     }
     if (result.kind === "none") {
+      const previous = current?.hold;
+      if (previous?.kind === "verify-email" && previous.attempts + 1 >= EMPTY_VERIFY_READS) {
+        return hold("interrupted", `Workday ${host}: the agent found no verification email from Workday on ${previous.attempts + 1} checks since the account step (Workday's emails arrive within seconds), and Workday still does not let it sign in; the account may already exist with another password, or was never created. The agent stops trying and never resets passwords. ${YOURSELF}`);
+      }
       const minutes = Math.max(1, Math.round(timeoutMs / 60_000));
       return hold("verify-email", `Workday ${host}: verification email not found within ${minutes} minute${minutes === 1 ? "" : "s"}; the agent checks again on a later pass.`);
     }
@@ -300,7 +307,7 @@ export async function ensureWorkdayAccount(
         connected(`The agent signed in to ${company}'s Workday with the saved account.`, `Workday ${host}: signed in with the saved account.`);
         return "signed-in";
       case "verify-email":
-        if (afterVerify) return hold("verify-email", `Workday ${host}: Workday still asks to verify the email after the link was opened.`);
+        if (afterVerify) return hold("interrupted", `Workday ${host}: Workday still asks to verify the email after the agent opened the verification link, so the link may have expired; the agent does not open it again. Ask Workday for a new verification email on its sign-in page, then sign in yourself with Open sign-in on the Workday accounts page.`);
         return verifyFlow();
       case "wrong-password":
       case "no-account":
@@ -325,7 +332,9 @@ export async function ensureWorkdayAccount(
           }
           return hold("interrupted", `Workday ${host}: an earlier account creation did not finish, and Workday does not accept the saved password. ${YOURSELF}`);
         }
-        return hold("wrong-password", `Workday ${host}: Workday refused the saved password; the agent does not try it again. ${YOURSELF}`);
+        return hold("wrong-password", afterVerify
+          ? `Workday ${host}: Workday refused the saved password after the agent opened the verification link (the link may have expired, or the account was not created with this password); the agent does not try it again. ${YOURSELF}`
+          : `Workday ${host}: Workday refused the saved password; the agent does not try it again. ${YOURSELF}`);
       case "locked":
         return hold("locked", `Workday ${host}: Workday says the account is locked or disabled; the agent does not try again. ${YOURSELF}`);
       case "captcha":

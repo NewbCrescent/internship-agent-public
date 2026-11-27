@@ -20,7 +20,9 @@
  * header "Sign In" filter earlier on the page (decoy, synthetic); a plain-text
  * "not been verified" notice after the sign-in submit goes to the
  * verification email (notice); and a sign-in Workday ignores right after the
- * create goes to the verification email too (quiet). A sign-in form whose
+ * create goes to the verification email too (quiet). An HTML-only
+ * verification email that shows its link only as text, not in an href (the
+ * real email's structure), is found and opened too (html-text-link). A sign-in form whose
  * click filter is labelled "Submit" (submit-label, as rockwellautomation.wd1
  * draws it) is clicked through the filter over the form's own submit button
  * and signs in. Every account submit is clicked no sooner than one second
@@ -43,6 +45,10 @@
  * (opening the link holds the host for a later pass), and a refused sign-in
  * on a pass that retries a verify-email hold reads the mailbox again
  * (login-redirect, login-redirect-pending, login-redirect-late).
+ * A created account whose verification email never comes waits after the second empty mailbox read and is held as
+ * interrupted after the third, with no password typed on later passes, and after a link that no longer verifies is
+ * opened, a sign-in that still asks to verify holds as interrupted and a refused one as a refused password naming the
+ * opened link (no-email-waits, no-email-stops, link-unverified, link-refused).
  * Never reads process.env for accounts or Gmail.
  *
  * Usage: pnpm test:browser:workday-account
@@ -500,6 +506,24 @@ async function main(): Promise<void> {
     await opensFlow("quiet", quiet.page);
     mail = async () => [];
 
+    // Workday's real verification email is HTML-only and shows its activation link only as text
+    // (no href holds it): the link is still found and opened, and the agent signs in.
+    const htmlTextHost = "fixture-html-link.wd1.myworkdayjobs.com";
+    let htmlTextTab: Page | null = null;
+    mail = async (): Promise<MailMessage[]> => {
+      const token = htmlTextTab ? (await storedAccount(htmlTextTab))?.token ?? "" : "";
+      return [{
+        from: "Fixture Careers <fixture@otp.workday.com>", subject: "Verify your candidate account", receivedAt: new Date(), text: "",
+        html: `<table><tr><td><p>Please verify your candidate account.</p><p>https://${htmlTextHost}/External/activate/${token}</p><p><a href="http://www.workday.com">Workday</a></p></td></tr></table>`
+      }];
+    };
+    const htmlText = await scenario("html-text-link", htmlTextHost, "notice", { clock: virtualClock().clock }, (tab) => { htmlTextTab = tab; });
+    if (htmlText.result !== "signed-in" && htmlText.result !== "created") failures.push(`html-text-link: expected a sign-in, got ${htmlText.result ?? htmlText.error?.message}`);
+    if (!events().includes(`Workday ${htmlTextHost}: verification email found and opened.`)) failures.push("html-text-link: no verification event");
+    if (!(await storedAccount(htmlText.tab))?.verified) failures.push("html-text-link: the fixture account was not verified");
+    await opensFlow("html-text-link", htmlText.page);
+    mail = async () => [];
+
     // No answer within 60 seconds, but the account was created: one sign-in opens it.
     const silentHost = "fixture-silent.wd1.myworkdayjobs.com";
     const silent = await scenario("silent", silentHost, "silent", { clock: virtualClock().clock });
@@ -779,6 +803,79 @@ async function main(): Promise<void> {
     await opensFlow("login-redirect-late later pass", redirectLate.page);
     mail = async () => [];
 
+    // A created account whose verification email never comes (three real hosts, 2026-11-26): each pass's refused
+    // sign-in reads the mailbox again, the second empty read still waits, and the third holds the host as interrupted,
+    // after which no later pass types the password again.
+    const verifyHold = (host: string, attempts: number) => {
+      putWorkdayAccount(file, {
+        ...getWorkdayAccount(file, host)!,
+        hold: { kind: "verify-email", reason: `Workday ${host}: verification email not found within 1 minute; the agent checks again on a later pass.`, at: new Date(Date.now() - 3_600_000).toISOString(), attempts }
+      });
+    };
+    const noEmailWaitsHost = "fixture-no-email-waits.wd1.myworkdayjobs.com";
+    seedAccount(noEmailWaitsHost, "created");
+    verifyHold(noEmailWaitsHost, 1);
+    mail = async () => [];
+    const noEmailWaits = await scenario("no-email-waits", noEmailWaitsHost, "create&signin-error=generic");
+    held("no-email-waits", noEmailWaits, "verification email not found");
+    const noEmailWaitsEntry = getWorkdayAccount(file, noEmailWaitsHost);
+    if (noEmailWaitsEntry?.account !== "created" || noEmailWaitsEntry.hold?.kind !== "verify-email" || noEmailWaitsEntry.hold.attempts !== 2) {
+      failures.push(`no-email-waits: entry is ${noEmailWaitsEntry?.account} with hold ${noEmailWaitsEntry?.hold?.kind} (${noEmailWaitsEntry?.hold?.attempts})`);
+    }
+    mail = async () => [];
+
+    const noEmailStopsHost = "fixture-no-email-stops.wd1.myworkdayjobs.com";
+    seedAccount(noEmailStopsHost, "created");
+    verifyHold(noEmailStopsHost, 2);
+    mail = async () => [];
+    const noEmailStops = await scenario("no-email-stops", noEmailStopsHost, "create&signin-error=generic");
+    held("no-email-stops", noEmailStops, "never resets passwords");
+    const noEmailStopsEntry = getWorkdayAccount(file, noEmailStopsHost);
+    if (noEmailStopsEntry?.account !== "created" || noEmailStopsEntry.hold?.kind !== "interrupted" || noEmailStopsEntry.password !== SEEDED_PASSWORD) {
+      failures.push(`no-email-stops: entry is ${noEmailStopsEntry?.account} with hold ${noEmailStopsEntry?.hold?.kind}`);
+    }
+    const noEmailStopsState = await fixtureState(noEmailStops.tab);
+    if (noEmailStopsState.signIns !== 1 || noEmailStopsState.creates !== 0) {
+      failures.push(`no-email-stops: ${noEmailStopsState.signIns} sign-ins and ${noEmailStopsState.creates} creates`);
+    }
+    if (!events().includes(`Workday ${noEmailStopsHost}: Workday refused the sign-in while the account waits for email verification; the agent looks for the verification email.`)) {
+      failures.push("no-email-stops: no look-for-the-email event");
+    }
+    const noEmailStopsLater = await scenario("no-email-stops later pass", noEmailStopsHost, "create&signin-error=generic");
+    const noEmailStopsReason = getWorkdayAccount(file, noEmailStopsHost)?.hold?.reason;
+    if (!(noEmailStopsLater.error instanceof WorkdayAccountHeld) || noEmailStopsLater.error.message !== noEmailStopsReason) {
+      failures.push(`no-email-stops later pass: expected the stored hold, got ${noEmailStopsLater.result ?? noEmailStopsLater.error?.message}`);
+    }
+    const noEmailStopsLaterState = await fixtureState(noEmailStopsLater.tab);
+    if (noEmailStopsLaterState.signIns !== 0 || noEmailStopsLaterState.creates !== 0) {
+      failures.push(`no-email-stops later pass: ${noEmailStopsLaterState.signIns} sign-ins and ${noEmailStopsLaterState.creates} creates`);
+    }
+    if (workdayAccountWait(gate, noEmailStopsHost, EMAIL, new Date(Date.now() + 25 * 3_600_000)) === null) failures.push("no-email-stops: the gate opens after 25 hours");
+    mail = async () => [];
+
+    // A verification link that no longer verifies the account (synthetic stale token; no real expired-link page was
+    // captured): after opening it, a sign-in that still asks to verify holds as interrupted and the link is not reopened,
+    // and a refused sign-in holds as a refused password whose reason names the opened link.
+    const staleLink = (host: string) => async (): Promise<MailMessage[]> => [{
+      from: "Fixture Careers <fixture@otp.workday.com>", subject: "Verify your candidate account", receivedAt: new Date(), text: "",
+      html: `<table><tr><td><p>Please verify your candidate account.</p><p>https://${host}/External/activate/stalefixturetoken</p></td></tr></table>`
+    }];
+    const linkUnverifiedHost = "fixture-link-unverified.wd1.myworkdayjobs.com";
+    mail = staleLink(linkUnverifiedHost);
+    const linkUnverified = await scenario("link-unverified", linkUnverifiedHost, "notice", { clock: virtualClock().clock });
+    held("link-unverified", linkUnverified, "the link may have expired; the agent does not open it again");
+    if (getWorkdayAccount(file, linkUnverifiedHost)?.hold?.kind !== "interrupted") failures.push(`link-unverified: the hold is ${getWorkdayAccount(file, linkUnverifiedHost)?.hold?.kind}`);
+    if (!events().includes(`Workday ${linkUnverifiedHost}: verification email found and opened.`)) failures.push("link-unverified: no verification event");
+    if ((await storedAccount(linkUnverified.tab))?.verified) failures.push("link-unverified: the fixture account was verified by a stale link");
+    mail = async () => [];
+
+    const linkRefusedHost = "fixture-link-refused.wd1.myworkdayjobs.com";
+    mail = staleLink(linkRefusedHost);
+    const linkRefused = await scenario("link-refused", linkRefusedHost, "login-redirect", { clock: virtualClock(0).clock });
+    held("link-refused", linkRefused, "after the agent opened the verification link");
+    if (getWorkdayAccount(file, linkRefusedHost)?.hold?.kind !== "wrong-password") failures.push(`link-refused: the hold is ${getWorkdayAccount(file, linkRefusedHost)?.hold?.kind}`);
+    mail = async () => [];
+
     // No password anywhere it must not be.
     const passwords = Object.values(readWorkdayAccounts(file)).map((entry) => entry.password).filter((value): value is string => Boolean(value));
     if (passwords.length < 5) failures.push(`expected at least 5 saved passwords, found ${passwords.length}`);
@@ -799,7 +896,7 @@ async function main(): Promise<void> {
     console.error(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"failed","failures":${JSON.stringify(failures)}}`);
     process.exit(1);
   }
-  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":39}`);
+  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":44}`);
 }
 
 main().catch((error) => {

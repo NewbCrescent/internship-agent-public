@@ -1,5 +1,7 @@
 /**
  * Finds Workday's account-verification link in the candidate's mailbox.
+ * Links are read from `href` attributes and the plain-text part and, when a
+ * message gives none there, from URLs shown as text in its HTML body.
  * Messages are held in memory only; nothing about them is logged, stored, or
  * sent to a model. The mailbox itself sits behind `VerificationMailbox`, so
  * tests never reach a real mail server.
@@ -22,6 +24,7 @@ export type VerificationTarget = { host: string; tenant: string; company: string
 /** Messages received this long before the account was created still count (clock skew). */
 const SKEW_MS = 120_000;
 const VERIFY_PHRASE = /\b(verif\w*|activat\w*|confirm\w*)\b/i;
+const TEXT_LINK = /https:\/\/[^\s<>"')\]]+/g;
 
 function mentions(text: string, target: VerificationTarget): boolean {
   const lower = text.toLocaleLowerCase("en-US");
@@ -58,11 +61,24 @@ function decodeEntities(value: string): string {
   return value.replace(/&amp;/gi, "&").replace(/&#61;/g, "=").replace(/&#x3D;/gi, "=");
 }
 
+/** The HTML body's visible text: script and style dropped, tags as spaces, entities decoded (Workday's email shows its link only as text). */
+function visibleText(html: string): string {
+  return decodeEntities(html
+    .replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;|&#160;|&#xa0;/gi, " "));
+}
+
 function linksIn(message: MailMessage): string[] {
   const links: string[] = [];
   for (const match of message.html.matchAll(/href\s*=\s*["']([^"']+)["']/gi)) links.push(decodeEntities(match[1]!.trim()));
-  for (const match of message.text.matchAll(/https:\/\/[^\s<>"')\]]+/g)) links.push(match[0].replace(/[.,;:!?]+$/, ""));
+  for (const match of message.text.matchAll(TEXT_LINK)) links.push(match[0].replace(/[.,;:!?]+$/, ""));
   return links;
+}
+
+/** URLs shown as text in the HTML body; read only when a message's hrefs and plain-text part give no accepted link. */
+function visibleTextLinksIn(message: MailMessage): string[] {
+  return [...visibleText(message.html).matchAll(TEXT_LINK)].map((match) => match[0].replace(/[.,;:!?]+$/, ""));
 }
 
 export type VerificationLinkResult = { kind: "found"; link: string } | { kind: "none" } | { kind: "ambiguous"; count: number };
@@ -75,10 +91,10 @@ export function findWorkdayVerificationLink(messages: MailMessage[], target: Ver
     if (message.receivedAt.getTime() < earliest) continue;
     if (!relevant({ from: message.from, subject: message.subject }) && !mentions(`${message.text} ${message.html}`, target)) continue;
     if (!VERIFY_PHRASE.test(`${message.subject} ${message.text} ${message.html}`)) continue;
-    for (const link of linksIn(message)) {
-      const accepted = acceptedLink(link, target);
-      if (accepted) found.add(accepted);
-    }
+    const accept = (links: string[]) => links.flatMap((link) => acceptedLink(link, target) ?? []);
+    let accepted = accept(linksIn(message));
+    if (accepted.length === 0) accepted = accept(visibleTextLinksIn(message));
+    for (const link of accepted) found.add(link);
   }
   if (found.size === 0) return { kind: "none" };
   if (found.size > 1) return { kind: "ambiguous", count: found.size };

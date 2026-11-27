@@ -1,3 +1,4 @@
+import type { ImapFlow } from "imapflow";
 import { z } from "zod";
 
 import { htmlToText, type MailHeader } from "./mail-outcomes";
@@ -13,6 +14,13 @@ import { MailboxUnavailable } from "./workday-verification-mail";
  * dashboard. This module is not exported from the package index.
  */
 type StructureNode = { part?: string; type: string; disposition?: string; childNodes?: StructureNode[] };
+
+/** Headers read per search (the newest kept), and bodies read of the newest relevant messages. */
+const HEADER_LIMIT = 500;
+const BODY_LIMIT = 20;
+
+/** The imapflow calls the verification mailbox makes; tests pass a fake. */
+export type ImapReader = Pick<ImapFlow, "getMailboxLock" | "search" | "fetch" | "download" | "logout" | "close">;
 
 export function gmailSettings(env: Record<string, string | undefined> = process.env): { address: string; appPassword: string } | null {
   const address = env.INTERNSHIP_AGENT_GMAIL_ADDRESS?.trim() ?? "";
@@ -49,6 +57,64 @@ async function streamText(content: NodeJS.ReadableStream | undefined): Promise<s
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/**
+ * The verification mailbox over an IMAP client: INBOX locked read-only
+ * (EXAMINE); headers of at most the 500 newest messages since the day before
+ * `since`; bodies only of the 20 newest received since `since` (2 minutes of
+ * skew) whose From/Subject pass `relevant`; so a verification email is not
+ * pushed out by newer unrelated mail.
+ */
+export function imapVerificationMailbox(client: ImapReader): VerificationMailbox {
+  return {
+    async messagesSince(since, relevant) {
+      const lock = await client.getMailboxLock("INBOX", { readOnly: true });
+      try {
+        const found = (await client.search({ since: new Date(since.getTime() - 86_400_000) }, { uid: true })) || [];
+        const uids = [...found].sort((a, b) => a - b).slice(-HEADER_LIMIT);
+        if (uids.length === 0) return [];
+        // Every row is collected before any download: no other command runs inside the fetch.
+        const fetched: Array<{ uid: number; internalDate: Date | null; from: string; subject: string; structure: StructureNode | null }> = [];
+        for await (const message of client.fetch(uids.join(","), { uid: true, envelope: true, internalDate: true, bodyStructure: true }, { uid: true })) {
+          const from = (message.envelope?.from ?? []).map((entry) => `${entry.name ?? ""} <${entry.address ?? ""}>`).join(", ");
+          fetched.push({
+            uid: message.uid,
+            internalDate: message.internalDate ? new Date(message.internalDate) : null,
+            from,
+            subject: message.envelope?.subject ?? "",
+            structure: (message.bodyStructure as StructureNode | undefined) ?? null
+          });
+        }
+        const selected = fetched
+          .filter((entry): entry is typeof entry & { internalDate: Date } => entry.internalDate !== null
+            && entry.internalDate.getTime() >= since.getTime() - 120_000
+            && relevant({ from: entry.from, subject: entry.subject }))
+          .sort((a, b) => a.uid - b.uid)
+          .slice(-BODY_LIMIT);
+        const messages: MailMessage[] = [];
+        for (const entry of selected) {
+          const parts = entry.structure ? textParts(entry.structure) : { plain: null, html: null };
+          const read = async (part: string | null) => {
+            if (!part) return "";
+            const download = await client.download(String(entry.uid), part, { uid: true, maxBytes: 300_000 });
+            return streamText(download.content);
+          };
+          messages.push({ from: entry.from, subject: entry.subject, receivedAt: entry.internalDate, text: await read(parts.plain), html: await read(parts.html) });
+        }
+        return messages;
+      } finally {
+        lock.release();
+      }
+    },
+    async close() {
+      try {
+        await client.logout();
+      } catch {
+        try { client.close(); } catch { /* already closed */ }
+      }
+    }
+  };
+}
+
 export function gmailMailboxFactory(env: Record<string, string | undefined> = process.env): VerificationMailboxFactory | null {
   const settings = gmailSettings(env);
   if (!settings) return null;
@@ -66,49 +132,7 @@ export function gmailMailboxFactory(env: Record<string, string | undefined> = pr
         ? "the mailbox refused the sign-in"
         : "the mailbox could not be reached");
     }
-    return {
-      async messagesSince(since, relevant) {
-        const lock = await client.getMailboxLock("INBOX", { readOnly: true });
-        try {
-          const found = (await client.search({ since: new Date(since.getTime() - 86_400_000) }, { uid: true })) || [];
-          const uids = found.slice(-50);
-          if (uids.length === 0) return [];
-          const fetched: Array<{ uid: number; internalDate: Date | null; from: string; subject: string; structure: StructureNode | null }> = [];
-          for await (const message of client.fetch(uids.join(","), { uid: true, envelope: true, internalDate: true, bodyStructure: true }, { uid: true })) {
-            const from = (message.envelope?.from ?? []).map((entry) => `${entry.name ?? ""} <${entry.address ?? ""}>`).join(", ");
-            fetched.push({
-              uid: message.uid,
-              internalDate: message.internalDate ? new Date(message.internalDate) : null,
-              from,
-              subject: message.envelope?.subject ?? "",
-              structure: (message.bodyStructure as StructureNode | undefined) ?? null
-            });
-          }
-          const messages: MailMessage[] = [];
-          for (const entry of fetched) {
-            if (!entry.internalDate || entry.internalDate.getTime() < since.getTime() - 120_000) continue;
-            if (!relevant({ from: entry.from, subject: entry.subject })) continue;
-            const parts = entry.structure ? textParts(entry.structure) : { plain: null, html: null };
-            const read = async (part: string | null) => {
-              if (!part) return "";
-              const download = await client.download(String(entry.uid), part, { uid: true, maxBytes: 300_000 });
-              return streamText(download.content);
-            };
-            messages.push({ from: entry.from, subject: entry.subject, receivedAt: entry.internalDate, text: await read(parts.plain), html: await read(parts.html) });
-          }
-          return messages;
-        } finally {
-          lock.release();
-        }
-      },
-      async close() {
-        try {
-          await client.logout();
-        } catch {
-          try { client.close(); } catch { /* already closed */ }
-        }
-      }
-    };
+    return imapVerificationMailbox(client);
   };
 }
 

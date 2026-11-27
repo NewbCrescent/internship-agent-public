@@ -1,3 +1,5 @@
+import { Readable } from "node:stream";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -9,7 +11,7 @@ import {
   type MailMessage
 } from "@internship-agent/agent";
 
-import { gmailMailboxFactory, gmailSettings, textParts } from "../../packages/agent/src/gmail-mailbox";
+import { gmailMailboxFactory, gmailSettings, imapVerificationMailbox, textParts, type ImapReader } from "../../packages/agent/src/gmail-mailbox";
 
 // Every env here is an explicit object: nothing reads process.env or the real .env.
 const on = { INTERNSHIP_AGENT_WORKDAY_ACCOUNT_EMAIL: "Jordan@Example.test", INTERNSHIP_AGENT_AUTO_APPLY: "1" };
@@ -120,6 +122,104 @@ describe("Workday verification links", () => {
       text: "Verify here: https://acme.wd1.myworkdayjobs.com/External/activate/one."
     })], target);
     expect(once).toEqual({ kind: "found", link: "https://acme.wd1.myworkdayjobs.com/External/activate/one" });
+  });
+
+  const textOnly = (url: string) =>
+    `<table><tr><td><p>Please verify your candidate account.</p><p>${url}</p><p><a href="http://www.workday.com">Workday</a></p></td></tr></table>`;
+
+  it("finds an activation link shown only as text in an HTML-only email (Workday's real email structure)", () => {
+    const html = textOnly("https://acme.wd1.myworkdayjobs.com/External/activate/abc123/?redirect=%2FExternal%2Fjob%2FIntern_R1&amp;x=1");
+    expect(findWorkdayVerificationLink([message({ from: "Acme Rockets <acme@otp.workday.com>", text: "", html })], target))
+      .toEqual({ kind: "found", link: "https://acme.wd1.myworkdayjobs.com/External/activate/abc123/?redirect=%2FExternal%2Fjob%2FIntern_R1&x=1" });
+  });
+
+  it("drops a non-breaking space after a text link", () => {
+    const html = "<p>Please verify your candidate account.</p><p>https://acme.wd1.myworkdayjobs.com/External/activate/abc123&nbsp;</p>";
+    expect(findWorkdayVerificationLink([message({ html })], target))
+      .toEqual({ kind: "found", link: "https://acme.wd1.myworkdayjobs.com/External/activate/abc123" });
+  });
+
+  it("counts the same link as an href and as visible text once", () => {
+    const url = "https://acme.wd1.myworkdayjobs.com/External/activate/abc123";
+    expect(findWorkdayVerificationLink([message({ html: `<p>Verify:</p><a href="${url}">Verify</a><p>${url}</p>` })], target))
+      .toEqual({ kind: "found", link: url });
+  });
+
+  it("ignores another tenant's text link and URLs inside other attributes", () => {
+    expect(findWorkdayVerificationLink([message({ html: textOnly("https://other.wd1.myworkdayjobs.com/External/activate/x") })], target).kind).toBe("none");
+    const pixel = '<p>Please verify your candidate account.</p><img src="https://acme.wd1.myworkdayjobs.com/External/activate/pixel.png">';
+    expect(findWorkdayVerificationLink([message({ html: pixel })], target).kind).toBe("none");
+  });
+
+  it("prefers the href when its displayed URL differs, so the message is not ambiguous", () => {
+    const html = '<a href="https://acme.wd1.myworkdayjobs.com/External/activate/abc123?x=1">https://acme.wd1.myworkdayjobs.com/External/activate/abc123</a>';
+    expect(findWorkdayVerificationLink([message({ html })], target))
+      .toEqual({ kind: "found", link: "https://acme.wd1.myworkdayjobs.com/External/activate/abc123?x=1" });
+  });
+});
+
+type FakeMail = { uid: number; at: Date; name: string; address: string; subject: string; html: string };
+
+/** A fake IMAP client over in-memory messages; it records lock options and body downloads. */
+function fakeImap(messages: FakeMail[]) {
+  const locks: unknown[] = [];
+  const downloads: number[] = [];
+  const fake = {
+    async getMailboxLock(_path: string, options?: unknown) {
+      locks.push(options);
+      return { path: "INBOX", release() {} };
+    },
+    async search(query: { since: Date }) {
+      return messages.filter((entry) => entry.at.getTime() >= query.since.getTime()).map((entry) => entry.uid);
+    },
+    async *fetch(range: string) {
+      const wanted = new Set(range.split(",").map(Number));
+      for (const entry of messages) {
+        if (!wanted.has(entry.uid)) continue;
+        yield { uid: entry.uid, internalDate: entry.at, envelope: { from: [{ name: entry.name, address: entry.address }], subject: entry.subject }, bodyStructure: { type: "text/html" } };
+      }
+    },
+    async download(uid: string) {
+      downloads.push(Number(uid));
+      const entry = messages.find((candidate) => candidate.uid === Number(uid))!;
+      return { meta: {}, content: Readable.from([Buffer.from(entry.html)]) };
+    },
+    async logout() {},
+    close() {}
+  };
+  return { client: fake as unknown as ImapReader, locks, downloads };
+}
+
+describe("Gmail verification reader", () => {
+  const since = new Date("2026-11-19T12:00:00.000Z");
+  const target = { host: "acme.wd1.myworkdayjobs.com", tenant: "acme", company: "Acme Rockets", since };
+  const verifyHtml = (token: string) =>
+    `<table><tr><td><p>Please verify your candidate account.</p><p>https://acme.wd1.myworkdayjobs.com/External/activate/${token}</p><p><a href="http://www.workday.com">Workday</a></p></td></tr></table>`;
+  const verification = (uid: number, at: Date): FakeMail => ({
+    uid, at, name: "Acme Rockets", address: "acme@otp.workday.com", subject: "Verify your candidate account", html: verifyHtml(`token${uid}`)
+  });
+
+  it("still reads an older verification email behind 120 newer unrelated messages, read-only", async () => {
+    const mail: FakeMail[] = [verification(1, new Date(since.getTime() + 30_000))];
+    for (let uid = 2; uid <= 121; uid += 1) {
+      mail.push({ uid, at: new Date(since.getTime() + 3_600_000 + (uid - 2) * 60_000), name: "Shop", address: "news@shop.example", subject: "Weekly deals", html: "<p>Deals</p>" });
+    }
+    const { client, locks, downloads } = fakeImap(mail);
+    const mailbox = imapVerificationMailbox(client);
+    const messages = await mailbox.messagesSince(since, relevantWorkdayHeader(target));
+    await mailbox.close();
+    expect(messages).toHaveLength(1);
+    expect(findWorkdayVerificationLink(messages, target)).toEqual({ kind: "found", link: "https://acme.wd1.myworkdayjobs.com/External/activate/token1" });
+    expect(locks).toEqual([{ readOnly: true }]);
+    expect(downloads).toEqual([1]);
+  });
+
+  it("reads bodies of at most the 20 newest relevant messages", async () => {
+    const mail = Array.from({ length: 25 }, (_, index) => verification(index + 1, new Date(since.getTime() + 30_000 + index * 60_000)));
+    const { client, downloads } = fakeImap(mail);
+    const messages = await imapVerificationMailbox(client).messagesSince(since, relevantWorkdayHeader(target));
+    expect(messages).toHaveLength(20);
+    expect(downloads).toEqual(Array.from({ length: 20 }, (_, index) => index + 6));
   });
 });
 
