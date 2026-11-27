@@ -315,6 +315,12 @@ describe("company careers pages: embedded Greenhouse, new-tab entries, closed po
     expect(closedPostingNotice("Fixture Engineering\nWe’re sorry, that job does not exist or is not currently active.")).toBe("that job does not exist or is not currently active");
     expect(closedPostingNotice("The job you are looking for is no longer open.")).toBe("The job you are looking for is no longer open");
     expect(closedPostingNotice("Software Engineering Intern\nAbout the role: build robots.\nApply")).toBeNull();
+    expect(closedPostingNotice("Error: The requested job could not be found.\nError: The job that you were looking for either does not exist or is no longer open.\nHere are our current job openings."))
+      .toBe("The job that you were looking for either does not exist or is no longer open");
+    const ASHBY_GONE = "Page not found\nThe page you requested was not found\nPowered by\nPrivacy Policy";
+    expect(closedPostingNotice(ASHBY_GONE, "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000c1/application")).toBe("The page you requested was not found");
+    expect(closedPostingNotice(ASHBY_GONE, "https://careers.fixturerobotics.example/jobs/1001")).toBeNull();
+    expect(closedPostingNotice(ASHBY_GONE)).toBeNull();
   });
 });
 

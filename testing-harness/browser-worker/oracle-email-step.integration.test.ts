@@ -137,13 +137,16 @@ type Script = {
   /** The PIN accepts any code (`right`) or none (`wrong`). */
   pin?: "right" | "wrong";
   section?: RawControl[];
+  /** The page opens at the section itself (a signed-in session), and its controls show only once formReady was awaited. */
+  lateSection?: boolean;
 };
 
 /** An in-memory page at Oracle's email step whose `oracle` steps follow the script and switch to the section form. */
 function oraclePage(script: Script = {}) {
   const filled = new Map<string, string>();
   const state = { url: EMAIL_STEP, controls: EMAIL_CONTROLS, body: "You don't need to have an account\nEmail Address\nNext", submitted: false };
-  const calls = { submitEmail: [] as string[], statements: [] as string[], enterCode: [] as string[] };
+  const calls = { submitEmail: [] as string[], statements: [] as string[], enterCode: [] as string[], formReady: 0 };
+  if (script.lateSection) Object.assign(state, { url: SECTION, controls: [] as RawControl[], body: "Job application form" });
   const toForm = () => Object.assign(state, { url: SECTION, controls: script.section ?? SECTION_CONTROLS, body: "Contact Information\nFirst Name\nSubmit" });
   let screen: OracleApplyScreen = "email";
   const oracle: OracleApplySteps = {
@@ -172,6 +175,12 @@ function oraclePage(script: Script = {}) {
       toForm();
       screen = "form";
       return { result: "next", screen: "form" };
+    },
+    async formReady() {
+      calls.formReady += 1;
+      // Oracle draws the section's blocks after the page loads.
+      if (script.lateSection) toForm();
+      return true;
     }
   };
   const page: BrowserPage & { oracle: OracleApplySteps } = {
@@ -192,7 +201,7 @@ function oraclePage(script: Script = {}) {
 }
 
 /** A mailbox serving the given codes (as Oracle mail received now), recording its use. */
-function fakeMailbox(codes: string[], options: { fail?: boolean } = {}) {
+function fakeMailbox(codes: string[], options: { fail?: boolean; from?: string } = {}) {
   const calls = { opened: 0, closed: 0 };
   const factory: VerificationMailboxFactory = async () => {
     calls.opened += 1;
@@ -200,7 +209,7 @@ function fakeMailbox(codes: string[], options: { fail?: boolean } = {}) {
     return {
       messagesSince: async (_since, relevant) => codes
         .map((code): MailMessage => ({
-          from: "Fixture Robotics Careers <fixture.fa.sender@workflow.mail.us2.cloud.oracle.com>", subject: "Confirm your identity",
+          from: options.from ?? "Fixture Robotics Careers <fixture.fa.sender@workflow.mail.us2.cloud.oracle.com>", subject: "Confirm your identity",
           receivedAt: new Date(), text: `Your verification code is ${code}.`, html: ""
         }))
         .filter((message) => relevant({ from: message.from, subject: message.subject })),
@@ -298,6 +307,34 @@ describe("Oracle's email step in a start run", () => {
     expect(occurrences(dumpTables(database), CODE)).toBe(before);
     expect(logged.some((line) => line.includes(CODE))).toBe(false);
     expect(JSON.stringify(report)).not.toContain(CODE);
+    database.close();
+  });
+
+  it("reads a code mailed from the posting's careers domain, naming neither the company nor the tenant (Track 63)", async () => {
+    const database = disposableDatabase();
+    const jobId = externalJob(database, "qualified");
+    database.prepare("UPDATE jobs SET company_careers_url = ? WHERE id = ?").run("https://careers.northwind-group.example/jobs", jobId);
+    const { page, calls } = oraclePage({ email: "pin" });
+    const mailbox = fakeMailbox([CODE], { from: "STAFFING <staffing@mail.northwind-group.example>" });
+    const report = await start(database, jobId, page, true, settings(mailbox.factory));
+    expect(calls.enterCode).toEqual([CODE]);
+    expect(report.run.status).toBe("awaiting-approval");
+    database.close();
+  });
+
+  it("waits for a section page's form when the run opens at the section (Track 63, Corvane-shaped)", async () => {
+    const database = disposableDatabase();
+    const jobId = externalJob(database, "qualified");
+    const { page, filled, calls } = oraclePage({ lateSection: true });
+    const report = await startBrowserRun(jobId, SECTION, {
+      database, dataDir: disposableDataDir(), automatic: true, voiceDrafter: null, renderPdf: async () => ({ pages: 1 }), openPage: async () => page,
+      standingConsent: DATA, oracleEmailStep: settings(fakeMailbox([CODE]).factory)
+    });
+    expect(calls.formReady).toBe(1);
+    expect(calls.submitEmail).toEqual([]);
+    expect(report.run.status).toBe("awaiting-approval");
+    expect(filled.get("firstName")).toBe("Jordan");
+    expect(getBrowserRuns(jobId, database)).toHaveLength(1);
     database.close();
   });
 

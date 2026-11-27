@@ -729,15 +729,20 @@ export function workdayStops(walk: WorkdayWalkResult): StopRequest[] {
   return stops;
 }
 
+/** Oracle email-step stops before any code is typed (Track 63): the step's page is captured. Code-entry stops never are. */
+const ORACLE_EMAIL_STEP_STOP = /^Oracle Cloud HCM at \S+(?:: its email step did not show the expected email box| did not move past its email step| showed a step after its email step that the agent does not recognize|: the email step's Next button)/;
+
 /**
  * The stop a thrown error is: `no-form` for "No application form was found
- * (or reached) at …", `run-failed` for a Playwright error (its first line
- * only: Playwright's call log names resolved elements with their values),
- * otherwise null.
+ * (or reached) at …", `step-transition` for an Oracle email step that did
+ * not show or leave its email box (before any code), `run-failed` for a
+ * Playwright error (its first line only: Playwright's call log names
+ * resolved elements with their values), otherwise null.
  */
 export function failureStop(error: unknown): StopRequest | null {
   if (!(error instanceof Error)) return null;
   if (NO_FORM_ERROR.test(error.message)) return { kind: "no-form", reason: error.message, fieldLabel: null, region: { kind: "page" } };
+  if (ORACLE_EMAIL_STEP_STOP.test(error.message)) return { kind: "step-transition", reason: error.message, fieldLabel: null, region: { kind: "page" } };
   if (error.name === "TimeoutError" || PLAYWRIGHT_ERROR.test(error.message)) {
     const first = (error.message.replace(/\u001b\[[0-9;]*m/g, "").split(/\n|Call log:/)[0] ?? "").trim();
     return { kind: "run-failed", reason: clip(`${error.name}: ${first}`, 300), fieldLabel: null, region: { kind: "page" } };
@@ -961,7 +966,7 @@ const STOP_TEXT: Record<StopKind, string> = {
   "unanswerable-question": "a question on a site with no adapter had no answer",
   "no-form": "no application form was found",
   "run-failed": "the run failed before it finished",
-  "step-transition": "a Workday step did not move on or could not be read"
+  "step-transition": "a Workday or Oracle step did not move on or could not be read"
 };
 
 /** The lines `pnpm run:evidence` prints for one stop capture, after its heading and run line. */

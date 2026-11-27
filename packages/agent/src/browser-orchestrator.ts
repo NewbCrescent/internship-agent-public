@@ -53,6 +53,7 @@ import {
   hasApplicationFields,
   hasIcimsSteps,
   hasJobviteConsent,
+  hasPostingClosedNotice,
   hasSiteNavigation,
   hasStepButtons,
   icimsHostOf,
@@ -706,6 +707,12 @@ function closedPostingReason(url: string, notice: string): string {
   return `The posting page at ${hostOf(url)} says "${notice}": the posting looks closed, so no application form was found and nothing was filled. Check the posting on the site.`;
 }
 
+/** The closed-posting words on a no-form page: the application page reads its same-host frames too (iCIMS draws its job in one); another page, its body text. */
+async function closedNoticeOn(page: BrowserPage): Promise<string | null> {
+  if (hasPostingClosedNotice(page)) return page.postingClosedNotice().catch(() => null);
+  return closedPostingNotice(await page.bodyText().catch(() => ""), page.url());
+}
+
 /** An Apply entry reached the employer's Workday posting: the generic run hands over to the Workday run. Module-private. */
 class WorkdayHandoff extends Error {
   constructor(readonly url: string) {
@@ -952,7 +959,9 @@ export async function startBrowserRun(
       }
     }
     // Oracle Cloud HCM's email step: the saved email typed, its terms box accepted only under the standing settings, and an emailed one-time code read from the candidate's own mailbox (oracle-email-step.ts). The saved address stays the email step's, so continue and submit take it again.
-    const oracle = await passOracleEmailStep(database, page, form, { jobId, company: posting.companyName, candidateEmail: candidate?.email, standing, settings: options.oracleEmailStep });
+    const oracle = await passOracleEmailStep(database, page, form, {
+      jobId, company: posting.companyName, candidateEmail: candidate?.email, standing, settings: options.oracleEmailStep, companySites: [posting.source.companyCareersUrl]
+    });
     if (oracle.kind === "stopped") throw automatic ? new AutomaticRunStopped(oracle.reason) : new Error(oracle.reason);
     if (oracle.kind === "passed") form = oracle.form;
     // A step no adapter takes (Oracle's email step on a page without its steps): named before anything is typed.
@@ -970,7 +979,7 @@ export async function startBrowserRun(
         if (blocking) {
           throw new AutomaticRunStopped(`The application page at ${hostOf(page.url())} showed ${blocking.detail}; the agent never solves CAPTCHAs, so start this application yourself.`);
         }
-        const notice = closedPostingNotice(await page.bodyText().catch(() => ""));
+        const notice = await closedNoticeOn(page);
         // A closed posting is a PostingClosed: the pipeline skips it as "Posting closed" (as for Workday).
         if (notice) throw new PostingClosed(closedPostingReason(page.url(), notice));
         throw new AutomaticRunStopped("No application form was found at " + applicationUrl + ". It may sit behind an Apply button; start the run yourself from the form's address.");
@@ -1049,7 +1058,7 @@ export async function startBrowserRun(
     }
     // Only skips (a copy-link box, a cookie panel's toggles): no application form was reached, so nothing is saved.
     if (!reachedApplicationForm(decisions)) {
-      const notice = closedPostingNotice(await page.bodyText().catch(() => ""));
+      const notice = await closedNoticeOn(page);
       const reason = notice ? closedPostingReason(page.url(), notice) : noFormReachedReason(page.url());
       throw automatic ? (notice ? new PostingClosed(reason) : new AutomaticRunStopped(reason)) : new Error(reason);
     }
@@ -1606,7 +1615,7 @@ export async function continueBrowserRun(
     const candidate = getCandidate(database, LOCAL_CANDIDATE_ID);
     const oracle = await passOracleEmailStep(database, page, form, {
       jobId: run.jobId, company: posting?.companyName ?? "", candidateEmail: candidate?.email,
-      standing, settings: options.oracleEmailStep
+      standing, settings: options.oracleEmailStep, companySites: [posting?.source.companyCareersUrl]
     });
     if (oracle.kind === "stopped") throw new Error(oracle.reason);
     if (oracle.kind === "passed") form = oracle.form;
@@ -1922,9 +1931,10 @@ export async function submitBrowserRun(
       if (outcome.moved) shown = await recognizeCurrentForm(page);
     }
     // Oracle Cloud HCM's email step again; a stop keeps the run waiting for approval.
+    const submitPosting = getJobPosting(database, run.jobId);
     const oracle = await passOracleEmailStep(database, page, shown, {
-      jobId: run.jobId, company: getJobPosting(database, run.jobId)?.companyName ?? "", candidateEmail: getCandidate(database, LOCAL_CANDIDATE_ID)?.email,
-      standing, settings: options.oracleEmailStep
+      jobId: run.jobId, company: submitPosting?.companyName ?? "", candidateEmail: getCandidate(database, LOCAL_CANDIDATE_ID)?.email,
+      standing, settings: options.oracleEmailStep, companySites: [submitPosting?.source.companyCareersUrl]
     });
     if (oracle.kind === "stopped") throw new Error(`${oracle.reason} Nothing was submitted, and the run still waits for approval.`);
     if (oracle.kind === "passed") shown = oracle.form;

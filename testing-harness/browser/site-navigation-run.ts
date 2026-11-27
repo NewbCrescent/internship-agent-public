@@ -32,7 +32,13 @@
  * posting whose Apply Now button is drawn 2.5 s after the load event is still
  * followed to its email step; an Eightfold-style Apply Now that opens the
  * employer's Workday posting in a new tab is followed there, the tab closed,
- * and the walker stops as "adapter". No followed page reaches another site.
+ * and the walker stops as "adapter". (vi) a closed iCIMS job whose notice
+ * sits only in its same-host content frame is read as closed
+ * (readClosedPostingNotice and the application page's postingClosedNotice)
+ * while the top document's text never says so, with no Apply entry followed
+ * and no walker hop (never "Log back in!", a job-title link, or "Search"),
+ * and another host's frame is never read. (vii) Ashby's not-found page on
+ * jobs.ashbyhq.com is read as closed. No followed page reaches another site.
  *
  * Usage: pnpm test:browser:site-navigation
  */
@@ -52,6 +58,7 @@ import {
   hasApplicationFields,
   multiStepStopReason,
   planAutofill,
+  readClosedPostingNotice,
   recognizeCurrentForm,
   siteWallReason
 } from "@internship-agent/browser";
@@ -71,6 +78,13 @@ const EMBED_APPLICATION = "https://job-boards.greenhouse.io/embed/job_app?for=fi
 const SCRIPT_EMBED_POSTING = "https://careers.fixturehealth.example/careers/jobs/7000003-robotics-intern?gh_jid=7000003";
 const EIGHTFOLD_POSTING = "https://jobs.fixturechips.example/careers/job/900001";
 const WORKDAY_POSTING = "https://fixturechips.wd5.myworkdayjobs.com/External/job/US-CA-Santa-Clara/Robotics-Intern_JR1000001?source=Eightfold";
+const ICIMS_CLOSED_POSTING = "https://careers-fixture.icims.com/jobs/9002/job";
+const ASHBY_NOT_FOUND = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000c1/application";
+const CROSS_HOST_FRAME_POSTING = "https://careers.fixturerobotics.example/jobs/5001";
+/** A posting page embedding another host's frame, whose words must never count as the posting's. */
+const CROSS_HOST_FRAME_PAGE = `<!doctype html><html><head><title>Robotics Intern</title></head><body><h1>Robotics Intern</h1>
+  <iframe src="https://widgets.fixturenews.example/jobs-feed" title="Jobs feed"></iframe></body></html>`;
+const CROSS_HOST_FRAME = "<!doctype html><html><body><p>This job is no longer available.</p></body></html>";
 /** A careers page whose only Greenhouse trace is the embed script (aborted here; its src stays in the page). */
 const SCRIPT_EMBED_PAGE = `<!doctype html><html><head><title>Robotics Intern - Fixture Health</title></head><body><h1>Robotics Intern</h1>
   <script src="https://boards.greenhouse.io/embed/job_board/js?for=fixturehealth"></script><div id="grnhse_app"></div></body></html>`;
@@ -107,7 +121,10 @@ async function main(): Promise<void> {
       "careers.fixturehealth.example/careers/jobs/7000003-robotics-intern": SCRIPT_EMBED_PAGE,
       "job-boards.greenhouse.io/embed/job_app": fixture("greenhouse-embed-application.html"),
       "jobs.fixturechips.example/careers/job/900001": fixture("eightfold-posting.html"),
-      "fixturechips.wd5.myworkdayjobs.com/External/job/US-CA-Santa-Clara/Robotics-Intern_JR1000001": WORKDAY_PAGE
+      "fixturechips.wd5.myworkdayjobs.com/External/job/US-CA-Santa-Clara/Robotics-Intern_JR1000001": WORKDAY_PAGE,
+      "jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000c1/application": fixture("ashby-not-found.html"),
+      "careers.fixturerobotics.example/jobs/5001": CROSS_HOST_FRAME_PAGE,
+      "widgets.fixturenews.example/jobs-feed": CROSS_HOST_FRAME
     };
     const documentRequests: string[] = [];
     const context = await browser.newContext();
@@ -121,8 +138,12 @@ async function main(): Promise<void> {
         try { return request.frame().parentFrame() === null; } catch { return request.isNavigationRequest(); }
       })();
       if (url && request.resourceType() === "document" && mainFrame) documentRequests.push(url.href);
+      // iCIMS serves the outer page and its content frame at one path; byPath ignores the query, so the frame is routed here.
       const body = url && request.resourceType() === "document"
-        ? (url.hostname === "jobs.smartrecruiters.com" && url.pathname.startsWith("/oneclick-ui/") ? DATADOME_PAGE : byPath[`${url.hostname}${url.pathname}`])
+        ? (url.hostname === "jobs.smartrecruiters.com" && url.pathname.startsWith("/oneclick-ui/") ? DATADOME_PAGE
+          : url.hostname === "careers-fixture.icims.com" && url.pathname === "/jobs/9002/job"
+            ? fixture(url.searchParams.get("in_iframe") === "1" ? "icims-closed-frame.html" : "icims-closed-posting.html")
+            : byPath[`${url.hostname}${url.pathname}`])
         : undefined;
       if (body) await route.fulfill({ status: 200, contentType: "text/html", body });
       else await route.abort();
@@ -314,11 +335,45 @@ async function main(): Promise<void> {
       await walked.close();
     }
 
+    // (vi) A closed iCIMS job: the notice sits only in the same-host content frame; nothing on it is followed.
+    {
+      const tab = await open(ICIMS_CLOSED_POSTING);
+      const topText = await createPlaywrightPage(tab).bodyText();
+      check(!/no longer open/i.test(topText), `the iCIMS outer page's own text says the job is closed: ${topText}`);
+      const CLOSED = "The job that you were looking for either does not exist or is no longer open";
+      const notice = await readClosedPostingNotice(tab);
+      check(notice === CLOSED, `iCIMS closed notice read: ${notice}`);
+      const fromPage = await createApplicationPage(tab).postingClosedNotice();
+      check(fromPage === CLOSED, `iCIMS postingClosedNotice: ${fromPage}`);
+      const entry = await createPlaywrightPage(tab).followApplyEntry!();
+      check(entry === null, `an Apply entry was followed on the closed iCIMS job: ${entry}`);
+      await tab.close();
+
+      const walked = await open(ICIMS_CLOSED_POSTING);
+      const outcome = await createApplicationPage(walked).advanceToApplicationForm();
+      check(!outcome.moved, `the walker moved on the closed iCIMS job: ${outcome.stop} at ${outcome.url} (${JSON.stringify(outcome.hops)})`);
+      await walked.close();
+
+      const crossHost = await open(CROSS_HOST_FRAME_POSTING);
+      const crossNotice = await readClosedPostingNotice(crossHost);
+      check(crossNotice === null, `another host's frame was read as the posting's closed notice: ${crossNotice}`);
+      await crossHost.close();
+    }
+
+    // (vii) Ashby's not-found page on its own host reads as closed.
+    {
+      const tab = await open(ASHBY_NOT_FOUND);
+      const notice = await readClosedPostingNotice(tab);
+      check(notice === "The page you requested was not found", `Ashby not-found notice read: ${notice}`);
+      await tab.close();
+    }
+
     const thirdParty = documentRequests.filter((href) => {
       const host = new URL(href).hostname;
       return ![
         "careers.fixturerobotics.example", "recruiting.paylocity.com", "jobs.smartrecruiters.com", "fixture.fa.ocs.oraclecloud.com",
-        "careers.fixturehealth.example", "job-boards.greenhouse.io", "jobs.fixturechips.example", "fixturechips.wd5.myworkdayjobs.com"
+        "careers.fixturehealth.example", "job-boards.greenhouse.io", "jobs.fixturechips.example", "fixturechips.wd5.myworkdayjobs.com",
+        "careers-fixture.icims.com", "jobs.ashbyhq.com"
       ].includes(host);
     });
     check(thirdParty.length === 0, `a followed entry reached another site: ${thirdParty.join(", ")}`);
@@ -331,7 +386,7 @@ async function main(): Promise<void> {
     console.error(`SITE_NAVIGATION_REPORT {"status":"failed","failures":${JSON.stringify(failures)}}`);
     process.exit(1);
   }
-  console.log(`SITE_NAVIGATION_REPORT {"status":"passed","scenarios":9}`);
+  console.log(`SITE_NAVIGATION_REPORT {"status":"passed","scenarios":11}`);
 }
 
 main().catch((error) => {

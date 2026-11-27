@@ -1378,5 +1378,19 @@ describe("stop evidence (Track 42)", () => {
       expect(failureStop(new Error("The posting looks closed."))).toBeNull();
       expect(failureStop("not an error")).toBeNull();
     });
+
+    it("failureStop: Oracle email-step stops before a code are step-transition captures; code-entry stops are not (Track 63)", () => {
+      const host = "fixture.fa.ocs.oraclecloud.com";
+      for (const message of [
+        `Oracle Cloud HCM at ${host}: its email step did not show the expected email box and Next button, so nothing was typed. Apply in your own browser.`,
+        `Oracle Cloud HCM at ${host} did not move past its email step after Next; nothing else was entered. Apply in your own browser.`,
+        `Oracle Cloud HCM at ${host} showed a step after its email step that the agent does not recognize (at /x); nothing else was entered. Apply in your own browser.`,
+        `Oracle Cloud HCM at ${host}: the email step's Next button did not become clickable; nothing was submitted. Apply in your own browser.`
+      ]) {
+        expect(failureStop(new Error(message))).toEqual({ kind: "step-transition", reason: message, fieldLabel: null, region: { kind: "page" } });
+      }
+      expect(failureStop(new Error(`Oracle Cloud HCM at ${host}: its code boxes did not take the emailed code, so nothing was verified. Apply in your own browser.`))).toBeNull();
+      expect(failureStop(new Error(`Oracle Cloud HCM at ${host} did not accept the emailed code. The agent does not try again (Oracle locks the email after repeated wrong codes); apply in your own browser.`))).toBeNull();
+    });
   });
 });

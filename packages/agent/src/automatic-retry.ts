@@ -11,6 +11,7 @@ import {
   getJobPosting,
   getProfileDatabase,
   listApplicationEvents,
+  listApplicationReceiptAttempts,
   listBrowserRuns,
   listJobSummaries,
   listOutcomeEvents,
@@ -18,12 +19,14 @@ import {
   readApplicationReceiptCheck,
   recordApplicationHoldReopen,
   recordApplicationHoldRetry,
+  recordApplicationReceipt,
   resolveProfileDataDirectory,
   saveDiscoverySkip,
   setJobStatus,
   updateBrowserRun,
   withApplicationHoldTransaction,
-  type ApplicationHold
+  type ApplicationHold,
+  type ReceiptResult
 } from "@internship-agent/db";
 import { isGreenhouseBoardUrl, SECURITY_CODE_FIELD_ID } from "@internship-agent/browser";
 import {
@@ -39,11 +42,15 @@ import {
   type WorkspaceProfile
 } from "@internship-agent/domain";
 
-import { mayHaveSubmitted, observeApplicationHolds } from "./application-holds";
+import { mayHaveSubmitted, observeApplicationHolds, refreshApplicationHolds } from "./application-holds";
 import { cancelBrowserRun } from "./browser-orchestrator";
 import { greenhouseMailSender } from "./greenhouse-security-code";
+import type { MailSessionFactory } from "./mail-watch";
 import { acquirePipelineLock } from "./pipeline-lock";
-import { AUTOMATIC_RETRY_PREFIX, pipelineSettings, REOPENED_UNSUBMITTED_PREFIX } from "./pipeline-orchestrator";
+import {
+  AUTOMATIC_RETRY_PREFIX, CANDIDATE_VERDICT_REOPEN_PREFIX, pipelineSettings, REOPENED_UNSUBMITTED_PREFIX
+} from "./pipeline-orchestrator";
+import { catchUpSubmissionReceipt, type ReceiptStore } from "./submission-receipts";
 import { readJobEvidence, readSubmitEvidence, type StoredSubmitEvidence } from "./submit-evidence";
 import { judgeSubmitCapture, showsClosedPosting, type CaptureVerdict, type NeverTakenKind } from "./unsubmitted-evidence";
 import { resolveWorkdayAccounts, workdayAccountSettings } from "./workday-account-service";
@@ -70,6 +77,10 @@ import { putWorkdayAccount, readWorkdayAccounts, WorkdayAccountsFileError, type 
  * verification-code evidence on a Greenhouse board since the timeline's
  * newest approval): Greenhouse completes nothing until the code is entered,
  * so that shape is the proof and no receipt check is needed.
+ * With `--candidate-verdict not-submitted` (Track 66) the candidate's own
+ * verdict replaces that evidence for named possible submissions, after a
+ * fresh read-only receipt check; a receipt found is recorded and the run is
+ * not reopened.
  *
  * Two more explicit modes never retry anything. `--close-unsubmitted` closes
  * a failed submit that was never clicked ("No submit control was found") on
@@ -293,16 +304,27 @@ export function reopenUnsubmittedBlocker(database: DatabaseSync, dataDir: string
   if (unsubmittedEvidence(database, dataDir, run) === null) {
     return `there is no evidence the site did not complete it (${unsubmittedEvidenceRefusal(database, dataDir, run)}); check the application on the site.`;
   }
+  if (!freshAbsentReceiptCheck(database, dataDir, run)) {
+    return `a completed receipt check for this attempt is required (pnpm mail:scan --receipt ${run.id.slice(0, 8)}).`;
+  }
+  return null;
+}
+
+/**
+ * Whether the run's stored receipt check is a fresh "absent" for this
+ * attempt: checked for the attempt its submit approval names, after that
+ * approval and the newest post-submit evidence, at most
+ * RECEIPT_CHECK_FRESH_MS ago. False when the submit was never approved.
+ */
+function freshAbsentReceiptCheck(database: DatabaseSync, dataDir: string, run: BrowserRun): boolean {
+  if (!run.submissionApprovedAt) return false;
   const check = readApplicationReceiptCheck(database, run.id);
   const latestEvidence = readSubmitEvidence(dataDir, run)[0]?.capturedAt;
   const latestAttempt = Math.max(Date.parse(run.submissionApprovedAt), latestEvidence ? Date.parse(latestEvidence) : 0);
   const checkedAt = check ? Date.parse(check.checkedAt) : Number.NaN;
   const age = Date.now() - checkedAt;
-  if (check?.result !== "absent" || Date.parse(check.attemptedAt) !== Date.parse(run.submissionApprovedAt)
-    || !(checkedAt >= latestAttempt && age >= 0 && age <= RECEIPT_CHECK_FRESH_MS)) {
-    return `a completed receipt check for this attempt is required (pnpm mail:scan --receipt ${run.id.slice(0, 8)}).`;
-  }
-  return null;
+  return check?.result === "absent" && Date.parse(check.attemptedAt) === Date.parse(run.submissionApprovedAt)
+    && checkedAt >= latestAttempt && age >= 0 && age <= RECEIPT_CHECK_FRESH_MS;
 }
 
 /**
@@ -332,6 +354,127 @@ export function reopenUnsubmittedRun(
       (REOPENED_UNSUBMITTED_PREFIX + `${evidence.text}): ${reason}`).slice(0, 1_000));
     recordApplicationHoldReopen(database, run.jobId, run.id, new Date().toISOString());
     return { run: cancelled, evidence };
+  });
+}
+
+/**
+ * The candidate's own verdict that a possible submission was not submitted
+ * (Track 66). The candidate decided on 2026-11-27, asked whether to treat the
+ * possible submissions held with no receipt as not submitted and retry them:
+ * "1. retry." The verdict replaces site evidence, but only for named runs
+ * the hold refresh holds as possible submissions, and only after a fresh
+ * read-only receipt check finds no receipt. Automatic passes, `--held`,
+ * plain `--run`, and `--reopen-unsubmitted` without the verdict never retry a
+ * possible submission.
+ */
+
+/** Run ids the hold observation (read-only) holds as possible submissions. */
+export function possibleSubmissionRunIds(database: DatabaseSync, dataDir: string): Set<string> {
+  return new Set(observeApplicationHolds(database, dataDir).observations
+    .filter((observation) => observation.reason === "possible-submission" && observation.runId)
+    .map((observation) => observation.runId!));
+}
+
+/** Why a run may not be reopened on the candidate's verdict that it was not submitted, or null when it may. */
+export function candidateVerdictBlocker(
+  database: DatabaseSync, dataDir: string, run: BrowserRun, possibleSubmissions: ReadonlySet<string>
+): string | null {
+  if (!RETRYABLE.has(run.status)) {
+    return `it is ${run.status}; --candidate-verdict reopens only a failed or held run that is held as a possible submission.`;
+  }
+  if (!run.submissionApprovedAt) return "its submit was never approved, so it is not a possible submission; retry it without --reopen-unsubmitted.";
+  if (run.confirmationText && run.confirmationText.trim()) return "a confirmation was recognized, so it stays as it is.";
+  if (applicationReceiptConfirmed(database, run.id)) return "a trusted application receipt was found, so it went through and stays as it is.";
+  const posting = getJobPosting(database, run.jobId);
+  if (!posting) return "its posting is unknown.";
+  if (posting.status !== "APPLYING") return `its application is ${statusWords(posting.status)}, not applying.`;
+  if (!startedByPipeline(database, run)) return "you started it yourself; only runs the pipeline started are reopened.";
+  const others = listBrowserRuns(database, run.jobId).filter((other) => other.id !== run.id);
+  if (others.some((other) => other.status === "submitted" || other.status === "submitting")) return "the application already has a submitted run.";
+  if (others.some((other) => other.status !== "cancelled")) return "another run of this application is open or failed.";
+  if (!possibleSubmissions.has(run.id)) return "it is not held as a possible submission, so the candidate's verdict does not apply to it.";
+  return null;
+}
+
+export type CandidateVerdictOutcome =
+  | { kind: "reopened"; run: BrowserRun }
+  | { kind: "would-reopen" }
+  | { kind: "receipt-found"; recorded: boolean }
+  | { kind: "held"; receipt: ReceiptResult | null; reason: string }
+  | { kind: "refused"; reason: string };
+
+/**
+ * Reopens a possible submission on the candidate's verdict that it was not
+ * submitted. It first runs a fresh read-only receipt check
+ * (catchUpSubmissionReceipt, as `pnpm mail:scan --receipt` does): a trusted
+ * receipt is recorded as that command records it (its possible-submission
+ * hold resolved, the application status unchanged) and the run is not
+ * reopened; an ambiguous, truncated, or unavailable check keeps it held.
+ * With no receipt it cancels the run, moves the job from APPLYING back to
+ * READY_FOR_REVIEW, logs "Reopened on the candidate's verdict that it was
+ * not submitted: <reason>", and releases the hold, so the next pass starts a
+ * fresh run under every current rule. A dry run checks the mailbox but
+ * records and writes nothing. Throws when the reason is empty or the run is
+ * unknown.
+ */
+export async function reopenOnCandidateVerdict(
+  database: DatabaseSync,
+  dataDir: string,
+  runId: string,
+  options: { reason: string; dryRun: boolean; mailbox: MailSessionFactory | null; now?: Date }
+): Promise<CandidateVerdictOutcome> {
+  const reason = options.reason.replace(/\s+/g, " ").trim();
+  if (!reason) throw new Error("A reopen on the candidate's verdict needs the candidate's words as its reason.");
+  const run = getBrowserRun(database, runId);
+  if (!run) throw new Error("The browser run is unknown.");
+  const blocker = candidateVerdictBlocker(database, dataDir, run, possibleSubmissionRunIds(database, dataDir));
+  if (blocker) return { kind: "refused", reason: blocker };
+  // The command already holds the database open, so the store reads and writes it directly (workspaceReceiptStore opens and closes it).
+  const store: ReceiptStore = options.dryRun
+    ? {
+      // No hold refresh, so nothing is written; the observation above already holds this run as a possible submission.
+      attempts: () => listApplicationReceiptAttempts(database).map((attempt) => attempt.runId === run.id ? { ...attempt, pending: 1 } : attempt),
+      record: () => {}
+    }
+    : {
+      attempts: () => {
+        refreshApplicationHolds(database, dataDir);
+        return listApplicationReceiptAttempts(database);
+      },
+      record: (attempt, result, proofRef, at) => recordApplicationReceipt(database, attempt, result, proofRef, attempt.attemptedAt, at)
+    };
+  const result = await catchUpSubmissionReceipt({
+    runId: run.id, store, connect: options.mailbox, ...(options.now ? { now: options.now } : {})
+  });
+  if (result === null) return { kind: "held", receipt: null, reason: "no pending possible-submission hold was found for its receipt check" };
+  if (result === "confirmed") return { kind: "receipt-found", recorded: !options.dryRun };
+  if (result !== "absent") return { kind: "held", receipt: result, reason: `its fresh receipt check is ${result}, so it stays held as a possible submission` };
+  if (options.dryRun) return { kind: "would-reopen" };
+  return { kind: "reopened", run: applyCandidateVerdictReopen(database, dataDir, run.id, reason, options.now ?? new Date()) };
+}
+
+/**
+ * The write half of reopenOnCandidateVerdict, in one hold transaction (not
+ * nestable, so nothing here may open another): the run is checked again,
+ * with its stored hold and a fresh absent receipt check, then cancelled, its
+ * job moved back to READY_FOR_REVIEW with the verdict logged, and its
+ * possible-submission hold released. Throws AutomaticRetryRefused otherwise.
+ */
+function applyCandidateVerdictReopen(database: DatabaseSync, dataDir: string, runId: string, reason: string, now: Date): BrowserRun {
+  return withApplicationHoldTransaction(database, () => {
+    const run = getBrowserRun(database, runId);
+    if (!run) throw new Error("The browser run is unknown.");
+    const hold = getApplicationHold(database, run.jobId, run.id);
+    const possible = new Set(hold?.active && hold.reason === "possible-submission" ? [run.id] : []);
+    const blocker = candidateVerdictBlocker(database, dataDir, run, possible);
+    if (blocker) throw new AutomaticRetryRefused(blocker);
+    if (!freshAbsentReceiptCheck(database, dataDir, run)) {
+      throw new AutomaticRetryRefused(`a completed receipt check for this attempt is required (pnpm mail:scan --receipt ${run.id.slice(0, 8)}).`);
+    }
+    const cancelled = cancelBrowserRun(run.id, database);
+    setJobStatus(database, run.jobId, "APPLYING", "READY_FOR_REVIEW", (CANDIDATE_VERDICT_REOPEN_PREFIX + reason).slice(0, 1_000));
+    recordApplicationHoldReopen(database, run.jobId, run.id, now.toISOString());
+    return cancelled;
   });
 }
 
@@ -528,7 +671,7 @@ export function requeueVerifiedHold(
 /** Evidence outcomes saved before any submit click (account steps, Workday entry or step errors, iCIMS stops, a dialog over the form while it filled, a Track 42 stop capture); any other outcome is post-submit. */
 const PRE_SUBMIT_OUTCOMES: ReadonlySet<string> = new Set(["workday-account", "workday-errors", "workday-entry", "icims-account", "icims-application", "covering-dialog", "stop"]);
 /** Timeline notes that show a submit was approved, attempted, reopened, or recorded for the job. */
-const SUBMIT_ATTEMPT_NOTES = [AUTO_SUBMIT_EVENT, APPROVAL_EVENT_PREFIX, "Automatic submission failed: ", REOPENED_UNSUBMITTED_PREFIX];
+const SUBMIT_ATTEMPT_NOTES = [AUTO_SUBMIT_EVENT, APPROVAL_EVENT_PREFIX, "Automatic submission failed: ", REOPENED_UNSUBMITTED_PREFIX, CANDIDATE_VERDICT_REOPEN_PREFIX];
 
 /** Why the job's record shows a submit may have been attempted, or null when nothing does. */
 function jobSubmitAttempt(database: DatabaseSync, dataDir: string, jobId: string): string | null {
@@ -646,9 +789,11 @@ export type RetryCommandDeps = {
   /** One pipeline pass with no discovery, run while this command holds the lock (`--start`). */
   startPass(profile: WorkspaceProfile, log: (line: string) => void): Promise<unknown>;
   env: Record<string, string | undefined>;
+  /** The read-only mailbox the candidate-verdict reopen's fresh receipt check reads (gmailMailSessionFactory in pipeline-retry.ts); null when it is not set up. */
+  mailbox: MailSessionFactory | null;
 };
 
-const RETRY_USAGE = "Usage: pnpm pipeline:retry [--profile real|demo] (--run <id or 8-character prefix> ... | --held) [--dry-run] [--start] [--reason \"<text>\"] | --run <id or 8-character prefix> ... --reopen-unsubmitted --reason \"<text>\" [--dry-run] [--start] | (--run <ref> | --job <id or 8-character prefix>) --verified-hold --revision <n> --recheck <hex ref> --reason \"<text>\" [--dry-run] | --run <ref> ... --close-unsubmitted --reason \"<text>\" [--dry-run] | --run <ref> ... --correct-submitted --reason \"<text>\" (--dry-run | --confirm)";
+const RETRY_USAGE = "Usage: pnpm pipeline:retry [--profile real|demo] (--run <id or 8-character prefix> ... | --held) [--dry-run] [--start] [--reason \"<text>\"] | --run <id or 8-character prefix> ... --reopen-unsubmitted --reason \"<text>\" [--dry-run] [--start] | (--run <ref> | --job <id or 8-character prefix>) --verified-hold --revision <n> --recheck <hex ref> --reason \"<text>\" [--dry-run] | --run <ref> ... --close-unsubmitted --reason \"<text>\" [--dry-run] | --run <ref> ... --correct-submitted --reason \"<text>\" (--dry-run | --confirm) | --run <ref> ... --reopen-unsubmitted --candidate-verdict not-submitted --reason \"<the candidate's words>\" [--dry-run] [--start]";
 const DEFAULT_REASON = "the bug that held it is fixed.";
 const FULL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -657,6 +802,8 @@ type RetryArgs = {
   close: boolean; correct: boolean; confirm: boolean; verified: VerifiedHoldFix | null;
   /** `--job <ref>`: one job-level verified hold (only with --verified-hold). */
   job: string | null;
+  /** `--candidate-verdict not-submitted`: the candidate's verdict replaces site evidence (only with --reopen-unsubmitted, named runs, and a reason). */
+  verdict: "not-submitted" | null;
 };
 
 /** `--run` takes one or more references (repeated flags or several values), `--job` exactly one; null on anything unknown, missing, or contradictory. */
@@ -675,6 +822,7 @@ function parseRetryArgs(argv: string[]): RetryArgs | null {
   let revision: string | undefined;
   let recheck: string | undefined;
   let job: string | undefined;
+  let verdict: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
     if (arg === "--held" || arg === "--dry-run" || arg === "--start" || arg === "--reopen-unsubmitted" || arg === "--verified-hold"
@@ -697,12 +845,13 @@ function parseRetryArgs(argv: string[]): RetryArgs | null {
         index += 1;
       }
       if (runs.length === before) return null;
-    } else if (arg === "--revision" || arg === "--recheck" || arg === "--job") {
+    } else if (arg === "--revision" || arg === "--recheck" || arg === "--job" || arg === "--candidate-verdict") {
       const value = argv[index + 1];
       if (!value || value.startsWith("--")) return null;
       if (arg === "--revision" && revision === undefined) revision = value;
       else if (arg === "--recheck" && recheck === undefined) recheck = value;
       else if (arg === "--job" && job === undefined) job = value.trim();
+      else if (arg === "--candidate-verdict" && verdict === undefined) verdict = value;
       else return null;
       index += 1;
     } else if (arg === "--profile" || arg === "--reason") {
@@ -733,8 +882,11 @@ function parseRetryArgs(argv: string[]): RetryArgs | null {
   if ([reopen, close, correct, verified].filter(Boolean).length > 1) return null;
   if ((close || correct) && (held || start || reason === undefined)) return null;
   if (confirm && !correct) return null;
+  // The candidate's verdict reopens only named runs with --reopen-unsubmitted and the candidate's words; never --held or the default reason.
+  if (verdict !== undefined && (verdict !== "not-submitted" || !reopen || held || runs.length === 0 || reason === undefined)) return null;
   return { profile: profile.data, runs, held, dryRun, start, reason: trimmed ?? DEFAULT_REASON, reopen, close, correct, confirm,
-    verified: verified ? { revision: Number(revision), recheck: recheck!.toLowerCase() } : null, job: job ?? null };
+    verified: verified ? { revision: Number(revision), recheck: recheck!.toLowerCase() } : null, job: job ?? null,
+    verdict: verdict === undefined ? null : "not-submitted" };
 
 }
 
@@ -809,6 +961,10 @@ function resolveRef(database: DatabaseSync, typed: string): BrowserRun | string 
  * reopens failed submits instead, each only with evidence the site did not
  * complete it, and runs held on Greenhouse's emailed security code
  * (reopenUnsubmittedBlocker), printing `reopened` or `skipped`.
+ * Adding `--candidate-verdict not-submitted` reopens named possible
+ * submissions on the candidate's verdict instead of site evidence, each
+ * after a fresh read-only receipt check (reopenOnCandidateVerdict), printing
+ * `reopened`, `receipt found for`, or `skipped`; it needs the mailbox.
  * `--close-unsubmitted --reason` closes never-clicked failed submits on
  * closed postings (closeUnsubmittedBlocker), printing `closed` or `skipped`.
  * `--correct-submitted --reason` corrects SUBMITTED records that rest only on
@@ -831,7 +987,8 @@ export async function runRetryCommand(argv: string[], deps: Partial<RetryCommand
     log: deps.log ?? ((line) => console.log(line)),
     acquireLock: deps.acquireLock ?? ((dataDir) => acquirePipelineLock(dataDir)),
     startPass: deps.startPass ?? (async () => { throw new Error("no pipeline pass is available here."); }),
-    env: deps.env ?? process.env
+    env: deps.env ?? process.env,
+    mailbox: deps.mailbox ?? null
   };
   const args = parseRetryArgs(argv);
   if (!args) {
@@ -844,6 +1001,10 @@ export async function runRetryCommand(argv: string[], deps: Partial<RetryCommand
   }
   if ((!args.dryRun || args.verified) && manualOnly(io.env)) {
     io.log("Not run: manual checklist mode is on; the pipeline starts no browser runs.");
+    return 1;
+  }
+  if (args.verdict && !io.mailbox) {
+    io.log("Not run: --candidate-verdict needs the read-only mailbox for its fresh receipt check; set INTERNSHIP_AGENT_GMAIL_ADDRESS and INTERNSHIP_AGENT_GMAIL_APP_PASSWORD in the root .env first.");
     return 1;
   }
   let release: () => void = () => {};
@@ -860,6 +1021,7 @@ export async function runRetryCommand(argv: string[], deps: Partial<RetryCommand
     let retried = 0;
     let skipped = 0;
     let released = 0;
+    let receipts = 0;
     const database = io.open(args.profile);
     try {
       if (args.job !== null && args.verified) {
@@ -952,6 +1114,38 @@ export async function runRetryCommand(argv: string[], deps: Partial<RetryCommand
           }
           continue;
         }
+        if (args.verdict) {
+          try {
+            const outcome = await reopenOnCandidateVerdict(database, io.dataDir(args.profile), target.id, {
+              reason: args.reason, dryRun: args.dryRun, mailbox: io.mailbox
+            });
+            if (outcome.kind === "refused") {
+              skipped += 1;
+              io.log(`skipped ${label} (${outcome.reason})`);
+            } else if (outcome.kind === "held") {
+              skipped += 1;
+              if (outcome.receipt === "unavailable") exit = 1;
+              io.log(`skipped ${label} (${outcome.reason}.)`);
+            } else if (outcome.kind === "receipt-found") {
+              skipped += 1;
+              receipts += 1;
+              io.log(args.dryRun
+                ? `receipt found for ${label} (dry run, nothing recorded): a trusted receipt matches this attempt, so it went through and would not be reopened.`
+                : `receipt found for ${label}: a trusted receipt matches this attempt, so it went through; the receipt is recorded, its possible-submission hold is resolved, and it is not reopened.`);
+            } else if (outcome.kind === "would-reopen") {
+              retried += 1;
+              io.log(`would reopen ${label} on the candidate's verdict that it was not submitted (fresh receipt check: absent; nothing recorded).`);
+            } else {
+              retried += 1;
+              io.log(`reopened ${label} on the candidate's verdict that it was not submitted (fresh receipt check: absent): cancelled; its possible-submission hold is released and the application is back to ready for review.`);
+            }
+          } catch (error) {
+            skipped += 1;
+            exit = 1;
+            io.log(`skipped ${label} (${clip(error instanceof Error ? error.message : String(error), 300)})`);
+          }
+          continue;
+        }
         if (args.reopen) {
           const dataDir = io.dataDir(args.profile);
           const blocker = reopenUnsubmittedBlocker(database, dataDir, target);
@@ -1010,6 +1204,11 @@ export async function runRetryCommand(argv: string[], deps: Partial<RetryCommand
     io.log(args.dryRun
       ? `Dry run: would ${verb} ${retried}; skipped ${skipped}; nothing written.`
       : `${done} ${retried}; skipped ${skipped}.`);
+    if (receipts > 0) {
+      io.log(args.dryRun
+        ? `Dry run: receipts found for ${receipts} run(s); nothing recorded.`
+        : `Receipts found for ${receipts} run(s): recorded as received, not reopened.`);
+    }
     if (released > 0) {
       io.log(args.dryRun ? `Dry run: would release ${released} Workday account hold(s).` : `Released ${released} Workday account hold(s).`);
     }

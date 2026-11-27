@@ -3556,6 +3556,46 @@ describe("runs that never reached an application form", () => {
     database.close();
   });
 
+  it("reads a closed notice an iCIMS career site draws in its same-host frame as PostingClosed", async () => {
+    const database = disposableDatabase();
+    const jobId = qualifiedExternalJob(database);
+    const url = "https://careers-fixture.icims.com/jobs/9002/job";
+    // The top document shows only a heading; the closed notice sits in the same-host frame, which only postingClosedNotice reads.
+    const page = Object.assign(fakePage({ url, title: "Careers at Fixture Robotics", controls: [], body: "Careers at Fixture Robotics" }), {
+      postingClosedNotice: async () => "The job that you were looking for either does not exist or is no longer open"
+    });
+    const stopped = start(database, jobId, url, page, true);
+    await expect(stopped).rejects.toBeInstanceOf(PostingClosed);
+    await expect(stopped).rejects.toThrow(/^The posting page at careers-fixture\.icims\.com says "The job that you were looking for either does not exist or is no longer open": the posting looks closed/);
+    expect(page.filled.size).toBe(0);
+    expect(getBrowserRuns(jobId, database)).toEqual([]);
+    database.close();
+  });
+
+  it("reads Ashby's not-found page as PostingClosed only on Ashby's own host", async () => {
+    const cases: Array<[string, boolean]> = [
+      ["https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000c1/application", true],
+      [`${POSTING_URL}/apply`, false]
+    ];
+    for (const [url, closed] of cases) {
+      const database = disposableDatabase();
+      const jobId = qualifiedExternalJob(database);
+      const page = fakePage({ url, title: "Jobs", controls: [], body: "Page not found\nThe page you requested was not found\nPowered by\nPrivacy Policy" });
+      const stopped = start(database, jobId, url, page, true);
+      if (closed) {
+        await expect(stopped).rejects.toBeInstanceOf(PostingClosed);
+        await expect(stopped).rejects.toThrow(/says "The page you requested was not found": the posting looks closed/);
+      } else {
+        await expect(stopped).rejects.toBeInstanceOf(AutomaticRunStopped);
+        await expect(stopped).rejects.not.toBeInstanceOf(PostingClosed);
+        await expect(stopped).rejects.toThrow(/^No application form was found at /);
+      }
+      expect(page.filled.size).toBe(0);
+      expect(getBrowserRuns(jobId, database)).toEqual([]);
+      database.close();
+    }
+  });
+
   it("never applies the several-page stop to a supported adapter's site", async () => {
     const database = disposableDatabase();
     const jobId = qualifiedExternalJob(database);

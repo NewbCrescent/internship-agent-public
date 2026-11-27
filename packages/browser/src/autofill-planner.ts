@@ -846,11 +846,12 @@ function pauseDecision(field: BrowserField, pause: FillDecision["pause"]): FillD
   return { fieldId: field.id, action: "pause", value: null, basis: null, reason: pause?.question ?? "Paused.", pause };
 }
 
-/** "United States" matches exactly one "United States +1" / "United States (+1)" option of a phone-country list. */
+/** "United States" matches exactly one "United States +1" / "United States (+1)" / "+1 (United States)" option of a phone-country list. */
 function dialCodeOption(value: string, options: string[]): string | undefined {
   const escaped = value.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const pattern = new RegExp(`^${escaped}\\s*\\(?\\+\\d{1,4}\\)?$`, "i");
-  const matches = options.filter((option) => pattern.test(option.trim()));
+  const leading = new RegExp(`^\\(?\\+\\d{1,4}\\)?\\s*\\(\\s*${escaped}\\s*\\)$`, "i");
+  const matches = options.filter((option) => pattern.test(option.trim()) || leading.test(option.trim()));
   return matches.length === 1 ? matches[0] : undefined;
 }
 
@@ -870,12 +871,13 @@ const US_COUNTRY_KEYS: ReadonlySet<string> = new Set([
 /**
  * A country name compared loosely: no accents, lowercase, no leading flag or dialing code
  * ("🇺🇸 (+1) United States of America", Eightfold's phone picker), no trailing dialing code ("+1", "(+44)"),
- * no leading "the".
+ * no parentheses around what is left ("+1 (United States)", Oracle's phone picker), no leading "the".
  */
 function countryKey(text: string): string {
   return text.normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/^\s*[\u{1F1E6}-\u{1F1FF}]{2}\s*/u, "")
     .replace(/^\(?\+\d{1,4}\)?\s*/, "").toLocaleLowerCase("en-US")
-    .replace(/\s*\(?\+\d{1,4}\)?\s*$/, "").replace(/\s+/g, " ").trim().replace(/^the /, "");
+    .replace(/\s*\(?\+\d{1,4}\)?\s*$/, "").replace(/\s+/g, " ").trim()
+    .replace(/^\((.*)\)$/, "$1").trim().replace(/^the /, "");
 }
 
 /**
@@ -1417,8 +1419,14 @@ export function matchSuggestion(value: string, options: string[]): string | null
       }
     }
   }
+  // A phone-country list ("+1 (United States)", "United States +1"): the one option naming the country, any US spelling.
+  const dialing = options.filter((option) => DIALING_CODE_OPTION.some((pattern) => pattern.test(option.replace(/\s+/g, " ").trim())));
+  if (dialing.length > 0) return matchCountryOption(value, dialing);
   return null;
 }
+
+/** A phone-country option: "+1 (United States)", "+1 United States", or "United States (+1)". */
+const DIALING_CODE_OPTION = [/^\(?\+\d{1,4}\)?\s*\((.+)\)$/, /^\(?\+\d{1,4}\)?\s+(.+)$/, /^(.+?)\s*\(?\+\d{1,4}\)?$/];
 
 type ContactKey = keyof ContactProfile | "email" | "phone" | "currentLocation";
 
@@ -1435,12 +1443,12 @@ const CONTACT_LABELS: Array<{ key: ContactKey; pattern: RegExp }> = [
   { key: "githubUrl", pattern: /^git ?hub(?: profile)?(?: url)?$/ },
   { key: "currentLocation", pattern: /^(?:current )?location$|^location \(city\)$|^where are you (?:currently )?(?:located|based)\??$/ },
   { key: "preferredName", pattern: /^preferred(?: first)? name(?: \((?:if )?(?:different|applicable)[^)]*\))?\??$|^what is your preferred (?:first )?name\??$|^(?:what )?name (?:do you|would you like to) (?:prefer to )?(?:go by|be called)\??$/ },
-  { key: "legalFirstName", pattern: /^(legal )?(first|given) name$/ },
-  { key: "legalLastName", pattern: /^(legal )?(last|family) name$|^surname$/ },
+  { key: "legalFirstName", pattern: /^(legal )?(first|given|first\/given) name$/ },
+  { key: "legalLastName", pattern: /^(legal )?(last|family|last\/family) name$|^surname$/ },
   { key: "addressLine1", pattern: /^(street )?address( line)? ?1$|^street address$|^address$/ },
   { key: "addressLine2", pattern: /^address( line)? ?2$|^(apartment|apt|suite|unit)(,? (suite|unit|etc\.?))*$/ },
   { key: "addressCity", pattern: /^city$|^town\/city$|^city\/town$/ },
-  { key: "addressRegion", pattern: /^(state|province|region)$|^state\/province$|^state or province$|^(?:what|which) state do you (?:currently )?(?:reside|live) in\??$|^(?:current )?state of residence$/ },
+  { key: "addressRegion", pattern: /^(state|province|region)$|^state\/province$|^state or province$|^(?:what|which) state do you (?:currently )?(?:reside|live) in\??$|^(?:current )?state of residence$|^state abbreviation$/ },
   { key: "addressPostalCode", pattern: /^(postal|zip)( code)?$|^zip\/postal code$|^postal\/zip code$/ },
   { key: "addressCountry", pattern: /^country$|^country \/ territory$|^country\/territory$|^(?:phone )?country(?: phone| dialing)? code(?: picker)?$/ },
   { key: "phoneType", pattern: /^phone (device )?type$|^type of phone$|^phone number type$/ },
@@ -1476,11 +1484,20 @@ function normalizedLabel(label: string): string {
 }
 
 function contactValue(label: string, profile: PlannerInputs["profile"]): { key: ContactKey; value: string } | null {
-  const normalized = normalizedLabel(label);
-  for (const { key, pattern } of CONTACT_LABELS) {
-    if (pattern.test(normalized)) {
+  const whole = normalizedLabel(label);
+  // Oracle's "First/Given Name (Please enter with letters a-z, …)": the instruction after the label is not part of it.
+  const plain = whole.replace(/\s*\(please [^)]*\)\s*$/, "");
+  for (const normalized of plain !== whole ? [whole, plain] : [whole]) {
+    for (const { key, pattern } of CONTACT_LABELS) {
+      if (!pattern.test(normalized)) continue;
       const value = contactField(key, profile)?.trim();
-      return value ? { key, value } : null;
+      if (!value) return null;
+      // "State Abbreviation" takes the two-letter USPS code; a region that is no US state is not this field's answer.
+      if (normalized === "state abbreviation") {
+        const code = /^[a-z]{2}$/i.test(value) ? value : usStateAlternate(value);
+        return code && /^[a-z]{2}$/i.test(code) && usStateAlternate(code) ? { key, value: code.toUpperCase() } : null;
+      }
+      return { key, value };
     }
   }
   return null;

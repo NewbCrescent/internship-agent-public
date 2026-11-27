@@ -4,7 +4,7 @@ import { icimsAccountSteps, type IcimsAccountSteps } from "./ats/icims-account";
 import { passJobviteConsent, type JobviteConsentOutcome } from "./ats/jobvite-consent";
 import { oracleApplySteps, type OracleApplySteps } from "./ats/oracle-apply";
 import { createPlaywrightPage, ensureNameShim, type BrowserPage } from "./handshake-executor";
-import { advanceToApplicationForm, readStepButtonsIn, type NavigationOutcome, type StepButtons } from "./site-navigation";
+import { advanceToApplicationForm, readClosedPostingNotice, readStepButtonsIn, type NavigationOutcome, type StepButtons } from "./site-navigation";
 
 /**
  * The page adapter generic (non-Workday) runs open: the Playwright page plus
@@ -23,6 +23,8 @@ export type ApplicationPage = BrowserPage & {
   advanceToApplicationForm(): Promise<NavigationOutcome>;
   /** Whether the page shows a submit control, and its "Next" control if any. */
   stepButtons(): Promise<StepButtons>;
+  /** The closed-posting words on the page and its same-host frames (site-navigation.ts readClosedPostingNotice), or null. */
+  postingClosedNotice(): Promise<string | null>;
 };
 
 export function createApplicationPage(page: Page): ApplicationPage {
@@ -32,6 +34,7 @@ export function createApplicationPage(page: Page): ApplicationPage {
     oracle: oracleApplySteps(page),
     jobviteConsent: (choose) => passJobviteConsent(page, choose),
     advanceToApplicationForm: () => advanceToApplicationForm(page),
+    postingClosedNotice: () => readClosedPostingNotice(page),
     stepButtons: async () => {
       try {
         await ensureNameShim(page);
@@ -58,6 +61,10 @@ export function hasJobviteConsent(page: BrowserPage): page is BrowserPage & { jo
 
 export function hasSiteNavigation(page: BrowserPage): page is BrowserPage & { advanceToApplicationForm(): Promise<NavigationOutcome> } {
   return "advanceToApplicationForm" in page;
+}
+
+export function hasPostingClosedNotice(page: BrowserPage): page is BrowserPage & { postingClosedNotice(): Promise<string | null> } {
+  return "postingClosedNotice" in page;
 }
 
 export function hasStepButtons(page: BrowserPage): page is BrowserPage & { stepButtons(): Promise<StepButtons> } {

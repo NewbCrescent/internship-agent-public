@@ -3,6 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { getJobPosting, logApplicationEvent } from "@internship-agent/db";
 import {
   hasOracleSteps,
+  isOracleCandidateExperienceUrl,
   OracleApplyStepError,
   recognizeCurrentForm,
   siteWallReason,
@@ -13,7 +14,7 @@ import {
 import { standingStatementDecision, type RecognizedForm, type StandingBasisSetting, type StandingConsentSettings } from "@internship-agent/domain";
 
 import { gmailMailboxFactory, gmailSettings } from "./gmail-mailbox";
-import { ORACLE_CODE_TIMEOUT_MS, pollOracleVerificationCode, type OracleCodeResult } from "./oracle-verification-mail";
+import { companyMailDomains, ORACLE_CODE_TIMEOUT_MS, pollOracleVerificationCode, type OracleCodeResult } from "./oracle-verification-mail";
 import { MailboxUnavailable, type VerificationMailboxFactory } from "./workday-verification-mail";
 
 /**
@@ -24,7 +25,10 @@ import { MailboxUnavailable, type VerificationMailboxFactory } from "./workday-v
  * (oracle-verification-mail.ts) and typed once, never resent. Every stop
  * names what happened in a fixed sentence carrying only the host, the terms
  * statement, a fixed mailbox phrase, or a path; never the email or the code.
- * Nothing here writes to the console.
+ * Nothing here writes to the console. An application section page
+ * (`/apply/section/N`) is read only once Oracle has drawn its form
+ * (`oracle.formReady`), whether the email step led there or the run opened
+ * it (Track 63: Oracle draws its blocks after the page loads).
  */
 export type OracleEmailStepSettings = {
   mailbox: VerificationMailboxFactory | null;
@@ -70,8 +74,15 @@ export async function passOracleEmailStep(
     candidateEmail: string | null | undefined;
     standing: StandingConsentSettings;
     settings: OracleEmailStepSettings | null | undefined;
+    /** The posting's own URLs (its careers page): their domains may send the code (companyMailDomains). */
+    companySites?: ReadonlyArray<string | null | undefined>;
   }
 ): Promise<OracleEmailStepOutcome> {
+  // Already at a section page (a signed-in Oracle session skips the email step): its form is read once drawn.
+  if (hasOracleSteps(page) && isOracleCandidateExperienceUrl(page.url()) && /\/apply\/section\/\d+(?:\/|$)/.test(pathOf(page.url()))) {
+    await page.oracle.formReady(input.settings?.stepWait);
+    return { kind: "passed", form: await recognizeCurrentForm(page) };
+  }
   if (siteWallReason(page.url(), form.fields) === null || !hasOracleSteps(page) || input.settings === null) return { kind: "not-shown" };
   const settings = input.settings ?? oracleEmailStepSettings(process.env);
   const host = hostOf(page.url());
@@ -127,6 +138,7 @@ export async function passOracleEmailStep(
   const afterStep = async (screen: OracleApplyScreen): Promise<OracleEmailStepOutcome> => {
     switch (screen) {
       case "form":
+        await page.oracle.formReady(settings.stepWait);
         return { kind: "passed", form: await recognizeCurrentForm(page) };
       case "identity":
         return stopped(`Oracle Cloud HCM at ${host} asks you to confirm your identity for this email (last name, date of birth, email, or phone) before the application; the agent does not answer that step. Apply in your own browser.`);
@@ -143,7 +155,7 @@ export async function passOracleEmailStep(
 
   let found: OracleCodeResult;
   try {
-    found = await pollOracleVerificationCode(settings.mailbox, { host, company: input.company, since: result.clickedAt }, settings.codeWait ?? {});
+    found = await pollOracleVerificationCode(settings.mailbox, { host, company: input.company, companyDomains: companyMailDomains(input.companySites ?? []), since: result.clickedAt }, settings.codeWait ?? {});
   } catch (error) {
     const phrase = error instanceof MailboxUnavailable ? error.message : "the mailbox could not be read";
     return stopped(`Oracle Cloud HCM at ${host} emailed you a one-time code, and the mailbox could not be read (${phrase}), so none was entered. Start the run again later, or apply in your own browser.`);

@@ -605,6 +605,49 @@ describe("contact details from the profile", () => {
   });
 });
 
+describe("Oracle Candidate Experience's one-page form labels (Track 63, labels and options from 2026-11-27 captures; fictional profile)", () => {
+  const profile = { legalFirstName: "Jordan", legalLastName: "Rivera", addressRegion: "California", addressCountry: "United States of America" };
+  const plan = (controls: RawControl[], withProfile: Record<string, string> = profile) => planAutofill(
+    recognizeForm("https://fixture.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/10001/apply/section/1", "Apply", controls),
+    { profile: withProfile, resolutions: new Map(), packageAnswers: [], variantId: null }
+  );
+  const actions = (result: ReturnType<typeof plan>) => Object.fromEntries(result.decisions.map((decision) => [decision.fieldId, [decision.action, decision.value]]));
+  const CODES = ["+1 (United States)", "+1 (United States Minor Outlying Islands)", "+1 (American Samoa)"];
+
+  it("matches a \"+1 (United States)\" phone-country option for any US spelling, never a territory", () => {
+    expect(matchSuggestion("United States", CODES)).toBe("+1 (United States)");
+    expect(matchSuggestion("United States of America", CODES)).toBe("+1 (United States)");
+    expect(matchSuggestion("Canada", ["+1 (United States)"])).toBeNull();
+    expect(matchCountryOption("United States of America", ["+93 (Afghanistan)", "+1 (American Samoa)", "+1 (United States)"])).toBe("+1 (United States)");
+    const listed = plan([control({ tag: "select", id: "country-codes", label: "Country Code", required: true, options: ["+93 (Afghanistan)", "+1 (American Samoa)", "+1 (United States)"] })]);
+    expect(actions(listed)).toEqual({ "country-codes": ["choose", "+1 (United States)"] });
+    const typed = plan([control({ tag: "select", id: "country-codes", label: "Country Code", required: true, options: ["+93 (Afghanistan)", "+1 (United States)"] })], { addressCountry: "United States" });
+    expect(actions(typed)).toEqual({ "country-codes": ["choose", "+1 (United States)"] });
+  });
+
+  it("reads \"First/Given Name (Please …)\" and \"Last/Family Name (Please …)\" as the legal names", () => {
+    const please = "(Please enter with letters a-z, capital letters A-Z and the characters - or ‘ only. Accented and other special characters will not be recognized)";
+    const result = plan([
+      control({ tag: "input", type: "text", id: "firstName-41", label: `First/Given Name ${please}`, required: true }),
+      control({ tag: "input", type: "text", id: "lastName-42", label: `Last/Family Name ${please}`, required: true }),
+      control({ tag: "input", type: "text", id: "first-plain", label: "First Name (please use your legal name)", required: true }),
+      control({ tag: "input", type: "text", id: "other-name", label: "Name (other)", required: false })
+    ]);
+    expect(actions(result)).toMatchObject({ "firstName-41": ["fill", "Jordan"], "lastName-42": ["fill", "Rivera"], "first-plain": ["fill", "Jordan"] });
+    expect(result.decisions.find((decision) => decision.fieldId === "other-name")?.basis).not.toEqual({ kind: "profile", field: "fullName" });
+  });
+
+  it("fills \"State Abbreviation\" with the two-letter code, and nothing for a region that is no US state", () => {
+    const box = [control({ tag: "input", type: "text", id: "region-52", label: "State Abbreviation", required: true })];
+    expect(actions(plan(box))).toEqual({ "region-52": ["fill", "CA"] });
+    expect(plan(box).decisions[0]!.basis).toEqual({ kind: "profile", field: "addressRegion" });
+    expect(actions(plan(box, { addressRegion: "ca" }))).toEqual({ "region-52": ["fill", "CA"] });
+    const foreign = plan(box, { addressRegion: "Ontario" });
+    expect(foreign.decisions[0]!.basis).not.toEqual({ kind: "profile", field: "addressRegion" });
+    expect(foreign.decisions[0]!.value).not.toBe("Ontario");
+  });
+});
+
 describe("how did you hear about us", () => {
   it("recognizes the question in its usual wordings", () => {
     for (const label of ["How Did You Hear About Us?*", "How did you learn about this position?", "Where did you hear about this job?", "Source"]) {

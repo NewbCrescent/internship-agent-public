@@ -4,7 +4,10 @@
  * oracle.com / oraclecloud.com), the company in From or Subject, or the
  * tenant label in From; other application sites' mail never counts; six-digit
  * codes next to a "code", "PIN", or "passcode" anchor, in text or HTML; mail
- * from 30 s before the Next click on; exactly one distinct code or a stop;
+ * from 30 s before the Next click on; the company's own domain (its name
+ * joined or its initials, or the careers URL's root; Track 63, shaped from
+ * a national laboratory's "STAFFING" mail headers of 2026-11-27, with
+ * fictional domains); exactly one distinct code or a stop;
  * bounded polling with mailbox failures as fixed phrases; and the code never
  * logged. Oracle's mail was never seen (its sender and template are tenant
  * settings), so the wording here is derived; every code, company, and host is
@@ -13,6 +16,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi, type MockInstance } from "vitest";
 
 import {
+  companyMailDomains,
+  companyMailLabels,
   findOracleVerificationCode,
   MailboxUnavailable,
   oracleCodesIn,
@@ -114,6 +119,62 @@ describe("Oracle code senders", () => {
     ]) {
       expect(relevant({ from, subject: `Your ${COMPANY} verification code` })).toBe(false);
     }
+  });
+});
+
+describe("the company's own domain (Track 63)", () => {
+  // A host whose tenant label appears in no address below, so only the company rules decide.
+  const host = "zq7k.fa.us8.oraclecloud.com";
+
+  it("counts mail at the company's initials or joined name, never a single word or a look-alike", () => {
+    const laboratory = relevantOracleCodeHeader({ host, company: "Fixture National Laboratory" });
+    expect(laboratory({ from: "STAFFING <staffing@fnl.example>", subject: "Confirm your identity" })).toBe(true);
+    expect(laboratory({ from: "x@mail.fnl.example", subject: "Confirm your identity" })).toBe(true);
+    expect(laboratory({ from: "x@fixturenationallaboratory.example", subject: "Confirm your identity" })).toBe(true);
+    expect(laboratory({ from: "x@notfnl.example", subject: "Confirm your identity" })).toBe(false);
+    expect(laboratory({ from: "x@fnl.example.attacker.test", subject: "Confirm your identity" })).toBe(false);
+    expect(laboratory({ from: "x@national.example", subject: "Confirm your identity" })).toBe(false);
+    expect(laboratory({ from: "x@laboratory.example", subject: "Confirm your identity" })).toBe(false);
+
+    const robotics = relevantOracleCodeHeader({ host, company: COMPANY });
+    expect(robotics({ from: "Talent <talent@fixturerobotics.example>", subject: "Confirm your identity" })).toBe(true);
+    // Two words make no initials; single words never count.
+    expect(robotics({ from: "x@fr.example", subject: "Confirm your identity" })).toBe(false);
+    expect(robotics({ from: "x@fixture.example", subject: "Confirm your identity" })).toBe(false);
+    expect(robotics({ from: "x@robotics.example", subject: "Confirm your identity" })).toBe(false);
+    expect(relevantOracleCodeHeader({ host, company: "Fixture Robotics Inc." })({ from: "talent@fixturerobotics.example", subject: "Confirm your identity" })).toBe(true);
+  });
+
+  it("derives labels from the name only", () => {
+    expect(companyMailLabels("Fixture National Laboratory")).toEqual(["fixturenationallaboratory", "fnl"]);
+    expect(companyMailLabels("Fixture Robotics Inc.")).toEqual(["fixturerobotics"]);
+    expect(companyMailLabels("The Bureau of Fixture Science")).toEqual(["bureauoffixturescience", "bfs"]);
+    expect(companyMailLabels("Ab")).toEqual([]);
+  });
+
+  it("takes the careers URL's registrable domain, never an application site's", () => {
+    expect(companyMailDomains([
+      "https://careers.fixture-group.example/jobs", "https://boards.greenhouse.io/fixture", "https://fixture.fa.us2.oraclecloud.com/x", null
+    ])).toEqual(["fixture-group.example"]);
+    expect(companyMailDomains(["https://jobs.fixture.co.uk/careers", "ftp://files.fixture-group.example/", "not a url"])).toEqual(["fixture.co.uk"]);
+    const relevant = relevantOracleCodeHeader({ host, company: "Nobody Else", companyDomains: ["fixture-group.example"] });
+    expect(relevant({ from: "x@mail.fixture-group.example", subject: "Confirm your identity" })).toBe(true);
+    expect(relevant({ from: "x@fixture-group.example.attacker.test", subject: "Confirm your identity" })).toBe(false);
+    expect(relevantOracleCodeHeader({ host, company: "Nobody Else" })({ from: "x@mail.fixture-group.example", subject: "Confirm your identity" })).toBe(false);
+  });
+
+  it("still rejects Greenhouse, Workday, and iCIMS mail for a company whose label would match", () => {
+    // Each sender's registrable name equals the company's label, and the site rule still rejects it first.
+    expect(relevantOracleCodeHeader({ host, company: "Greenhouse" })({ from: "no-reply@greenhouse.io", subject: "Confirm your identity" })).toBe(false);
+    expect(relevantOracleCodeHeader({ host, company: "Workday" })({ from: "x@workday.com", subject: "Confirm your identity" })).toBe(false);
+    expect(relevantOracleCodeHeader({ host, company: "iCIMS" })({ from: "x@icims.com", subject: "Confirm your identity" })).toBe(false);
+    expect(relevantOracleCodeHeader({ host, company: "Myworkday" })({ from: "x@myworkday.com", subject: "Confirm your identity" })).toBe(false);
+  });
+
+  it("finds the code in a laboratory-shaped message after the click", () => {
+    const staffing = message({ from: "STAFFING <staffing@fnl.example>", subject: "Confirm your identity" });
+    expect(findOracleVerificationCode([staffing], { host, company: "Fixture National Laboratory", since: SINCE })).toEqual({ kind: "found", code: CODE });
+    expect(findOracleVerificationCode([staffing], { host, company: "Another Company", since: SINCE })).toEqual({ kind: "none" });
   });
 });
 

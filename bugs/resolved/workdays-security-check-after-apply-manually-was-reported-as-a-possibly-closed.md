@@ -14,3 +14,7 @@ Regressions: the fixture's `security` and `security-page` modes
 (`pnpm test:browser:fixture`) and the security-check case in
 `run-lifecycle.integration.test.ts` (`pnpm test:browser-worker:local`).
 Not verified live: an automatic run on Harbor after the change.
+
+## Refuted causes
+
+- Harbor's posting (<run id>) is closed. Evidence: on 2026-11-27 employer-a.wd115's public job search for R-110876 returns it (retitled "Customer Insights & Analytics Data Engineering Intern") and its public CXS address answers 200.

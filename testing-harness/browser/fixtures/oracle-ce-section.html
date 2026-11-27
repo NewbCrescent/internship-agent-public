@@ -5,22 +5,50 @@
   <title>Robotics Software Intern - Fixture Robotics Careers</title>
   <style>
     .oda-dialog { border: 1px solid #ccc; margin-top: 24px; }
+    .cx-select-listbox { list-style: none; margin: 0; padding: 0; border: 1px solid #ccc; max-height: 160px; overflow: auto; }
+    .cx-select-listbox[hidden] { display: none; }
+    .cx-select-listbox li { padding: 2px 4px; cursor: pointer; }
   </style>
 </head>
 <body>
   <!--
     A fictional Oracle Cloud HCM Candidate Experience application section ("Fixture Robotics",
-    served at .../job/10001/apply/section/1). DERIVED from Oracle's public CE bundle templates
-    (static.oracle.com oj-hcm-ce 2610.17: apply-flow, its blocks, and apply-flow-pagination), not
-    captured: no Oracle section page has been loaded. Its English strings are assumed. The harness
-    replaces __PAGINATION__ with "multi" (a Next button: more sections follow) or "single" (the
-    Submit button of the last section). The email box shows the address the email step took (read
-    from the fixture's own state, no query string). The Oracle Digital Assistant block is the
-    chatbot popup's required work-summary box, which is never an application field.
+    served at .../job/<id>/apply/section/1). The base is DERIVED from Oracle's public CE bundle
+    templates (static.oracle.com oj-hcm-ce 2610.17: apply-flow, its blocks, and
+    apply-flow-pagination); its English strings are assumed. The harness replaces __PAGINATION__
+    with "multi" (a Next button: more sections follow) or "single" (the Submit button of the last
+    section). The Oracle Digital Assistant block is the chatbot popup's required work-summary box,
+    which is never an application field.
+    Track 63 (one-page form shapes from the 2026-11-27 stop captures and run traces of four
+    tenants, behaviour MODELLED): the "Import your profile" block drawn first
+    (div.apply-flow-block--profile-import with input.apply-flow-profile-import-awli__file-upload,
+    whose change counts an import and renames every field id with a new counter, as Oracle's
+    redraw did); the Email Address box read-only with the address the email step took (the
+    fixture's own state, else data-session-email: __SESSION_EMAIL__, a signed-in session) and an
+    "Edit email address" button; a cx-select-input "Country Code" combobox whose listbox
+    ("+1 (United States)", "+93 (Afghanistan)", "+1 (American Samoa)", "+44 (United Kingdom)")
+    shows on click or focus, filters on input, and takes a clicked option as its text; and an
+    "Address Line 1" combobox whose listbox never gets options. __DELAY__: when above 0, the
+    Contact Information block and the footer are drawn that many ms after load (Oracle draws its
+    blocks after the page loads; the import block is already there).
   -->
+  <div id="fixture" data-delay="__DELAY__" data-session-email="__SESSION_EMAIL__"></div>
   <main class="app-main">
     <form novalidate class="apply-flow" id="section-form" data-pagination="__PAGINATION__">
-      <h1 class="apply-flow-header">Contact Information</h1>
+      <h1 class="apply-flow-header">Job application form</h1>
+      <div class="apply-flow-block apply-flow-block--profile-import">
+        <h2 class="apply-flow-block__title">Import your profile</h2>
+        <div class="apply-flow-profile-import">
+          <input type="file" class="apply-flow-profile-import-awli__file-upload" id="profile-import-upload" aria-label="Import your profile from resume" accept=".pdf,.doc,.docx">
+        </div>
+      </div>
+      <div class="apply-flow-block" id="contact-host"></div>
+    </form>
+  </main>
+
+  <template id="contact-block">
+    <h2 class="apply-flow-block__title">Contact Information</h2>
+    <div class="apply-flow-block__form-list">
       <div class="input-row input-row--text">
         <label class="input-row__label input-row__label--required" for="firstName-1">First Name</label>
         <input class="input-row__control" id="firstName-1" name="firstName" type="text" aria-required="true" required>
@@ -31,23 +59,43 @@
       </div>
       <div class="input-row input-row--text">
         <label class="input-row__label input-row__label--required" for="email-3">Email Address</label>
-        <input class="input-row__control" id="email-3" name="email" type="email" aria-required="true" required>
+        <input class="input-row__control" id="email-3" name="email" type="email" aria-required="true" required readonly>
+        <button type="button" class="button button--link" id="edit-email">Edit email address</button>
+      </div>
+      <div class="input-row input-row--phone">
+        <label class="input-row__label input-row__label--required" for="phoneCountryCode-6">Country Code</label>
+        <div class="cx-select-container">
+          <input class="cx-select-input input-row__control" id="phoneCountryCode-6" type="text" role="combobox" autocomplete="off" aria-expanded="false" aria-autocomplete="list" aria-controls="country-codes-dropdownphoneNumber-listbox" aria-required="true">
+          <ul class="cx-select-listbox" id="country-codes-dropdownphoneNumber-listbox" role="listbox" hidden>
+            <li role="option">+1 (United States)</li>
+            <li role="option">+93 (Afghanistan)</li>
+            <li role="option">+1 (American Samoa)</li>
+            <li role="option">+44 (United Kingdom)</li>
+          </ul>
+        </div>
       </div>
       <div class="input-row input-row--text">
         <label class="input-row__label input-row__label--required" for="phoneNumber-4">Phone Number</label>
         <input class="input-row__control" id="phoneNumber-4" name="phoneNumber" type="tel" aria-required="true" required>
       </div>
+      <div class="input-row input-row--text">
+        <label class="input-row__label input-row__label--required" for="addressLine1-7">Address Line 1</label>
+        <div class="cx-select-container">
+          <input class="cx-select-input input-row__control" id="addressLine1-7" type="text" role="combobox" autocomplete="off" aria-expanded="false" aria-autocomplete="list" aria-controls="addressLine1-7-listbox" aria-required="true">
+          <ul class="cx-select-listbox" id="addressLine1-7-listbox" role="listbox" hidden></ul>
+        </div>
+      </div>
       <div class="input-row input-row--file">
         <label class="input-row__label input-row__label--required" for="attachment-upload-5">Resume</label>
         <input class="input-row__control" id="attachment-upload-5" name="resume" type="file" accept=".pdf,.doc,.docx" aria-required="true" required>
       </div>
-      <footer class="apply-flow-pagination">
-        <button type="button" class="button apply-flow-pagination__button" disabled><span class="button__label">Previous</span></button>
-        <button type="button" class="button apply-flow-pagination__button" data-qa="applyFlowPaginationNextButton" id="next-section"><span class="button__label">Next</span></button>
-        <button type="button" class="button apply-flow-pagination__submit-button" id="submit-application"><span class="button__label">Submit</span></button>
-      </footer>
-    </form>
-  </main>
+    </div>
+    <footer class="apply-flow-pagination">
+      <button type="button" class="button apply-flow-pagination__button" disabled><span class="button__label">Previous</span></button>
+      <button type="button" class="button apply-flow-pagination__button" data-qa="applyFlowPaginationNextButton" id="next-section"><span class="button__label">Next</span></button>
+      <button type="button" class="button apply-flow-pagination__submit-button" id="submit-application"><span class="button__label">Submit</span></button>
+    </footer>
+  </template>
 
   <section class="oda-dialog">
     <p class="oda-dialog__hint">Summarize your work experience for the digital assistant.</p>
@@ -58,13 +106,66 @@
 
   <script>
     (() => {
-      const multi = document.getElementById("section-form").dataset.pagination === "multi";
-      // Only the pagination this section shows: Next while more sections follow, Submit on the last.
-      document.getElementById(multi ? "submit-application" : "next-section").remove();
+      const fixture = document.getElementById("fixture");
+      const form = document.getElementById("section-form");
+      const multi = form.dataset.pagination === "multi";
       const state = JSON.parse(localStorage.getItem("fixture-oracle") || "{}");
-      if (state.email) document.getElementById("email-3").value = state.email;
-      const submit = document.getElementById("submit-application");
-      if (submit) submit.addEventListener("click", () => { state.submitted = (state.submitted || 0) + 1; localStorage.setItem("fixture-oracle", JSON.stringify(state)); });
+      // This page's own record: imports into the profile import box.
+      const section = { imported: 0 };
+      const saveSection = () => localStorage.setItem("fixture-oracle-section", JSON.stringify(section));
+      saveSection();
+      // The import box parses a resume and redraws the form with new ids.
+      let counter = 40;
+      document.getElementById("profile-import-upload").addEventListener("change", () => {
+        section.imported += 1;
+        saveSection();
+        for (const element of Array.from(document.querySelectorAll("#contact-host [id]"))) {
+          const match = /^(.*)-(\d+)$/.exec(element.id);
+          if (!match || element.getAttribute("role") === "listbox") continue;
+          counter += 1;
+          const renamed = `${match[1]}-${counter}`;
+          for (const label of Array.from(document.querySelectorAll(`label[for="${element.id}"]`))) label.htmlFor = renamed;
+          element.id = renamed;
+        }
+      });
+      const list = (input, listbox) => {
+        const options = () => Array.from(listbox.querySelectorAll('[role="option"]'));
+        const open = () => { listbox.hidden = false; input.setAttribute("aria-expanded", "true"); };
+        const close = () => { listbox.hidden = true; input.setAttribute("aria-expanded", "false"); };
+        input.addEventListener("click", open);
+        input.addEventListener("focus", open);
+        input.addEventListener("input", () => {
+          const typed = input.value.trim().toLowerCase();
+          for (const option of options()) option.hidden = typed !== "" && !option.textContent.toLowerCase().includes(typed);
+          open();
+        });
+        input.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); });
+        input.addEventListener("blur", () => setTimeout(close, 100));
+        // A press on an option keeps the focus in the box, so its click lands.
+        listbox.addEventListener("mousedown", (event) => event.preventDefault());
+        listbox.addEventListener("click", (event) => {
+          const option = event.target.closest('[role="option"]');
+          if (!option) return;
+          input.value = option.textContent.trim();
+          for (const each of options()) each.hidden = false;
+          close();
+        });
+      };
+      const draw = () => {
+        const host = document.getElementById("contact-host");
+        host.append(document.getElementById("contact-block").content.cloneNode(true));
+        // Only the pagination this section shows: Next while more sections follow, Submit on the last.
+        document.getElementById(multi ? "submit-application" : "next-section").remove();
+        const email = state.email || fixture.dataset.sessionEmail;
+        if (email && !email.startsWith("__")) document.getElementById("email-3").value = email;
+        list(document.getElementById("phoneCountryCode-6"), document.getElementById("country-codes-dropdownphoneNumber-listbox"));
+        list(document.getElementById("addressLine1-7"), document.getElementById("addressLine1-7-listbox"));
+        const submit = document.getElementById("submit-application");
+        if (submit) submit.addEventListener("click", () => { state.submitted = (state.submitted || 0) + 1; localStorage.setItem("fixture-oracle", JSON.stringify(state)); });
+      };
+      const delay = Number(fixture.dataset.delay) || 0;
+      if (delay > 0) setTimeout(draw, delay);
+      else draw();
     })();
   </script>
 </body>

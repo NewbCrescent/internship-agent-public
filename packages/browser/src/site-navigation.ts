@@ -245,18 +245,52 @@ export type NavigationOutcome = {
 
 const MAX_HOPS = 4;
 
-/** A posting page saying the job is closed or gone (Greenhouse's "no longer open", Garmin's careers 404, Paylocity's Job Not Found). */
-const CLOSED_POSTING = /\b(?:the job you are looking for is no longer open|this job is no longer (?:open|available|accepting applications)|this (?:position|posting|job) (?:has been filled|is closed|has closed|is no longer available)|no longer accepting applications|(?:that|this) job does not exist or is not currently active|this job may be no longer available|the page you are looking for no longer exists)\b/i;
+/**
+ * A posting page saying the job is closed or gone (Greenhouse's "no longer open", Garmin's careers 404, Paylocity's Job Not Found,
+ * iCIMS's "either does not exist or is no longer open" notice, which iCIMS draws in its same-host content frame).
+ */
+const CLOSED_POSTING = /\b(?:the job you are looking for is no longer open|this job is no longer (?:open|available|accepting applications)|this (?:position|posting|job) (?:has been filled|is closed|has closed|is no longer available)|no longer accepting applications|(?:that|this) job does not exist or is not currently active|this job may be no longer available|the page you are looking for no longer exists|the job (?:that )?you were looking for (?:either )?does not exist or is no longer open)\b/i;
 
-/** A posting page saying the job is closed or gone (Greenhouse's "no longer open", Garmin's careers 404, Paylocity's Job Not Found); the matched words, or null. Pure. */
-export function closedPostingNotice(bodyText: string): string | null {
+/** Ashby's page for a posting or job board it no longer serves (seen 2026-11-26 on a board that moved to another ATS); read only on jobs.ashbyhq.com, where no other page says it. */
+const ASHBY_NOT_FOUND = /\bthe page you requested was not found\b/i;
+
+/**
+ * A posting page saying the job is closed or gone (Greenhouse's "no longer open", Garmin's careers 404, Paylocity's Job Not Found,
+ * iCIMS's frame notice, and, when the page's address is on jobs.ashbyhq.com, Ashby's not-found page); the matched words, or null. Pure.
+ */
+export function closedPostingNotice(bodyText: string, url?: string): string | null {
   const text = bodyText.replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ");
-  return CLOSED_POSTING.exec(text)?.[0] ?? null;
+  const closed = CLOSED_POSTING.exec(text)?.[0];
+  if (closed) return closed;
+  if (url !== undefined && hostOf(url) === "jobs.ashbyhq.com") return ASHBY_NOT_FOUND.exec(text)?.[0] ?? null;
+  return null;
 }
 const NAME_SHIM = "globalThis.__name = globalThis.__name || ((target) => target);";
 
 function hostOf(url: string): string | null {
   return parsedUrl(url)?.hostname.toLowerCase() ?? null;
+}
+
+/**
+ * The closed-posting words on the page: its main document and its same-host child frames (iCIMS draws a
+ * job, and its closed notice, in a same-host content frame), never another host's frame. Read-only; a frame
+ * that went away or runs no scripts adds nothing. Null when none says the posting is closed.
+ */
+export async function readClosedPostingNotice(page: Page): Promise<string | null> {
+  const pageUrl = page.url();
+  const pageHost = hostOf(pageUrl);
+  const main = page.mainFrame();
+  const frames: Frame[] = [main, ...page.frames().filter((frame) => frame !== main && pageHost !== null && hostOf(frame.url()) === pageHost)];
+  const texts: string[] = [];
+  for (const frame of frames) {
+    try {
+      await frame.evaluate(NAME_SHIM);
+      texts.push(await frame.evaluate(() => document.body?.innerText ?? ""));
+    } catch {
+      // A frame that went away or runs no scripts says nothing.
+    }
+  }
+  return closedPostingNotice(texts.join("\n"), pageUrl);
 }
 
 /** Visible form controls, for waiting until a page reached by a hop has drawn its form. Runs in the page. */

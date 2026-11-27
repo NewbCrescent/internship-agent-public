@@ -16,6 +16,15 @@ import { ensureNameShim } from "../handshake-executor";
  * in", the SMS toggle, or anything on an identity or already-applied screen,
  * and it never solves a CAPTCHA. The emailed code is never logged, returned,
  * or put in an error.
+ *
+ * Track 63: some tenants ask for the email on the job page itself (the
+ * body's `data-route` is "job-details.quick-email-verification", "What's
+ * your email?"; route and text captured from a run trace on 2026-11-27, the
+ * markup modelled), with a Next that may sit outside the email box's form
+ * and stay disabled until the email and terms are given. A section page is
+ * read only once its form controls are drawn and steady (`formReady`): Oracle
+ * draws its blocks after the page loads, and its "Import your profile" box
+ * comes first (2026-11-27 stop captures).
  */
 export type OracleApplyScreen = "email" | "pin" | "identity" | "already-applied" | "captcha" | "loading" | "form" | "other";
 
@@ -25,8 +34,12 @@ export type OracleWaitOptions = { timeoutMs?: number; pollMs?: number };
 export type OracleInspection = {
   /** Visible `input[id^="primary-email"]` (else visible `input[type=email]`) inside a form. */
   emailInputs: number;
-  /** The email box's form has a visible, enabled submit button. */
+  /** The email box's form has a visible, enabled submit button (or the page's one icon Next/Continue button). */
   emailNext: boolean;
+  /** A Next candidate for the email box exists but is disabled (enabled once the email and terms are given). */
+  emailNextDisabled: boolean;
+  /** The body's `data-route` ("job-details.quick-email-verification"), "" when absent. */
+  route: string;
   /** `#legal-disclaimer-checkbox` exists. */
   termsPresent: boolean;
   termsChecked: boolean;
@@ -83,17 +96,34 @@ export function readOracleInspectionIn(root: Element): OracleInspection {
   let emails = Array.from(root.querySelectorAll('input[id^="primary-email"]')).filter((element) => shown(element) && inForm(element));
   if (emails.length === 0) emails = Array.from(root.querySelectorAll('input[type="email"]')).filter((element) => shown(element) && inForm(element));
   let emailNext = false;
+  let emailNextDisabled = false;
   if (emails.length === 1) {
     const email = emails[0]!;
     email.setAttribute(mark, "email");
     const form = email.closest("form")!;
-    const submits = Array.from(form.querySelectorAll('button[type="submit"]')).filter((button) => shown(button) && enabled(button));
-    const next = submits.find((button) => button.closest("footer.apply-flow-pagination__buttons")) ?? submits[0];
-    if (next) {
-      next.setAttribute(mark, "next");
-      emailNext = true;
+    const footerFirst = (buttons: Element[]) => buttons.find((button) => button.closest("footer.apply-flow-pagination__buttons")) ?? buttons[0];
+    const visibleSubmits = Array.from(form.querySelectorAll('button[type="submit"]')).filter(shown);
+    let candidate: Element | undefined;
+    if (visibleSubmits.length > 0) {
+      const enabledSubmits = visibleSubmits.filter(enabled);
+      candidate = footerFirst(enabledSubmits.length > 0 ? enabledSubmits : visibleSubmits);
+    } else {
+      // No submit in the form (the quick email verification's round icon Next, modelled): the one visible
+      // Next or Continue button of the page's main region, outside a cookie notice.
+      const scope = email.closest("main") ?? root;
+      const name = (element: Element) => collapse(element.getAttribute("aria-label") || element.getAttribute("title") || (element as HTMLElement).innerText || element.textContent || "");
+      const named = Array.from(scope.querySelectorAll('button, [role="button"]')).filter((element) => shown(element)
+        && !element.closest('[id*="cookie" i], [class*="cookie" i], [aria-label*="cookie" i], #onetrust-consent-sdk')
+        && /^(?:next|continue)$/i.test(name(element)));
+      if (named.length === 1) candidate = named[0];
+    }
+    if (candidate) {
+      candidate.setAttribute(mark, "next");
+      if (enabled(candidate)) emailNext = true;
+      else emailNextDisabled = true;
     }
   }
+  const route = (root.ownerDocument?.body ?? root).getAttribute("data-route") ?? "";
 
   const terms = root.querySelector("#legal-disclaimer-checkbox") as HTMLInputElement | null;
   const termsLabel = root.querySelector("#legal-disclaimer-checkbox-label") as HTMLElement | null;
@@ -124,6 +154,8 @@ export function readOracleInspectionIn(root: Element): OracleInspection {
   return {
     emailInputs: emails.length,
     emailNext,
+    emailNextDisabled,
+    route,
     termsPresent: terms !== null,
     termsChecked: terms?.checked === true,
     termsStatement,
@@ -147,7 +179,7 @@ export function oracleApplyScreenOf(url: string, inspection: OracleInspection, c
   if (inspection.alreadyApplied || /\/apply\/submission-exists\/?$/.test(path)) return "already-applied";
   if (inspection.pinInputs > 0 || inspection.pinLocked) return "pin";
   if (/\/apply\/section\/\d+(?:\/|$)/.test(path)) return "form";
-  if (/\/apply\/email(?:\/|$)/.test(path) && inspection.emailInputs >= 1) return "email";
+  if ((/\/apply\/email(?:\/|$)/.test(path) || /(?:^|\.)(?:quick-)?email-verification$/.test(inspection.route)) && inspection.emailInputs >= 1) return "email";
   if (inspection.loading) return "loading";
   return "other";
 }
@@ -172,10 +204,16 @@ export type OracleApplySteps = {
   submitEmail(email: string, accept: (statement: string) => boolean, wait?: OracleWaitOptions): Promise<OracleEmailResult>;
   /** Types the code into the PIN boxes and clicks Verify once; never Resend. */
   enterCode(code: string, wait?: OracleWaitOptions): Promise<OraclePinResult>;
+  /**
+   * Waits until a section page shows its form controls (outside the profile
+   * import box and the chatbot), the same count three reads in a row: true;
+   * false on another screen or after the timeout. Never clicks or types.
+   */
+  formReady(wait?: OracleWaitOptions): Promise<boolean>;
 };
 
 const EMPTY: OracleInspection = {
-  emailInputs: 0, emailNext: false, termsPresent: false, termsChecked: false, termsStatement: "", emailMethodActive: null,
+  emailInputs: 0, emailNext: false, emailNextDisabled: false, route: "", termsPresent: false, termsChecked: false, termsStatement: "", emailMethodActive: null,
   pinInputs: 0, pinInvalid: false, pinLocked: false, identity: false, alreadyApplied: false, unconfirmedSubmission: false, loading: true
 };
 
@@ -189,6 +227,21 @@ async function read(page: Page): Promise<{ screen: OracleApplyScreen; inspection
     // A navigation in progress.
     return { screen: "loading", inspection: EMPTY };
   }
+}
+
+/**
+ * The visible form controls of an Oracle section (inputs other than hidden and
+ * file inputs, text areas, and lists) inside its application form, outside the
+ * "Import your profile" box and Oracle Digital Assistant's chatbot. Runs in
+ * the page; self-contained.
+ */
+export function countOracleFormControlsIn(root: Element): number {
+  const scope = root.querySelector("form.apply-flow__content-form") ?? root.querySelector("form.apply-flow") ?? root.querySelector("main") ?? root;
+  return Array.from(scope.querySelectorAll('input:not([type="hidden"]):not([type="file"]), textarea, select')).filter((element) => {
+    if (element.closest('.apply-flow-block--profile-import, .apply-flow-profile-import, [id^="oda-"], .oda-chat-wrapper')) return false;
+    if (element.getClientRects().length === 0) return false;
+    return getComputedStyle(element).visibility !== "hidden";
+  }).length;
 }
 
 /** The visible validation or alert text inside the email box's form, collapsed. Runs in the page. */
@@ -239,14 +292,15 @@ export function oracleApplySteps(page: Page): OracleApplySteps {
     async submitEmail(email, accept, wait = {}) {
       let current = await read(page);
       if (current.screen === "captcha") return { result: "captcha" };
-      if (current.screen !== "email" || current.inspection.emailInputs !== 1 || !current.inspection.emailNext) return { result: "unexpected" };
+      const hasNext = (inspection: OracleInspection) => inspection.emailNext || inspection.emailNextDisabled;
+      if (current.screen !== "email" || current.inspection.emailInputs !== 1 || !hasNext(current.inspection)) return { result: "unexpected" };
       const needsTerms = current.inspection.termsPresent && !current.inspection.termsChecked;
       const statement = current.inspection.termsStatement;
       if (needsTerms && !accept(statement)) return { result: "terms-declined", statement };
       if (current.inspection.emailMethodActive === false) {
         await step("the email verification method could not be chosen", () => page.locator("#applyFlowVerifyEmail").first().click({ timeout: 10_000 }));
         current = await read(page);
-        if (current.screen !== "email" || current.inspection.emailMethodActive !== true || current.inspection.emailInputs !== 1 || !current.inspection.emailNext) {
+        if (current.screen !== "email" || current.inspection.emailMethodActive !== true || current.inspection.emailInputs !== 1 || !hasNext(current.inspection)) {
           return { result: "unexpected" };
         }
       }
@@ -267,9 +321,16 @@ export function oracleApplySteps(page: Page): OracleApplySteps {
         });
         accepted = statement;
       }
-      // Re-read so the tags point at the current Next (Knockout may have redrawn the footer).
-      const ready = await read(page);
-      if (ready.screen !== "email" || !ready.inspection.emailNext) throw new OracleApplyStepError("the email step's Next button went away");
+      // Re-read so the tags point at the current Next (Knockout may have redrawn the footer); a Next that
+      // is enabled only once the email and terms are given gets up to 3 s.
+      const pollMs = wait.pollMs ?? 250;
+      const readyBy = Date.now() + 3_000;
+      for (;;) {
+        const ready = await read(page);
+        if (ready.screen === "email" && ready.inspection.emailNext) break;
+        if (Date.now() >= readyBy) throw new OracleApplyStepError("the email step's Next button did not become clickable");
+        await page.waitForTimeout(pollMs).catch(() => undefined);
+      }
       const clickedAt = new Date();
       await step("the email step's Next button could not be clicked", () => tagged(page, "next").click({ timeout: 10_000 }));
       const settled = await settle("email", wait);
@@ -314,6 +375,31 @@ export function oracleApplySteps(page: Page): OracleApplySteps {
       if (!settled) return { result: "stuck" };
       if (settled.early) return { result: "wrong-code" };
       return { result: "next", screen: settled.screen };
+    },
+    async formReady(wait = {}) {
+      const timeoutMs = wait.timeoutMs ?? 30_000;
+      const pollMs = wait.pollMs ?? 250;
+      const deadline = Date.now() + timeoutMs;
+      let last = -1;
+      let steady = 0;
+      for (;;) {
+        const current = await read(page);
+        if (current.screen !== "form" && current.screen !== "loading") return false;
+        let count = 0;
+        if (current.screen === "form") {
+          try {
+            count = await page.locator("body").evaluate(countOracleFormControlsIn);
+          } catch {
+            count = 0;
+          }
+        }
+        if (current.screen === "form" && count > 0 && count === last) steady += 1;
+        else steady = current.screen === "form" && count > 0 ? 1 : 0;
+        last = count;
+        if (steady >= 3) return true;
+        if (Date.now() >= deadline) return false;
+        await page.waitForTimeout(pollMs).catch(() => undefined);
+      }
     }
   };
 }

@@ -25,3 +25,7 @@ cases in `testing-harness/browser-worker/run-lifecycle.integration.test.ts`
 does not look for another job record of the same Workday requisition (none
 exists for NVIDIA's); Microsoft's apply pages (<run id>, <run id>,
 <run id>) need a Microsoft sign-in and stay stopped.
+
+## Refuted causes
+
+- The new-tab Apply fix does not reach Workday from NVIDIA's Eightfold posting (<run id>). Evidence: on 2026-11-25 from 12:14 to 17:24 UTC the job reached nvidia.wd5's Workday account step on about 20 passes (its application_events), before the 17:40 "No application form was found"; on 2026-11-27 Eightfold's public job record redirects Apply to the Workday posting JR2030178 and shows an update at 2026-11-25 23:17 UTC.

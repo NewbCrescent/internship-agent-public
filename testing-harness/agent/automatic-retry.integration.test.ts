@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   applicationHoldTrace,
+  applicationReceiptConfirmed,
   closeProfileDatabase,
   createDatabase,
   getFitInputVersion,
@@ -93,7 +94,8 @@ import {
 } from "@internship-agent/agent";
 
 import { mayHaveSubmitted, refreshApplicationHolds } from "../../packages/agent/src/application-holds";
-import { evaluateMail, mailEventDetail, type AppliedJob } from "../../packages/agent/src/mail-outcomes";
+import { evaluateMail, mailEventDetail, type AppliedJob, type MailHeader } from "../../packages/agent/src/mail-outcomes";
+import type { MailSession, MailSessionFactory } from "../../packages/agent/src/mail-watch";
 import { runPipelinePass } from "../../packages/agent/scripts/pipeline-pass";
 
 /**
@@ -2136,5 +2138,338 @@ describe("pipeline pass under a held lock", () => {
         else process.env[name] = value;
       }
     }
+  });
+});
+
+describe("pnpm pipeline:retry --reopen-unsubmitted --candidate-verdict not-submitted (Track 66)", () => {
+  const submitWait = { timeoutMs: 50, pollMs: 5 };
+  // The candidate's decision (2026-11-27) on the possible submissions held with no receipt: "1. retry."
+  const VERDICT = 'Candidate 2026-11-27: "1. retry." (treat the possible submissions as not submitted and retry)';
+  const VERDICT_ARGS = (ref: string) => ["--run", ref, "--reopen-unsubmitted", "--candidate-verdict", "not-submitted", "--reason", VERDICT];
+  const VERDICT_EVENT = `Reopened on the candidate's verdict that it was not submitted: ${VERDICT}`;
+
+  /** A page whose submit click never confirms and shows nothing recognizable. */
+  function unconfirmedPage(): BrowserPage {
+    return { ...fakePage(), bodyText: async () => "Please fix the errors below.", invalidFields: async () => [], submitControlShown: async () => true };
+  }
+
+  /** An automatic run whose approved submit failed unconfirmed, held by the hold refresh as a possible submission. */
+  async function possibleSubmission(database: DatabaseSync, dataDir: string): Promise<{ jobId: string; run: BrowserRun }> {
+    const { jobId, run } = await heldAutomaticRun(database, dataDir, null);
+    approveRunSubmission(run.id, undefined, { database });
+    await expect(submitBrowserRun(run.id, { database, dataDir, submitWait, openPage: async () => unconfirmedPage(), applicationRecord: null }))
+      .rejects.toBeInstanceOf(SubmissionUnconfirmed);
+    const failed = listBrowserRuns(database, jobId)[0]!;
+    expect(failed.status).toBe("failed");
+    refreshApplicationHolds(database, dataDir);
+    expect(storedActiveHolds(database, jobId)).toEqual([{ runId: failed.id, reason: "possible-submission" }]);
+    return { jobId, run: failed };
+  }
+
+  type FakeMessage = Omit<MailHeader, "uid" | "messageId" | "bulk"> & { body: string };
+
+  /** An in-memory read-only mailbox (no IMAP, no Gmail); `fail` makes every connection fail. */
+  function fakeMailbox(messages: FakeMessage[], options: { fail?: boolean } = {}): { connect: MailSessionFactory; connects: () => number } {
+    let connects = 0;
+    const stored = messages.map(({ body, ...header }, index) => ({
+      header: { ...header, uid: index + 1, messageId: `<receipt-${index + 1}@example.test>`, bulk: false } satisfies MailHeader, body
+    }));
+    const connect: MailSessionFactory = async () => {
+      connects += 1;
+      if (options.fail) throw new Error("the mailbox is unreachable");
+      let close: () => void = () => {};
+      const closed = new Promise<void>((resolve) => { close = resolve; });
+      const session: MailSession = {
+        uidValidity: "1",
+        uidNext: stored.length + 1,
+        uidsAfter: async (after, filter) => stored
+          .filter(({ header }) => header.uid > after && (!filter?.since || header.receivedAt.getTime() >= filter.since.getTime()))
+          .map(({ header }) => header.uid),
+        headers: async (uids) => stored.filter(({ header }) => uids.includes(header.uid)).map(({ header }) => header),
+        bodyText: async (uid, maxBytes) => (stored.find(({ header }) => header.uid === uid)?.body ?? "").slice(0, maxBytes),
+        onNewMail: () => {},
+        closed,
+        close: async () => { close(); }
+      };
+      return session;
+    };
+    return { connect, connects: () => connects };
+  }
+
+  /** A trusted Greenhouse receipt for the seeded Northstar Systems posting, sent after the run's submit approval. */
+  function northstarReceipt(database: DatabaseSync, run: BrowserRun): FakeMessage {
+    const { title } = database.prepare("SELECT title FROM jobs WHERE id = ?").get(run.jobId) as { title: string };
+    return {
+      fromAddress: "no-reply@us.greenhouse-mail.io", fromName: "Northstar Systems", subject: "Northstar Systems — Application received",
+      receivedAt: new Date(Date.parse(run.submissionApprovedAt!) + 1_000), body: `We have received your application for ${title}.`
+    };
+  }
+
+  const receiptRows = (database: DatabaseSync) => database.prepare("SELECT COUNT(*) AS count FROM application_receipt_checks").get();
+  const holdRows = (database: DatabaseSync) => database.prepare("SELECT * FROM application_holds ORDER BY hold_key").all();
+  const verdictEvents = (database: DatabaseSync, jobId: string) =>
+    details(database, jobId).filter((detail) => detail.startsWith("Reopened on the candidate's verdict"));
+
+  it("with no receipt at check time, reopens the run, logs the candidate's verdict, and the next pass starts a fresh run", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-verdict-");
+    const { jobId, run } = await possibleSubmission(database, dataDir);
+    const ref = run.id.slice(0, 8);
+    const box = fakeMailbox([]);
+    const { deps, lines, lock } = commandDeps(database, { dataDir: () => dataDir, mailbox: box.connect });
+    const started = Date.now();
+
+    expect(await runRetryCommand(VERDICT_ARGS(ref), deps)).toBe(0);
+    expect(lines[0]).toMatch(new RegExp(`^reopened ${ref} Northstar Systems .* on the candidate's verdict that it was not submitted \\(fresh receipt check: absent\\): cancelled; its possible-submission hold is released and the application is back to ready for review\\.$`));
+    expect(lines).toContain("Reopened 1; skipped 0.");
+    expect(lock).toEqual({ taken: 1, released: 1, held: false });
+    expect(box.connects()).toBe(1);
+    const check = readApplicationReceiptCheck(database, run.id)!;
+    expect(check.result).toBe("absent");
+    expect(Date.parse(check.checkedAt)).toBeGreaterThanOrEqual(started - 1_000);
+    expect(listBrowserRuns(database, jobId).map((entry) => entry.status)).toEqual(["cancelled"]);
+    expect(statusOf(database, jobId)).toBe("READY_FOR_REVIEW");
+    expect(details(database, jobId).at(-1)).toBe(VERDICT_EVENT);
+    expect(holdTrace(database, jobId).filter((event) => ["receipt-check", "reopened-unsubmitted", "resolved"].includes(event)))
+      .toEqual(["receipt-check", "reopened-unsubmitted", "resolved"]);
+    expect(storedActiveHolds(database, jobId)).toEqual([]);
+    expect(refreshApplicationHolds(database, dataDir).filter((hold) => hold.jobId === jobId)).toEqual([]);
+
+    const next = await pass(database, dataDir, async () => fakePage());
+    expect(next.started).toEqual([{ jobId, runStatus: "awaiting-approval" }]);
+    database.close();
+  });
+
+  it("with a trusted receipt at check time, records it and does not reopen", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-verdict-");
+    const { jobId, run } = await possibleSubmission(database, dataDir);
+    const ref = run.id.slice(0, 8);
+    const box = fakeMailbox([northstarReceipt(database, run)]);
+    const { deps, lines } = commandDeps(database, { dataDir: () => dataDir, mailbox: box.connect });
+
+    expect(await runRetryCommand(VERDICT_ARGS(ref), deps)).toBe(0);
+    expect(lines[0]).toMatch(new RegExp(`^receipt found for ${ref} Northstar Systems .*: a trusted receipt matches this attempt, so it went through; the receipt is recorded, its possible-submission hold is resolved, and it is not reopened\\.$`));
+    expect(lines.slice(-2)).toEqual(["Reopened 0; skipped 1.", "Receipts found for 1 run(s): recorded as received, not reopened."]);
+    expect(applicationReceiptConfirmed(database, run.id)).toBe(true);
+    expect(listBrowserRuns(database, jobId).map((entry) => entry.status)).toEqual(["failed"]);
+    expect(statusOf(database, jobId)).toBe("APPLYING");
+    expect(verdictEvents(database, jobId)).toEqual([]);
+    expect(storedActiveHolds(database, jobId)).toEqual([]);
+    expect((await pass(database, dataDir, neverOpen)).started).toEqual([]);
+    database.close();
+  });
+
+  it("is refused without --run, including with --held", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-verdict-");
+    await possibleSubmission(database, dataDir);
+    const box = fakeMailbox([]);
+    const { deps, lines, lock } = commandDeps(database, { dataDir: () => dataDir, mailbox: box.connect });
+    const before = snapshot(database);
+    for (const argv of [
+      ["--held", "--reopen-unsubmitted", "--candidate-verdict", "not-submitted", "--reason", VERDICT],
+      ["--reopen-unsubmitted", "--candidate-verdict", "not-submitted", "--reason", VERDICT]
+    ]) expect(await runRetryCommand(argv, deps)).toBe(2);
+    expect(lines).toHaveLength(2);
+    expect(lines.every((line) => line.startsWith("Usage: pnpm pipeline:retry") && line.includes("--candidate-verdict not-submitted"))).toBe(true);
+    expect(box.connects()).toBe(0);
+    expect(lock.taken).toBe(0);
+    expect(snapshot(database)).toEqual(before);
+    database.close();
+  });
+
+  it("is refused without the candidate's words as --reason, without --reopen-unsubmitted, or with another verdict", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-verdict-");
+    const { run } = await possibleSubmission(database, dataDir);
+    const ref = run.id.slice(0, 8);
+    const box = fakeMailbox([]);
+    const { deps, lines, lock } = commandDeps(database, { dataDir: () => dataDir, mailbox: box.connect });
+    const before = snapshot(database);
+    for (const argv of [
+      ["--run", ref, "--reopen-unsubmitted", "--candidate-verdict", "not-submitted"],
+      ["--run", ref, "--reopen-unsubmitted", "--candidate-verdict", "not-submitted", "--reason", "   "],
+      ["--run", ref, "--candidate-verdict", "not-submitted", "--reason", VERDICT],
+      ["--run", ref, "--reopen-unsubmitted", "--candidate-verdict", "submitted", "--reason", VERDICT],
+      ["--run", ref, "--reopen-unsubmitted", "--candidate-verdict", "--reason", VERDICT]
+    ]) expect(await runRetryCommand(argv, deps)).toBe(2);
+    expect(lines).toHaveLength(5);
+    expect(lines.every((line) => line.startsWith("Usage: pnpm pipeline:retry") && line.includes("--candidate-verdict not-submitted"))).toBe(true);
+    expect(box.connects()).toBe(0);
+    expect(lock.taken).toBe(0);
+    expect(snapshot(database)).toEqual(before);
+
+    // Without the read-only mailbox the fresh receipt check cannot run, so nothing starts.
+    const bare = commandDeps(database, { dataDir: () => dataDir });
+    expect(await runRetryCommand(VERDICT_ARGS(ref), bare.deps)).toBe(1);
+    expect(bare.lines).toEqual(["Not run: --candidate-verdict needs the read-only mailbox for its fresh receipt check; set INTERNSHIP_AGENT_GMAIL_ADDRESS and INTERNSHIP_AGENT_GMAIL_APP_PASSWORD in the root .env first."]);
+    expect(bare.lock.taken).toBe(0);
+    expect(snapshot(database)).toEqual(before);
+    database.close();
+  });
+
+  it("leaves automatic passes, --held, plain --run, and evidence-less --reopen-unsubmitted skipping possible submissions; only the verdict reopens", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-verdict-");
+    const { jobId, run } = await possibleSubmission(database, dataDir);
+    const ref = run.id.slice(0, 8);
+    const box = fakeMailbox([]);
+    const before = snapshot(database);
+
+    expect((await pass(database, dataDir, neverOpen)).started).toEqual([]);
+    const held = commandDeps(database, { dataDir: () => dataDir, mailbox: box.connect });
+    expect(await runRetryCommand(["--held"], held.deps)).toBe(0);
+    expect(held.lines[0]).toBe("No held runs.");
+    const plain = commandDeps(database, { dataDir: () => dataDir, mailbox: box.connect });
+    expect(await runRetryCommand(["--run", ref], plain.deps)).toBe(0);
+    expect(plain.lines[0]).toMatch(new RegExp(`^skipped ${ref} .*\\(its submission was approved, so it may have reached the site\\.\\)$`));
+    receiptCheck(database, run);
+    const reopen = commandDeps(database, { dataDir: () => dataDir, mailbox: box.connect });
+    expect(await runRetryCommand(["--run", ref, "--reopen-unsubmitted", "--reason", "x"], reopen.deps)).toBe(0);
+    expect(reopen.lines[0]).toMatch(new RegExp(`^skipped ${ref} .*\\(there is no evidence the site did not complete it `));
+    expect(box.connects()).toBe(0);
+    const after = snapshot(database);
+    expect({ jobs: after.jobs, runs: after.runs }).toEqual({ jobs: before.jobs, runs: before.runs });
+    expect(statusOf(database, jobId)).toBe("APPLYING");
+
+    const verdict = commandDeps(database, { dataDir: () => dataDir, mailbox: box.connect });
+    expect(await runRetryCommand(VERDICT_ARGS(ref), verdict.deps)).toBe(0);
+    expect(verdict.lines).toContain("Reopened 1; skipped 0.");
+    expect(statusOf(database, jobId)).toBe("READY_FOR_REVIEW");
+    database.close();
+  });
+
+  it("checks the receipt on a dry run but records and writes nothing and takes no lock", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-verdict-");
+    const { jobId, run } = await possibleSubmission(database, dataDir);
+    const ref = run.id.slice(0, 8);
+    const state = () => ({ snapshot: snapshot(database), receipts: receiptRows(database), holds: holdRows(database) });
+    const before = state();
+    const noLock = () => { throw new Error("a dry run must not take the lock"); };
+
+    const empty = fakeMailbox([]);
+    const first = commandDeps(database, { dataDir: () => dataDir, mailbox: empty.connect, acquireLock: noLock });
+    expect(await runRetryCommand([...VERDICT_ARGS(ref), "--dry-run"], first.deps)).toBe(0);
+    expect(first.lines[0]).toMatch(new RegExp(`^would reopen ${ref} Northstar Systems .* on the candidate's verdict that it was not submitted \\(fresh receipt check: absent; nothing recorded\\)\\.$`));
+    expect(first.lines.at(-1)).toBe("Dry run: would reopen 1; skipped 0; nothing written.");
+    expect(empty.connects()).toBe(1);
+    expect(state()).toEqual(before);
+
+    const receipt = fakeMailbox([northstarReceipt(database, run)]);
+    const second = commandDeps(database, { dataDir: () => dataDir, mailbox: receipt.connect, acquireLock: noLock });
+    expect(await runRetryCommand([...VERDICT_ARGS(ref), "--dry-run"], second.deps)).toBe(0);
+    expect(second.lines[0]).toMatch(new RegExp(`^receipt found for ${ref} Northstar Systems .* \\(dry run, nothing recorded\\): a trusted receipt matches this attempt, so it went through and would not be reopened\\.$`));
+    expect(second.lines.slice(-2)).toEqual(["Dry run: would reopen 0; skipped 1; nothing written.", "Dry run: receipts found for 1 run(s); nothing recorded."]);
+    expect(receipt.connects()).toBe(1);
+    expect(state()).toEqual(before);
+    expect(applicationReceiptConfirmed(database, run.id)).toBe(false);
+    expect(statusOf(database, jobId)).toBe("APPLYING");
+    database.close();
+  });
+
+  it("keeps the run held when the fresh receipt check is unavailable", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-verdict-");
+    const { jobId, run } = await possibleSubmission(database, dataDir);
+    const ref = run.id.slice(0, 8);
+    const box = fakeMailbox([], { fail: true });
+    const { deps, lines } = commandDeps(database, { dataDir: () => dataDir, mailbox: box.connect });
+    expect(await runRetryCommand(VERDICT_ARGS(ref), deps)).toBe(1);
+    expect(lines[0]).toMatch(new RegExp(`^skipped ${ref} Northstar Systems .* \\(its fresh receipt check is unavailable, so it stays held as a possible submission\\.\\)$`));
+    expect(box.connects()).toBe(1);
+    expect(listBrowserRuns(database, jobId).map((entry) => entry.status)).toEqual(["failed"]);
+    expect(statusOf(database, jobId)).toBe("APPLYING");
+    expect(verdictEvents(database, jobId)).toEqual([]);
+    expect(storedActiveHolds(database, jobId)).toEqual([{ runId: run.id, reason: "possible-submission" }]);
+    database.close();
+  });
+
+  it("lets the target rule out the fresh run of a posting that is now unpaid", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-verdict-");
+    const { jobId, run } = await possibleSubmission(database, dataDir);
+    const { deps } = commandDeps(database, { dataDir: () => dataDir, mailbox: fakeMailbox([]).connect });
+    expect(await runRetryCommand(VERDICT_ARGS(run.id.slice(0, 8)), deps)).toBe(0);
+    database.prepare("UPDATE jobs SET title = ? WHERE id = ?").run("Software Engineering Intern (UNPAID)", jobId);
+    const target = { season: "summer", year: 2027 } as const;
+    const report = await advancePipeline({
+      database, dataDir, settings: { ...on, target }, openPage: neverOpen, voiceDrafter: null, renderPdf: async () => ({ pages: 1 }),
+      fitProvider: new UnavailableModelProvider(), labelProvider: new UnavailableModelProvider()
+    });
+    expect(report.started).toEqual([]);
+    const skip = details(database, jobId).find((detail) => detail.startsWith("Not pursued for your target: "));
+    expect(skip).toContain("Pay: the posting says the internship is unpaid.");
+    expect(listBrowserRuns(database, jobId).map((entry) => entry.status)).toEqual(["cancelled"]);
+    database.close();
+  });
+
+  it("still stops the fresh run at a CAPTCHA and never submits it", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-verdict-");
+    const { jobId, run } = await possibleSubmission(database, dataDir);
+    const { deps } = commandDeps(database, { dataDir: () => dataDir, mailbox: fakeMailbox([]).connect });
+    expect(await runRetryCommand(VERDICT_ARGS(run.id.slice(0, 8)), deps)).toBe(0);
+    let clicks = 0;
+    const page: BrowserPage = {
+      ...fakePage(),
+      clickSubmit: async () => { clicks += 1; },
+      visibleChallenge: async () => ({ kind: "hcaptcha" as const, detail: "an hCaptcha challenge" })
+    };
+    await pass(database, dataDir, async () => page);
+    expect(clicks).toBe(0);
+    const runs = listBrowserRuns(database, jobId);
+    expect(runs.some((entry) => entry.status === "submitted" || entry.status === "submitting")).toBe(false);
+    expect(statusOf(database, jobId)).not.toBe("SUBMITTED");
+    const fresh = runs.find((entry) => entry.id !== run.id);
+    const pausedOnSafeguard = !!fresh && fresh.pauses.some((pause) => pause.safeguard === true && pause.status === "open");
+    const stoppedOnCaptcha = details(database, jobId).some((detail) => detail.startsWith("Automatic browser run ") && /captcha/i.test(detail));
+    expect(pausedOnSafeguard || stoppedOnCaptcha).toBe(true);
+    database.close();
+  });
+
+  it("reopens a paused run whose submit approval still stands (the EP Wealth shape) with no receipt", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-verdict-");
+    const synthetic = syntheticHeldRun(database, {
+      company: "Harborline Advisors", by: "pipeline", status: "paused-needs-input", applicationUrl: "https://jobs.lever.co/harborline/1/apply", atsKind: "lever",
+      pauses: [{
+        fieldId: "site-challenge", label: "CAPTCHA", question: "The page shows an hCaptcha challenge; complete it on the site.", suggestedKey: null,
+        suggestedScope: null, safeguard: true, sensitive: false, upload: false, status: "open", answer: null, draft: null
+      }]
+    });
+    const run = updateBrowserRun(database, synthetic.id, { submissionApprovedAt: new Date(Date.now() - 60_000).toISOString() });
+    await capture(database, dataDir, run, { outcome: "unknown", url: "https://jobs.lever.co/harborline/1/apply", bodyText: "" });
+    refreshApplicationHolds(database, dataDir);
+    expect(storedActiveHolds(database, run.jobId)).toEqual([{ runId: run.id, reason: "possible-submission" }]);
+    const ref = run.id.slice(0, 8);
+    const box = fakeMailbox([]);
+    const { deps, lines } = commandDeps(database, { dataDir: () => dataDir, mailbox: box.connect });
+    expect(await runRetryCommand(VERDICT_ARGS(ref), deps)).toBe(0);
+    expect(lines[0]).toMatch(new RegExp(`^reopened ${ref} Harborline Advisors .* on the candidate's verdict that it was not submitted \\(fresh receipt check: absent\\)`));
+    expect(lines).toContain("Reopened 1; skipped 0.");
+    expect(box.connects()).toBe(1);
+    expect(listBrowserRuns(database, run.jobId).map((entry) => entry.status)).toEqual(["cancelled"]);
+    expect(statusOf(database, run.jobId)).toBe("READY_FOR_REVIEW");
+    expect(details(database, run.jobId).at(-1)).toBe(VERDICT_EVENT);
+    expect(storedActiveHolds(database, run.jobId)).toEqual([]);
+    database.close();
+  });
+
+  it("skips a held run whose submit was never approved without touching the mailbox", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-verdict-");
+    const run = syntheticHeldRun(database, { company: "Quietwater Labs", by: "pipeline", status: "paused-needs-input" });
+    const ref = run.id.slice(0, 8);
+    const box = fakeMailbox([]);
+    const { deps, lines } = commandDeps(database, { dataDir: () => dataDir, mailbox: box.connect });
+    const before = snapshot(database);
+    expect(await runRetryCommand(VERDICT_ARGS(ref), deps)).toBe(0);
+    expect(lines[0]).toMatch(new RegExp(`^skipped ${ref} .*\\(its submit was never approved, so it is not a possible submission; retry it without --reopen-unsubmitted\\.\\)$`));
+    expect(lines).toContain("Reopened 0; skipped 1.");
+    expect(box.connects()).toBe(0);
+    expect(snapshot(database)).toEqual(before);
+    database.close();
   });
 });

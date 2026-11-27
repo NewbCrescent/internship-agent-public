@@ -17,3 +17,11 @@ Oracle's public Candidate Experience bundle). Next step: a capture of a
 section page from a session the candidate opens, then a section walker and
 the post-submit code step and confirmation (after Track 10's submit-outcome
 work merges), each with a disposable-Chromium regression.
+
+Update 2026-11-27 (Track 63): the four tenants that reached their forms in
+pass 28 (Vertiv, Corvane, Idaho National Laboratory, Stantec) drew one-page
+forms (`apply-flow-page--one-page`, with SUBMIT on the page), which the
+generic filler now fills (see the resolved one-page form bugs); no
+several-section page and no post-submit code step has been seen, so the
+section walker is not built and the post-submit code and `/my-profile`
+confirmation remain open.

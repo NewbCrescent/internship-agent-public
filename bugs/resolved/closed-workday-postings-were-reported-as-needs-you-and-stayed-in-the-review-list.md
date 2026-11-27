@@ -22,3 +22,7 @@ Regressions: the fixture's `closed` and `other-error` modes
 (`pnpm test:browser-worker:fast`). Not verified live: an automatic run on a
 closed posting after the change; the five keep their old event until
 retried or skipped.
+
+## Refuted causes
+
+- The five 2026-11-24 stops (Woodward <run id>, GDIT <run id>, DraftKings <run id>, CACI <run id>, Bread Financial <run id>) were open postings Workday's entry missed. Evidence: Track 64's read-only check on 2026-11-27: each career site's public job search for the requisition id returns 0 jobs, and each job's public CXS address answers 403.

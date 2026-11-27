@@ -75,6 +75,8 @@ const AUTOMATIC_WAIT = "Automatic browser run waiting: ";
 export const AUTOMATIC_RETRY_PREFIX = "Automatic run retried after a fix: ";
 /** Logged by reopenUnsubmittedRun (automatic-retry.ts): a failed submit the site is known not to have completed. */
 export const REOPENED_UNSUBMITTED_PREFIX = AUTOMATIC_RETRY_PREFIX + "reopened as not submitted (";
+/** Logged by reopenOnCandidateVerdict (automatic-retry.ts, Track 66): a possible submission the candidate says was not submitted, after a fresh receipt check found no receipt. Stops logged before it no longer block. */
+export const CANDIDATE_VERDICT_REOPEN_PREFIX = "Reopened on the candidate's verdict that it was not submitted: ";
 
 /**
  * Automatic approvals logged at or after `sinceIso` that use the daily
@@ -112,7 +114,7 @@ function approvalReleased(database: DatabaseSync, run: BrowserRun, approvedAt: s
 function stoppedSinceRetry(events: ReadonlyArray<{ detail: string | null }>): boolean {
   let stopped = false;
   for (const event of events) {
-    if (event.detail?.startsWith(AUTOMATIC_RETRY_PREFIX)) stopped = false;
+    if (event.detail?.startsWith(AUTOMATIC_RETRY_PREFIX) || event.detail?.startsWith(CANDIDATE_VERDICT_REOPEN_PREFIX)) stopped = false;
     else if (event.detail?.startsWith(AUTOMATIC_STOP)) stopped = true;
   }
   return stopped;

@@ -18,6 +18,11 @@
  * Turnstile, or an older capture of the intact Ashby form or of a Dover form
  * with a Turnstile marker), then the job is ready for review again unless a
  * trusted receipt has been recorded; a fresh absent receipt check is required.
+ * --reopen-unsubmitted --candidate-verdict not-submitted --reason "<the
+ * candidate's words>" with named --run references replaces that site
+ * evidence with the candidate's own verdict that the run was not submitted.
+ * A fresh read-only receipt check of the Gmail mailbox runs first for each
+ * run; a receipt found is recorded and nothing is reopened.
  * --close-unsubmitted --reason … closes a failed submit that was never
  * clicked ("No submit control was found") on a posting its evidence shows
  * closed: the run is cancelled and the job skipped as "Posting closed"; it is
@@ -35,13 +40,16 @@
  *
  * Usage: pnpm pipeline:retry [--profile real|demo] (--run <id or 8-character prefix> ... | --held) [--dry-run] [--start] [--reason "<text>"]
  *        pnpm pipeline:retry [--profile real|demo] --run <id or 8-character prefix> ... --reopen-unsubmitted --reason "<text>" [--dry-run] [--start]
+ *        pnpm pipeline:retry [--profile real|demo] --run <id or 8-character prefix> ... --reopen-unsubmitted --candidate-verdict not-submitted --reason "<the candidate's words>" [--dry-run] [--start]
  *        pnpm pipeline:retry [--profile real|demo] --run <id or 8-character prefix> ... --close-unsubmitted --reason "<text>" [--dry-run]
  *        pnpm pipeline:retry [--profile real|demo] --run <id or 8-character prefix> ... --correct-submitted --reason "<text>" (--dry-run | --confirm)
  *        pnpm pipeline:retry [--profile real|demo] (--run <ref> | --job <id or 8-character prefix>) --verified-hold --revision <n> --recheck <hex ref> --reason "<text>" [--dry-run]
  */
 import { runRetryCommand } from "../src/automatic-retry";
+import { gmailMailSessionFactory } from "../src/gmail-mailbox";
 import { runPipelinePass } from "./pipeline-pass";
 
 process.exitCode = await runRetryCommand(process.argv.slice(2), {
-  startPass: (profile, log) => runPipelinePass({ profile, sourceIds: [], log, lockHeld: true })
+  startPass: (profile, log) => runPipelinePass({ profile, sourceIds: [], log, lockHeld: true }),
+  mailbox: gmailMailSessionFactory()
 });

@@ -15,7 +15,7 @@
     .oda-dialog { border: 1px solid #ccc; margin-top: 24px; }
   </style>
 </head>
-<body>
+<body data-route="__ROUTE__">
   <!--
     A fictional Oracle Cloud HCM Candidate Experience email step ("Fixture Robotics", served at
     fixture.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/10001/apply/email).
@@ -30,8 +30,15 @@
     or the whole TERMS block removed), __CAPTCHA__ (a visible hCaptcha frame or nothing), and
     data-code (the code the PIN step accepts). The Oracle Digital Assistant block at the end is
     the chatbot popup's required work-summary box, which is never an application field.
+    Track 63: __ROUTE__ is the body's data-route ("" or "job-details.quick-email-verification", the
+    quick email verification on the job page; the route name and the "What's your email?" label
+    are captured from a run trace of 2026-11-27, the rest is modelled), __EMAIL_LABEL__ the email
+    box's label, and data-next (__NEXT_MODE__) "form" (the footer's submit) or "outside" (MODELLED:
+    the footer's submit removed and a round icon-only Next button after the form, disabled until
+    the email and the terms are given, whose click submits the form). Next leads to
+    .../apply/section/1: /apply/email replaced, else appended to the job page's path.
   -->
-  <div id="fixture" data-flow="__FLOW__" data-code="__CODE__"></div>
+  <div id="fixture" data-flow="__FLOW__" data-code="__CODE__" data-next="__NEXT_MODE__"></div>
   <main class="app-main">
     <section class="apply-flow-dialog">
       <form novalidate id="email-form">
@@ -45,7 +52,7 @@
           <p class="apply-flow-dialog__text">Get started right away by simply using your email. Your profile will be created and kept up to date automatically as you enter details for each of your job applications.</p>
           <div class="apply-flow-dialog__form">
             <div class="input-row input-row--text">
-              <label class="input-row__label input-row__label--required" for="primary-email-0"><span id="labelText-primary-email-0">Email Address</span></label>
+              <label class="input-row__label input-row__label--required" for="primary-email-0"><span id="labelText-primary-email-0">__EMAIL_LABEL__</span></label>
               <div class="input-row__control-container">
                 <input class="input-row__control" id="primary-email-0" name="primary-email" type="email" autocomplete="email" aria-required="true">
               </div>
@@ -138,21 +145,38 @@
       const fixture = document.getElementById("fixture");
       const flow = fixture.dataset.flow;
       const code = fixture.dataset.code;
-      const section = location.pathname.replace(/\/apply\/email\/?$/, "/apply/section/1");
+      const path = location.pathname.replace(/\/$/, "");
+      const section = /\/apply\/email$/.test(path) ? path.replace(/\/apply\/email$/, "/apply/section/1") : `${path}/apply/section/1`;
       const state = { email: "", terms: false, nextClicks: 0, verifyClicks: 0, resendClicks: 0, codeRequests: 0 };
       const save = () => localStorage.setItem("fixture-oracle", JSON.stringify(state));
       save();
       const model = { email: "" };
       const emailBox = document.getElementById("primary-email-0");
-      // Knockout's default value binding reads the box on change.
-      emailBox.addEventListener("change", () => { model.email = emailBox.value; });
       const terms = document.getElementById("legal-disclaimer-checkbox");
+      // "outside": the round icon Next after the form, enabled only once the email and the terms are given.
+      let roundNext = null;
+      const updateNext = () => { if (roundNext) roundNext.disabled = !(model.email && (terms === null || terms.checked)); };
+      if (fixture.dataset.next === "outside") {
+        document.querySelector("#email-form footer button[type=submit]").remove();
+        roundNext = document.createElement("button");
+        roundNext.type = "button";
+        roundNext.className = "apply-flow-pagination__round-button";
+        roundNext.setAttribute("aria-label", "Next");
+        roundNext.title = "Next";
+        roundNext.disabled = true;
+        roundNext.innerHTML = '<span class="icon-arrow-right"></span>';
+        roundNext.addEventListener("click", () => document.getElementById("email-form").requestSubmit());
+        document.getElementById("email-form").after(roundNext);
+      }
+      // Knockout's default value binding reads the box on change.
+      emailBox.addEventListener("change", () => { model.email = emailBox.value; updateNext(); });
       const toggle = document.querySelector(".apply-flow-input-checkbox__button");
       if (toggle) {
         toggle.addEventListener("click", (event) => {
           event.preventDefault();
           terms.checked = !terms.checked;
           toggle.classList.toggle("apply-flow-input-checkbox__button--checked", terms.checked);
+          updateNext();
         });
       }
       const show = (id, text) => {
@@ -163,6 +187,7 @@
       };
       const replaceForm = (templateId) => {
         const form = document.getElementById("email-form");
+        if (roundNext) roundNext.remove();
         form.replaceWith(document.getElementById(templateId).content.cloneNode(true));
       };
       document.getElementById("email-form").addEventListener("submit", (event) => {

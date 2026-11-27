@@ -867,9 +867,22 @@ export function createPlaywrightPage(page: Page): BrowserPage {
     },
     fillField: async (field, value) => {
       const control = await locateField(field);
-      const kind = await control.evaluate((element) => element instanceof HTMLInputElement ? element.type : "", undefined, { timeout: 10_000 });
+      const read = await control.evaluate((element) => {
+        const text = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement;
+        return {
+          type: element instanceof HTMLInputElement ? element.type : "",
+          readOnly: text ? element.readOnly : false,
+          value: text ? element.value : ""
+        };
+      }, undefined, { timeout: 10_000 });
       // A radio, checkbox, or upload is never typed into.
-      if (kind === "radio" || kind === "checkbox" || kind === "file") throw new FieldUnfillable("it is a choice, not a text box");
+      if (read.type === "radio" || read.type === "checkbox" || read.type === "file") throw new FieldUnfillable("it is a choice, not a text box");
+      // A read-only box (Oracle's Email Address, filled by its email step) is never typed into: it either shows the value already or pauses.
+      if (read.readOnly) {
+        const same = (text: string) => text.replace(/\s+/g, " ").trim().toLocaleLowerCase("en-US");
+        if (same(read.value) === same(value)) return;
+        throw new FieldUnfillable("it is read-only and shows another value");
+      }
       await control.fill(value, { timeout: 10_000 });
     },
     chooseOption: async (field, option) => {
@@ -1395,6 +1408,13 @@ async function settleOpenMenus(page: Page): Promise<void> {
   }
 }
 
+/** "Address Line 1", "Street address line 2", "Street Address": the labels whose type-ahead may keep a typed address. */
+const STREET_ADDRESS_LABEL = /^(?:street )?address(?: line)? ?[12]$|^street address$/;
+
+function streetLabelOf(label: string): string {
+  return label.toLocaleLowerCase("en-US").replace(/\(optional\)/g, "").replace(/[*:]/g, "").replace(/\s+/g, " ").trim();
+}
+
 /**
  * Types the saved value into a type-ahead field and picks the suggestion
  * that matches it exactly or uniquely (matchSuggestion). A "City, Region"
@@ -1402,12 +1422,14 @@ async function settleOpenMenus(page: Page): Promise<void> {
  * not know "Springfield, IL"), and the suggestions are still matched against the
  * whole value. No match: the typed text is cleared, its list closed, and the
  * field left without focus so the list never covers the next field; the field
- * is reported unfillable, never guessed.
+ * is reported unfillable, never guessed. A street-address box that showed no
+ * suggestion at all keeps the typed address.
  */
 async function chooseSuggestion(page: Page, input: Locator, field: BrowserField, value: string): Promise<void> {
   await settleOpenMenus(page);
   const shown = value.length > 60 ? `${value.slice(0, 59)}…` : value;
   if (field.kind === "select") await input.click({ timeout: 10_000 });
+  let sawSuggestion = false;
   const search = async (typed: string): Promise<{ source: Locator; index: number } | null> => {
     await input.fill("", { timeout: 10_000 });
     await input.pressSequentially(typed, { delay: 40, timeout: 10_000 });
@@ -1418,6 +1440,7 @@ async function chooseSuggestion(page: Page, input: Locator, field: BrowserField,
       for (const source of sources) {
         const texts = (await source.allInnerTexts().catch(() => [] as string[])).map((text) => text.replace(/\s+/g, " ").trim());
         if (!texts.some(Boolean)) continue;
+        sawSuggestion = true;
         const match = matchSuggestion(value, texts);
         if (match !== null) {
           found = { source, index: texts.indexOf(match) };
@@ -1440,6 +1463,18 @@ async function chooseSuggestion(page: Page, input: Locator, field: BrowserField,
   for (const term of candidates) {
     picked = await search(term);
     if (picked) break;
+  }
+  if (!picked && !sawSuggestion && STREET_ADDRESS_LABEL.test(streetLabelOf(field.label))) {
+    // A street-address box whose type-ahead offered nothing keeps the typed saved address (Oracle's Address Line 1,
+    // Track 63); a box that offered suggestions none of which matched still pauses.
+    try {
+      await input.fill(value, { timeout: 10_000 });
+      await page.keyboard.press("Escape").catch(() => undefined);
+      await input.blur().catch(() => undefined);
+      if ((await input.inputValue({ timeout: 5_000 })) === value) return;
+    } catch {
+      // Falls through to the pause below.
+    }
   }
   if (!picked) {
     await input.fill("", { timeout: 5_000 }).catch(() => undefined);
@@ -2263,6 +2298,9 @@ export function collectControlsIn(root: Element): RawControl[] {
     if (type === "file" && input.closest(".ashby-application-form-autofill-pane")) continue;
     // A drop zone that autofills the form from a resume (Dover's "Autofill from resume") parses a resume; it is not a question, like Ashby's.
     if (type === "file" && /\bautofill\b/i.test(collapse(input.closest('[role="button"]')?.textContent))) continue;
+    // Oracle Candidate Experience's "Import your profile from resume" box parses a resume into the form and redraws it
+    // with new ids; it is not a question (Track 63, captured 2026-11-27).
+    if (type === "file" && input.closest(".apply-flow-block--profile-import, .apply-flow-profile-import")) continue;
     if (input instanceof HTMLInputElement && type === "radio" && input.name) {
       // Radios sharing a name are one choice question.
       if (namesDone.has(`radio:${input.name}`)) continue;

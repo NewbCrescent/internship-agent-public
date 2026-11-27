@@ -20,6 +20,15 @@
  * database row, or error; and Oracle's default terms label proceeds exactly
  * when the standing data-consent rule covers it.
  *
+ * Track 63 (each fails on the old code): the one-page section's "Import your
+ * profile" box gets no file, its read-only email is left as it is, its
+ * "+1 (United States)" country code is chosen, and its Address Line 1
+ * type-ahead with no suggestions keeps the saved address; the quick email
+ * verification on the job page (its `data-route`) is the email step, with
+ * its Next in the form or a disabled round icon button outside it; and a
+ * section page drawn late, after the email step or opened directly, is
+ * read once its form is drawn.
+ *
  * Usage: pnpm test:browser:oracle-apply
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -57,6 +66,13 @@ const EMAIL = "jordan@example.test";
 const CODE = "482913";
 const HOST = "fixture.fa.ocs.oraclecloud.com";
 const JOB = `https://${HOST}/hcmUI/CandidateExperience/en/sites/CX_1/job/10001`;
+/** A job page that asks for the email itself (the quick email verification, Track 63). */
+const QUICK_JOB = `https://${HOST}/hcmUI/CandidateExperience/en/sites/CX_1/job/10002`;
+const QUICK_ROUTE = "job-details.quick-email-verification";
+const QUICK_LABEL = "What's your email?";
+const ADDRESS = "1 Example Way";
+/** Oracle draws a late section this long after load; STEP_WAIT (8 s) waits well beyond it. */
+const LATE_MS = 2_500;
 const EMAIL_STEP = `${JOB}/apply/email`;
 const SECTION_PATH = "/hcmUI/CandidateExperience/en/sites/CX_1/job/10001/apply/section/1";
 const TENANT_TERMS = "I agree with the terms and conditions and consent to the processing of my personal data";
@@ -65,7 +81,10 @@ const ODA = "oda-work-summary-text-area|input";
 const DATA: StandingConsentSettings = { acceptDataConsent: true, signAttestations: false };
 const STEP_WAIT = { timeoutMs: 8_000, pollMs: 100 };
 
-type Scenario = { flow: "new" | "pin" | "identity" | "already" | "stuck" | "captcha-after"; terms: string | null; captcha: boolean; pagination: "single" | "multi" };
+type Scenario = {
+  flow: "new" | "pin" | "identity" | "already" | "stuck" | "captcha-after"; terms: string | null; captcha: boolean; pagination: "single" | "multi";
+  route?: string; emailLabel?: string; nextMode?: "form" | "outside"; delay?: number; sessionEmail?: string;
+};
 type FixtureState = { email: string; terms: boolean; nextClicks: number; verifyClicks: number; resendClicks: number; codeRequests: number };
 
 function saveFact(database: DatabaseSync, key: "authorized_to_work" | "requires_sponsorship" | "available_start_date", scope: { kind: "country"; code: string } | { kind: "global" }, value: boolean | string) {
@@ -106,7 +125,8 @@ function approvedJob(database: DatabaseSync): string {
   prepareApplication(row.id, { database });
   approveApplication(row.id, { database });
   saveCandidate(database, LOCAL_CANDIDATE_ID, {
-    fullName: "Jordan Rivera", email: EMAIL, legalFirstName: "Jordan", legalLastName: "Rivera", phone: "+1 555 0100", addressCountry: "United States"
+    fullName: "Jordan Rivera", email: EMAIL, legalFirstName: "Jordan", legalLastName: "Rivera", phone: "+1 555 0100", addressCountry: "United States",
+    addressLine1: ADDRESS
   });
   return row.id;
 }
@@ -133,6 +153,9 @@ async function main(): Promise<void> {
     let scenario: Scenario = { flow: "new", terms: TENANT_TERMS, captcha: false, pagination: "single" };
     const emailDocument = () => {
       let html = emailTemplate
+        .replaceAll("__ROUTE__", scenario.route ?? "")
+        .replaceAll("__EMAIL_LABEL__", scenario.emailLabel ?? "Email Address")
+        .replaceAll("__NEXT_MODE__", scenario.nextMode ?? "form")
         .replaceAll("__FLOW__", scenario.flow)
         .replaceAll("__CODE__", CODE)
         .replaceAll("__CAPTCHA__", scenario.captcha ? '<iframe class="captcha-frame" src="https://newassets.hcaptcha.com/captcha/v1/fixture"></iframe>' : "");
@@ -140,6 +163,10 @@ async function main(): Promise<void> {
       else html = html.replaceAll("__TERMS__", scenario.terms);
       return html;
     };
+    const sectionDocument = () => sectionTemplate
+      .replaceAll("__PAGINATION__", scenario.pagination)
+      .replaceAll("__DELAY__", String(scenario.delay ?? 0))
+      .replaceAll("__SESSION_EMAIL__", scenario.sessionEmail ?? "");
     const context = await browser.newContext();
     await context.route("**/*", async (route) => {
       const request = route.request();
@@ -148,8 +175,8 @@ async function main(): Promise<void> {
       if (url && url.hostname === HOST && request.resourceType() === "document") {
         const path = url.pathname.replace(/\/$/, "");
         const body = path === new URL(JOB).pathname ? posting
-          : path.endsWith("/apply/email") ? emailDocument()
-            : path === SECTION_PATH ? sectionTemplate.replaceAll("__PAGINATION__", scenario.pagination)
+          : path.endsWith("/apply/email") || path === new URL(QUICK_JOB).pathname ? emailDocument()
+            : path.endsWith("/apply/section/1") ? sectionDocument()
               : path.endsWith("/apply/unknown") ? "<!doctype html><html><head><title>Fixture</title></head><body><main><p>Loading your application.</p></main></body></html>"
                 : null;
         if (body !== null) {
@@ -179,6 +206,7 @@ async function main(): Promise<void> {
     }
 
     const state = (tab: Page) => tab.evaluate(() => JSON.parse(localStorage.getItem("fixture-oracle") || "{}") as FixtureState);
+    const imports = (tab: Page) => tab.evaluate(() => (JSON.parse(localStorage.getItem("fixture-oracle-section") || "{}") as { imported?: number }).imported ?? -1);
     const value = (tab: Page, selector: string) => tab.evaluate((query) => (document.querySelector(query) as HTMLInputElement | null)?.value ?? null, selector);
     const open = async (next: Partial<Scenario>, url = EMAIL_STEP) => {
       scenario = { flow: "new", terms: TENANT_TERMS, captcha: false, pagination: "single", ...next };
@@ -298,6 +326,34 @@ async function main(): Promise<void> {
       writeFileSync(outputPath, "%PDF-1.7\n% fixture resume\n%%EOF\n");
       return { pages: 1 };
     };
+    /** The section's values by their first-drawn ids (an import redraw renames them, so they read null). */
+    const sectionValues = (tab: Page) => tab.evaluate(() => {
+      const read = (id: string) => (document.getElementById(id) as HTMLInputElement | null)?.value ?? null;
+      return {
+        first: read("firstName-1"), last: read("lastName-2"), email: read("email-3"), phone: read("phoneNumber-4"),
+        countryCode: read("phoneCountryCode-6"), address: read("addressLine1-7"),
+        emailReadOnly: (document.getElementById("email-3") as HTMLInputElement | null)?.readOnly === true,
+        resume: (document.getElementById("attachment-upload-5") as HTMLInputElement | null)?.files?.length ?? 0,
+        importFiles: (document.getElementById("profile-import-upload") as HTMLInputElement | null)?.files?.length ?? 0,
+        oda: (document.getElementById("oda-work-summary-text-area|input") as HTMLTextAreaElement | null)?.value ?? null
+      };
+    });
+    /** A start run from `url` in a fresh database; the report, or the error it stopped with. */
+    const startRun = async (name: string, url: string, next: Scenario) => {
+      scenario = next;
+      codeRequestedAt = null;
+      const database = createDatabase(join(temp, `${name}.sqlite`));
+      const jobId = approvedJob(database);
+      try {
+        const report = await startBrowserRun(jobId, url, {
+          database, dataDir: join(temp, `data-${name}`), openPage, renderPdf, voiceDrafter: null,
+          standingConsent: DATA, oracleEmailStep: { mailbox, mailboxAddress: EMAIL, codeWait: { pollMs: 50, timeoutMs: 3_000 }, stepWait: STEP_WAIT }
+        });
+        return { database, jobId, report, error: null };
+      } catch (error) {
+        return { database, jobId, report: null, error: error instanceof Error ? error : new Error(String(error)) };
+      }
+    };
 
     // (7) A start run: the email step passed, the single-section form filled, the consent logged.
     scenarios += 1;
@@ -317,18 +373,18 @@ async function main(): Promise<void> {
         check(events.includes(`Accepted data consent: '${TENANT_TERMS}' (Oracle Cloud HCM email step at ${HOST})`), "start: no consent event");
         const tab = tabs.at(-1)!;
         check(new URL(tab.url()).pathname === SECTION_PATH, `start: the page is at ${tab.url()}`);
-        const dom = await tab.evaluate(() => {
-          const read = (id: string) => (document.getElementById(id) as HTMLInputElement | null)?.value ?? null;
-          return {
-            first: read("firstName-1"), last: read("lastName-2"), email: read("email-3"), phone: read("phoneNumber-4"),
-            resume: (document.getElementById("attachment-upload-5") as HTMLInputElement | null)?.files?.length ?? 0,
-            oda: (document.getElementById("oda-work-summary-text-area|input") as HTMLTextAreaElement | null)?.value ?? null
-          };
-        });
+        const dom = await sectionValues(tab);
         check(dom.first === "Jordan" && dom.last === "Rivera" && dom.email === EMAIL && Boolean(dom.phone), `start: section values ${JSON.stringify(dom)}`);
         check(dom.resume === 1, `start: ${dom.resume} resume files uploaded`);
         check(dom.oda === "", "start: the chatbot box was typed into");
         check((await state(tab)).nextClicks === 1, "start: Next was not clicked exactly once");
+        // Track 63: the import box, the read-only email, the "+1 (United States)" code, and the address type-ahead.
+        check((await imports(tab)) === 0, `start: the profile import box received ${await imports(tab)} files`);
+        check(dom.importFiles === 0, "start: a file sits in the profile import box");
+        check(dom.emailReadOnly, "start: the email box is no longer read-only");
+        check(dom.countryCode === "+1 (United States)", `start: the country code shows ${JSON.stringify(dom.countryCode)}`);
+        check(dom.address === ADDRESS, `start: Address Line 1 holds ${JSON.stringify(dom.address)}`);
+        check(report.run.pauses.length === 0, `start: paused on ${report.run.pauses.map((pause) => pause.label).join(" | ")}`);
       } catch (error) {
         failures.push(`start: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -379,6 +435,82 @@ async function main(): Promise<void> {
       check((await value(declinedTab, "#primary-email-0")) === "", "default terms (data consent off): the email was typed");
       check((await state(declinedTab)).nextClicks === 0, "default terms (data consent off): Next was clicked");
       await declinedTab.close();
+    }
+
+    // (10) The quick email verification on the job page (its data-route) is the email step: typed, Next clicked once.
+    scenarios += 1;
+    {
+      const tab = await open({ flow: "new", route: QUICK_ROUTE, emailLabel: QUICK_LABEL }, QUICK_JOB);
+      const steps = oracleApplySteps(tab);
+      check((await steps.screen()) === "email", `quick: the job page's email step reads as ${await steps.screen()}`);
+      const result = await steps.submitEmail(EMAIL, always, STEP_WAIT);
+      check(result.result === "next" && result.screen === "form" && result.accepted === TENANT_TERMS, `quick: ${JSON.stringify(result)}`);
+      const after = await state(tab);
+      check(after.email === EMAIL && after.nextClicks === 1 && after.resendClicks === 0, `quick: fixture state ${JSON.stringify(after)}`);
+      await tab.close();
+    }
+
+    // (11) Its Next outside the form, disabled until the email and the terms are given: clicked once; declined terms type nothing.
+    scenarios += 1;
+    {
+      const quick: Partial<Scenario> = { flow: "new", route: QUICK_ROUTE, emailLabel: QUICK_LABEL, nextMode: "outside" };
+      const tab = await open(quick, QUICK_JOB);
+      check((await tab.locator(".apply-flow-pagination__round-button").isDisabled()), "quick outside: the round Next starts enabled");
+      const result = await oracleApplySteps(tab).submitEmail(EMAIL, always, STEP_WAIT);
+      check(result.result === "next" && result.screen === "form", `quick outside: ${JSON.stringify(result)}`);
+      const after = await state(tab);
+      check(after.email === EMAIL && after.nextClicks === 1, `quick outside: fixture state ${JSON.stringify(after)}`);
+      await tab.close();
+      const declinedTab = await open(quick, QUICK_JOB);
+      const declined = await oracleApplySteps(declinedTab).submitEmail(EMAIL, () => false, STEP_WAIT);
+      check(declined.result === "terms-declined", `quick outside declined: ${JSON.stringify(declined)}`);
+      check((await value(declinedTab, "#primary-email-0")) === "", "quick outside declined: the email was typed");
+      check((await state(declinedTab)).nextClicks === 0, "quick outside declined: Next was clicked");
+      await declinedTab.close();
+    }
+
+    // (12) A start run from the quick job page passes its email step and fills the section.
+    scenarios += 1;
+    {
+      const { database, jobId, report, error } = await startRun("quick", QUICK_JOB, { flow: "new", terms: TENANT_TERMS, captcha: false, pagination: "single", route: QUICK_ROUTE, emailLabel: QUICK_LABEL, nextMode: "outside" });
+      check(error === null, `quick run: stopped: ${error?.message ?? ""}`);
+      check(report?.run.status === "awaiting-approval", `quick run: run status ${report?.run.status} (pauses ${report?.run.pauses.map((pause) => pause.label).join(" | ")})`);
+      check(getBrowserRuns(jobId, database).length === 1, "quick run: no run was saved");
+      const tab = tabs.at(-1);
+      const dom = tab ? await sectionValues(tab) : null;
+      check(dom?.first === "Jordan" && dom.email === EMAIL, `quick run: section values ${JSON.stringify(dom)}`);
+      for (const each of tabs.splice(0)) await each.close();
+      database.close();
+    }
+
+    // (13) A section Oracle draws late after the email step is read once drawn.
+    scenarios += 1;
+    {
+      const { database, jobId, report, error } = await startRun("late", JOB, { flow: "new", terms: TENANT_TERMS, captcha: false, pagination: "single", delay: LATE_MS });
+      check(error === null, `late section: stopped: ${error?.message ?? ""}`);
+      check(report?.run.status === "awaiting-approval", `late section: run status ${report?.run.status} (pauses ${report?.run.pauses.map((pause) => pause.label).join(" | ")})`);
+      check(getBrowserRuns(jobId, database).length === 1, "late section: no run was saved");
+      const tab = tabs.at(-1);
+      const dom = tab ? await sectionValues(tab) : null;
+      check(dom?.first === "Jordan" && dom.last === "Rivera" && dom.resume === 1 && dom.importFiles === 0, `late section: section values ${JSON.stringify(dom)}`);
+      for (const each of tabs.splice(0)) await each.close();
+      database.close();
+    }
+
+    // (14) A run opened at a late section (a signed-in session skips the email step) is read once drawn.
+    scenarios += 1;
+    {
+      const { database, jobId, report, error } = await startRun("direct", `https://${HOST}${SECTION_PATH}`, {
+        flow: "new", terms: TENANT_TERMS, captcha: false, pagination: "single", delay: LATE_MS, sessionEmail: EMAIL
+      });
+      check(error === null, `direct section: stopped: ${error?.message ?? ""}`);
+      check(report?.run.status === "awaiting-approval", `direct section: run status ${report?.run.status} (pauses ${report?.run.pauses.map((pause) => pause.label).join(" | ")})`);
+      check(getBrowserRuns(jobId, database).length === 1, "direct section: no run was saved");
+      const tab = tabs.at(-1);
+      const dom = tab ? await sectionValues(tab) : null;
+      check(dom?.first === "Jordan" && dom.resume === 1 && dom.importFiles === 0, `direct section: section values ${JSON.stringify(dom)}`);
+      for (const each of tabs.splice(0)) await each.close();
+      database.close();
     }
 
     if (captured.some((line) => line.includes(CODE))) failures.push("the code reached the console");
