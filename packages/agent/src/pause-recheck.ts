@@ -42,7 +42,8 @@ export type SavedMatchKind =
   | "question_memory_normalized"
   | "alias_exact"
   | "alias_normalized"
-  | "profile_field";
+  | "profile_field"
+  | "self_identification";
 
 export const SAVED_MATCH_KINDS: readonly SavedMatchKind[] = [
   "saved_fact",
@@ -51,7 +52,8 @@ export const SAVED_MATCH_KINDS: readonly SavedMatchKind[] = [
   "question_memory_normalized",
   "alias_exact",
   "alias_normalized",
-  "profile_field"
+  "profile_field",
+  "self_identification"
 ];
 
 export type AliasHit = {
@@ -121,12 +123,28 @@ const ATTACHED_RESUME_FIELD_ID = "handshake-attached-resume";
 
 /**
  * Whether the stop re-check may look at this pause: an open question pause
- * with a recorded field kind; never a safeguard, upload, sensitive pause, the
- * attached-resume confirmation, the security-code step, a Workday error
- * report, a fault, or a page failure ("The agent could not fill …").
+ * with a recorded field kind; never a safeguard, upload, sensitive pause (see
+ * selfIdentificationStopEligible), the attached-resume confirmation, the
+ * security-code step, a Workday error report, a fault, or a page failure
+ * ("The agent could not fill …").
  */
 export function stopEligible(pause: PauseRecord): boolean {
-  if (pause.status !== "open" || pause.safeguard || pause.upload || pause.sensitive || !pause.fieldKind) return false;
+  return !pause.sensitive && questionStop(pause);
+}
+
+/**
+ * (Track 91) Whether the stop re-check may settle this sensitive pause through
+ * the saved voluntary self-identification answers alone (the planner's
+ * deterministic self-identification path, never the AI review or question
+ * memory): a sensitive open question pause with a recorded field kind, on the
+ * same terms as stopEligible otherwise.
+ */
+export function selfIdentificationStopEligible(pause: PauseRecord): boolean {
+  return pause.sensitive && questionStop(pause);
+}
+
+function questionStop(pause: PauseRecord): boolean {
+  if (pause.status !== "open" || pause.safeguard || pause.upload || !pause.fieldKind) return false;
   if (pause.fieldId === ATTACHED_RESUME_FIELD_ID || pause.fieldId === "site-security-code" || isWorkdayErrorPauseId(pause.fieldId)) return false;
   if (classifyOpenPauses([pause])[0]?.kind !== "question") return false;
   return !pause.question.startsWith("The agent could not fill");
@@ -169,7 +187,8 @@ const KIND_TEXT: Record<SavedMatchKind, string> = {
   question_memory_normalized: "same wording after normalization",
   alias_exact: "a recorded wording",
   alias_normalized: "a recorded wording",
-  profile_field: "your profile"
+  profile_field: "your profile",
+  self_identification: "your saved voluntary self-identification answers"
 };
 
 /** How the timeline names a profile field a stop was answered from; never its value. */
@@ -225,6 +244,43 @@ export function savedAnswerTargetText(
 /** The timeline line for a stop the re-check answered from a saved answer; never the answer. */
 export function savedAnswerEventDetail(label: string, kind: SavedMatchKind, targetText: string): string {
   return `Answer to "${clip(label, 150)}" found in your saved answers (${KIND_TEXT[kind]}): ${targetText}; it no longer waits for you.`.slice(0, 1000);
+}
+
+/** How a sensitive stop is settled from the saved answers alone (Track 91). */
+export type SensitiveSettlement = "self_identification" | "pronouns";
+
+/**
+ * (Track 91) How today's plan of a sensitive stop settles it from the saved
+ * answers alone, or null. On a field whose role is sensitive, only the
+ * planner's deterministic self-identification path counts: a SELF_IDENTIFIED
+ * resolution chosen or checked from its own saved key (and, where the page
+ * itself was read, `allowSkip`, a classification it leaves empty). On a stop
+ * recorded as sensitive whose field is no longer sensitive, only the saved
+ * pronouns answer counts (Track 82 made pronoun questions the pronouns
+ * answer's), never through a recorded wording.
+ */
+export function sensitiveStopSettlement(
+  sensitiveRole: boolean,
+  resolution: FieldResolution | undefined,
+  decision: FillDecision | undefined,
+  options: { allowSkip: boolean; aliasHit: boolean }
+): SensitiveSettlement | null {
+  if (!decision) return null;
+  if (sensitiveRole) {
+    if (resolution?.status !== "SELF_IDENTIFIED") return null;
+    if (decision.action === "skip") return options.allowSkip ? "self_identification" : null;
+    return (decision.action === "choose" || decision.action === "check") && decision.basis?.kind === "fact" && decision.basis.key === resolution.key
+      ? "self_identification" : null;
+  }
+  if (options.aliasHit || resolution?.status !== "RESOLVED" || resolution.key !== "pronouns") return null;
+  return (decision.action === "fill" || decision.action === "choose" || decision.action === "check")
+    && decision.basis?.kind === "fact" && decision.basis.key === "pronouns" ? "pronouns" : null;
+}
+
+/** (Track 91) The timeline line for a sensitive stop the saved answers settle; it never names the answer. */
+export function selfIdentificationEventDetail(label: string, settlement: SensitiveSettlement): string {
+  const source = settlement === "pronouns" ? "your saved pronouns answer" : "your saved voluntary self-identification answer";
+  return `Answer to "${clip(label, 150)}" settled by ${source}; it no longer waits for you.`.slice(0, 1000);
 }
 
 /** The timeline line for a field a recorded wording answered; never the answer. */

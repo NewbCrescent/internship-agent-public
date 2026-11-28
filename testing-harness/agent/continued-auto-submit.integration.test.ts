@@ -42,6 +42,7 @@ import {
   continuedAutoSubmitRuns,
   evaluateAndPersistMatch,
   prepareApplication,
+  recheckPausedRuns,
   savePostSubmitEvidence,
   startBrowserRun,
   UnavailableModelProvider,
@@ -580,6 +581,52 @@ describe("answered held runs (Track 78)", () => {
     expect(answeredContinueBlocker(database, dataDir, getBrowserRun(database, run.id)!))
       .toBe("Workday runs are continued with pnpm run:answer --continue.");
     expect(answeredHeldRuns(database, dataDir)).toEqual([]);
+    database.close();
+  });
+
+  it("continues and submits a run whose last open question was a self-identification stop the re-check settled from the saved answer (Track 91, fictional answer)", async () => {
+    stubPolicyEnv();
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-continued-data-");
+    const flag = { clicked: false };
+    const chosen = new Map<string, string>();
+    const controls: RawControl[] = [
+      { tag: "input", type: "text", id: "q1", label: "What is your available start date?", required: true },
+      { tag: "select", id: "gender", label: "Gender", required: true, options: ["Male", "Female", "Decline To Self Identify"] },
+      { tag: "button", label: "Submit application" }
+    ];
+    const page: PageFactory = async () => ({
+      ...fakePage({ controls, submitted: flag }),
+      chooseOption: async (field, option) => { chosen.set(field.id, option); }
+    });
+    const jobId = seededJob(database);
+    // The run paused on the self-identification question while the matcher could not settle it (no saved answer yet).
+    const first = await pass(database, dataDir, page);
+    expect(first.started).toEqual([{ jobId, runStatus: "paused-needs-input" }]);
+    const run = listBrowserRuns(database, jobId)[0]!;
+    expect(run.pauses.filter((pause) => pause.status === "open").map((pause) => [pause.label, pause.sensitive])).toEqual([["Gender", true]]);
+    expect(answeredContinueBlocker(database, dataDir, run)).toBe("it still has open questions.");
+
+    saveCandidateFact(database, {
+      candidateId: LOCAL_CANDIDATE_ID, key: "eeo_gender", scope: { kind: "global" }, value: "female", source: "user",
+      sourceDetail: { kind: "profile" }, confidence: 1, rememberedAt: "2026-11-28T00:00:00.000Z"
+    });
+    const rechecked = await recheckPausedRuns(database, { apply: true });
+    expect(rechecked.flatMap((result) => result.matches.map((match) => match.kind))).toEqual(["self_identification"]);
+    const settled = getBrowserRun(database, run.id)!;
+    expect(settled.pauses.some((pause) => pause.status === "open")).toBe(false);
+    expect(answeredContinueBlocker(database, dataDir, settled)).toBeNull();
+
+    const second = await pass(database, dataDir, page);
+    expect(second.errors).toEqual([]);
+    expect(second.continued).toEqual([{ jobId, runStatus: "awaiting-approval" }]);
+    expect(second.submitted).toEqual([{ jobId, confirmation: expect.stringContaining("application was received") }]);
+    expect(chosen.get("gender")).toBe("Female");
+    expect(getBrowserRun(database, run.id)?.status).toBe("submitted");
+    // The timeline and the approval name the settled question, never the saved answer.
+    const details = listApplicationEvents(database, jobId).map((event) => event.detail ?? "");
+    expect(details).toContain('Answer to "Gender" settled by your saved voluntary self-identification answer; it no longer waits for you.');
+    expect(details.join("\n")).not.toMatch(/\bfemale\b/i);
     database.close();
   });
 });

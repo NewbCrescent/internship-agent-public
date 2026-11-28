@@ -196,10 +196,14 @@ import {
   pauseReviewEligible,
   savedAnswerEventDetail,
   savedAnswerTargetText,
+  selfIdentificationEventDetail,
+  selfIdentificationStopEligible,
+  sensitiveStopSettlement,
   settleAliasHits,
   stopEligible,
   type AliasHit,
-  type SavedMatchKind
+  type SavedMatchKind,
+  type SensitiveSettlement
 } from "./pause-recheck";
 import { continueSteppedRun, startSteppedRun, submitSteppedRun, type SteppedRunDeps } from "./stepped-form-run";
 import { blockedPause, walkWorkday, WorkdaySignInRequired, type WorkdayRunContext } from "./workday-run";
@@ -1462,22 +1466,9 @@ export async function recheckRunPauses(
   };
   const candidate = getCandidate(database, candidateId);
   const standing = standingConsentSettings(process.env);
-  type Match = { index: number; pause: PauseRecord; kind: SavedMatchKind; answer: string; basis: NonNullable<FillDecision["basis"]>; hit?: AliasHit; savedQuestion: { id: string; question: string; questionKey: string } | null };
+  type Match = { index: number; pause: PauseRecord; kind: SavedMatchKind; answer: string | null; basis: NonNullable<FillDecision["basis"]>; hit?: AliasHit; settlement?: SensitiveSettlement; savedQuestion: { id: string; question: string; questionKey: string } | null };
   const found: Match[] = [];
-  for (const [index, pause] of run.pauses.entries()) {
-    if (pause.status !== "open") continue;
-    if (!stopEligible(pause) || !pause.fieldKind) {
-      result.skipped += 1;
-      continue;
-    }
-    const field: BrowserField = {
-      id: pause.fieldId, label: pause.label, kind: pause.fieldKind, required: true,
-      ...(pause.options?.length ? { options: pause.options } : {})
-    };
-    if (isSensitiveRole(classifyFieldRole(field))) {
-      result.skipped += 1;
-      continue;
-    }
+  const planField = async (field: BrowserField, pause: PauseRecord) => {
     const form: RecognizedForm = { url: run.applicationUrl, title: "", fields: [field] };
     const hits: AliasHit[] = [];
     const resolutions = await resolveFields(form, database, { ...base, ...(pauseContext(pause.suggestedScope) ?? {}) }, hits);
@@ -1490,8 +1481,43 @@ export async function recheckRunPauses(
       standing,
       postingLocations: postingLocationNames(posting)
     }));
-    const decision = plan.decisions.find((entry) => entry.fieldId === field.id);
-    const hit = hits.find((entry) => entry.fieldId === field.id);
+    return { resolution: resolutions.get(field.id), decision: plan.decisions.find((entry) => entry.fieldId === field.id), hit: hits.find((entry) => entry.fieldId === field.id) };
+  };
+  for (const [index, pause] of run.pauses.entries()) {
+    if (pause.status !== "open") continue;
+    if (!pause.fieldKind || !(stopEligible(pause) || selfIdentificationStopEligible(pause))) {
+      result.skipped += 1;
+      continue;
+    }
+    // Planned as required: a pause record does not keep whether the field was optional.
+    const field: BrowserField = {
+      id: pause.fieldId, label: pause.label, kind: pause.fieldKind, required: true,
+      ...(pause.options?.length ? { options: pause.options } : {})
+    };
+    const sensitiveRole = isSensitiveRole(classifyFieldRole(field));
+    if (pause.sensitive || sensitiveRole) {
+      // (Track 91) A sensitive stop is settled only through the planner's deterministic self-identification path
+      // (resolveFields' SELF_IDENTIFIED resolution, then planAutofill's choice) or, for a pronoun question recorded
+      // as sensitive before Track 82, the saved pronouns answer: never the AI review, question memory, or a recorded
+      // wording. The pause keeps no answer, and continue plans the field again from the saved answers.
+      // A single sensitive checkbox (Oracle's "I am Hispanic or Latino." box, a veteran classification) is never settled
+      // here: without the page's optional flag only one direction could settle, so settling it would show the answer.
+      // Continue, which reads the page, settles it either way.
+      if (field.kind === "checkbox" && (field.options?.length ?? 0) < 2) {
+        result.left.push({ index, label: pause.label, aiEligible: false });
+        continue;
+      }
+      const planned = await planField(field, pause);
+      const settlement = sensitiveStopSettlement(sensitiveRole, planned.resolution, planned.decision, { allowSkip: false, aliasHit: planned.hit !== undefined });
+      if (!settlement || !planned.decision?.basis) {
+        result.left.push({ index, label: pause.label, aiEligible: false });
+        continue;
+      }
+      found.push({ index, pause, kind: "self_identification", settlement, answer: null, basis: planned.decision.basis, savedQuestion: null });
+      result.matches.push({ index, fieldId: pause.fieldId, label: pause.label, kind: "self_identification" });
+      continue;
+    }
+    const { decision, hit } = await planField(field, pause);
     const basis = decision?.basis;
     const fromProfile = basis?.kind === "profile";
     const accepted = decision !== undefined && ["fill", "choose", "check"].includes(decision.action)
@@ -1528,6 +1554,8 @@ export async function recheckRunPauses(
     pauses: run.pauses.map((pause) => {
       const match = byField.get(pause.fieldId);
       if (!match || pause.status !== "open") return pause;
+      // A protected option is never copied into the pause record.
+      if (match.kind === "self_identification") return { ...pause, sensitive: true, status: "answered" as const, answer: null };
       return {
         ...pause, status: "answered" as const, answer: match.answer,
         ...(match.basis.kind === "fact" ? { suggestedKey: match.basis.key, suggestedScope: match.basis.scope } : {})
@@ -1537,6 +1565,11 @@ export async function recheckRunPauses(
   const status = posting?.status ?? "APPLYING";
   const aliases = questionAliasStoreAvailable(database);
   for (const match of found) {
+    if (match.kind === "self_identification") {
+      // No wording is recorded against a protected answer, and the timeline names neither the answer nor its category.
+      logApplicationEvent(database, { jobId: run.jobId, fromStatus: status, toStatus: status, detail: selfIdentificationEventDetail(match.pause.label, match.settlement ?? "self_identification") });
+      continue;
+    }
     // A profile match records no wording (Track 57): the planner reads the profile on every run.
     let target: QuestionAliasTarget | null;
     let targetText: string;
@@ -1726,6 +1759,19 @@ export async function continueBrowserRun(
       const pause = run.pauses.find((entry) => entry.fieldId === decision.fieldId);
       const field = form.fields.find((entry) => entry.id === decision.fieldId);
       const resolution = field ? resolutions.get(field.id) : undefined;
+      if (pause?.status === "answered" && pause.answer === null && pause.sensitive) {
+        // (Track 91) A sensitive stop the re-check settled keeps no answer: today's plan fills it from the saved
+        // self-identification or pronouns answer, and when they no longer settle it (or the field is gone), the stop opens again.
+        const planned = field ? fresh.get(field.id) : undefined;
+        const aliasHit = aliasHits.some((hit) => hit.fieldId === pause.fieldId);
+        if (field && planned && sensitiveStopSettlement(isSensitiveRole(classifyFieldRole(field)), resolution, planned, { allowSkip: true, aliasHit })) {
+          decisions.push(planned);
+          continue;
+        }
+        reopened.add(pause.fieldId);
+        decisions.push(decision);
+        continue;
+      }
       if (pause?.status === "answered" && pause.answer && field) {
         // A stop answered from the profile (the stop re-check, Track 57) keeps today's plan, with its profile basis and reason, when that plan gives the same answer.
         const planned = fresh.get(field.id);

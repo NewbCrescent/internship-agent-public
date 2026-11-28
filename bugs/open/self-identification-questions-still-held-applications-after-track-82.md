@@ -18,9 +18,9 @@ Not fixed here:
 - Littelfuse <run id>'s Workday ethnicity checkboxes are still read with no options (as <run id> was in Track 82); a capture of that list is needed first.
 - Corvane <run id>'s gender and veteran status lists are still read as text (bugs/open/oracle-address-lists-and-self-identification-lists-still-pause.md).
 - ParetoHealth <run id>'s "Do you attest to the following statement? … is an equal opportunity employer …" is a clipped attestation, not a self-identification question.
-- Held runs from before Track 82 (Lockheed Martin <run id> and <run id>, Sierra <run id>, Strava <run id> and <run id>, Tinder <run id> and <run id>, Toyota Research <run id> and <run id>) were never planned again with Track 82's code.
+- Held runs from before Track 82 (Lockheed Martin <run id> and <run id>, Sierra <run id>, Strava <run id> and <run id>, Tinder <run id> and <run id>, Toyota Research <run id> and <run id>) were never planned again with Track 82's code (bugs/open/held-self-identification-stops-were-never-settled-by-the-stop-re-check.md, Track 91).
 
-The stop re-check skips sensitive pauses, so the held runs pick these fixes up through `pnpm pipeline:retry --held`.
+Since Track 91 the stop re-check settles sensitive pauses through the same self-identification rules, so the held runs pick these fixes up there.
 
 fixture: modelled (Oracle's Hispanic box and plural classification box as single checkboxes, their required state, and Lever's survey revealing its questions once a country is chosen; labels and option lists from the held runs' pauses and stop evidence of 2026-11-28)
 

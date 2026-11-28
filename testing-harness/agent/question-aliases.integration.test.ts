@@ -191,7 +191,7 @@ describe("re-checking held stops after a saved answer", () => {
     ws.database.close();
   });
 
-  it("never answers a sensitive stop from another run's answer and never shows a protected value", async () => {
+  it("never answers a sensitive stop from another run's answer, settles it only from the saved self-identification answer, and never shows a protected value", async () => {
     const ws = workspace();
     const gender: RawControl = { tag: "select", id: "gender", label: "Gender", required: true, options: ["Male", "Female", "Decline To Self Identify"] };
     const run = await start(ws, [gender, submitButton]);
@@ -200,11 +200,14 @@ describe("re-checking held stops after a saved answer", () => {
     const other = heldRun(ws, run, [{ ...pause }]);
     const answered = await answerRunPause(run.id, "gender", "female", true, { database: ws.database });
     expect(answered.outcome).toMatchObject({ saved: false, reason: "sensitive" });
-    // Even with the answer saved explicitly, the sweep never answers a sensitive stop.
+    expect(answered.rechecked).toBe(0);
+    expect(getBrowserRun(ws.database, other.id)?.pauses[0]?.status).toBe("open");
+    // With the answer saved explicitly as a self-identification answer, the sweep settles the stop through the
+    // self-identification path only (Track 91): no answer in the pause, no recorded wording.
     saveFact(ws.database, { key: "eeo_gender", scope: { kind: "global" }, value: "female" });
     const results = await recheckPausedRuns(ws.database, { apply: true });
-    expect(results.flatMap((result) => result.matches)).toEqual([]);
-    expect(getBrowserRun(ws.database, other.id)?.pauses[0]?.status).toBe("open");
+    expect(results.flatMap((result) => result.matches)).toEqual([{ index: 0, fieldId: "gender", label: "Gender", kind: "self_identification" }]);
+    expect(getBrowserRun(ws.database, other.id)?.pauses[0]).toMatchObject({ status: "answered", answer: null, sensitive: true });
     expect(aliasRows(ws.database)).toEqual([]);
 
     // A protected fact with a recorded wording is listed as "saved", never by value.
@@ -451,6 +454,168 @@ describe("recorded wordings never widen a saved answer's scope", () => {
   });
 });
 
+describe("sensitive stops and the saved self-identification answers (Track 91, fictional answers)", () => {
+  const GENDER_OPTIONS = ["Male", "Female", "Decline To Self Identify"];
+  const genderControl = (options = GENDER_OPTIONS): RawControl => ({ tag: "select", id: "gender", label: "Gender", required: true, options });
+  /** A sensitive pause recorded by a run that paused before the self-identification matcher settled it (before Track 82). */
+  function sensitivePause(label: string, fieldId: string, overrides: Partial<PauseRecord> = {}): PauseRecord {
+    return questionPause(label, fieldId, {
+      question: `This looks like a demographic or equal-opportunity question ("${label}"). Please answer it yourself; it will not be stored.`,
+      sensitive: true, ...overrides
+    });
+  }
+  const protectedValues = /\bfemale\b|she\/her|not_veteran|no_disability|hispanic_or_latino/i;
+  /** Every held run's pauses without their offered options (which name the options, not the answer). */
+  function pausesText(ws: Workspace): string {
+    const rows = ws.database.prepare("SELECT pauses_json FROM browser_runs").all() as Array<{ pauses_json: string }>;
+    return JSON.stringify(rows.map((row) => (JSON.parse(row.pauses_json) as PauseRecord[]).map(({ options: _options, ...rest }) => rest)));
+  }
+  function rowsText(ws: Workspace): string {
+    return JSON.stringify({
+      runs: pausesText(ws),
+      events: eventDetails(ws),
+      aliases: aliasRows(ws.database),
+      questions: ws.database.prepare("SELECT * FROM candidate_question_answers").all()
+    });
+  }
+
+  it("settles an older held run's self-identification stop from the saved answer without storing or showing it, and continue fills it", async () => {
+    const ws = workspace();
+    const like = await start(ws, [pythonSelect(), submitButton]);
+    const held = heldRun(ws, like, [sensitivePause("Gender", "gender", { options: GENDER_OPTIONS })]);
+    saveFact(ws.database, { key: "eeo_gender", scope: { kind: "global" }, value: "female" });
+
+    const before = ws.database.prepare("SELECT id, updated_at, pauses_json FROM browser_runs ORDER BY id").all();
+    const dry = await recheckRunPauses(ws.database, held.id, { apply: false });
+    expect(dry.matches).toEqual([{ index: 0, fieldId: "gender", label: "Gender", kind: "self_identification" }]);
+    expect(ws.database.prepare("SELECT id, updated_at, pauses_json FROM browser_runs ORDER BY id").all()).toEqual(before);
+
+    const output: string[] = [];
+    const deps = {
+      openReadOnly: () => ws.database, closeReadOnly: () => {}, open: () => ws.database, close: () => {},
+      dataDir: () => ws.dataDir, acquireLock: (dataDir: string) => acquirePipelineLock(dataDir), log: (line: string) => output.push(line)
+    };
+    expect(await runQuestionsRecheckCommand(["--profile", "demo", "--apply"], deps)).toBe(0);
+    expect(output).toContain(`Run ${held.id.slice(0, 8)}: ${ws.company} — Software Engineering Intern: Q1 self_identification`);
+    expect(output.some((line) => line.includes("self_identification 1); skipped"))).toBe(true);
+    expect(output.join("\n")).not.toMatch(protectedValues);
+
+    const settled = getBrowserRun(ws.database, held.id)!;
+    expect(settled.status).toBe("paused-needs-input");
+    expect(settled.pauses[0]).toMatchObject({ status: "answered", answer: null, sensitive: true, suggestedKey: null, suggestedScope: null });
+    expect(eventDetails(ws)).toContain('Answer to "Gender" settled by your saved voluntary self-identification answer; it no longer waits for you.');
+    expect(aliasRows(ws.database)).toEqual([]);
+    expect(ws.database.prepare("SELECT COUNT(*) AS n FROM candidate_question_answers").get()).toEqual({ n: 0 });
+    expect(rowsText(ws)).not.toMatch(protectedValues);
+
+    // Continue plans the field again from the saved answer and fills the one matching option.
+    const page = fakePage({ controls: [genderControl(), submitButton] });
+    const continued = await continueBrowserRun(held.id, { database: ws.database, dataDir: ws.dataDir, openPage: async () => page, pauseReviewer: null });
+    expect(page.filled.get("gender")).toBe("Female");
+    expect(continued.run.status).toBe("awaiting-approval");
+    const decision = continued.run.decisions.find((entry) => entry.fieldId === "gender")!;
+    expect(decision).toMatchObject({ action: "choose", basis: { kind: "fact", key: "eeo_gender", scope: "global" } });
+    expect(decision.reason).not.toMatch(protectedValues);
+    expect(continued.run.pauses[0]).toMatchObject({ status: "answered", answer: null });
+    expect(eventDetails(ws).join("\n")).not.toMatch(protectedValues);
+    ws.database.close();
+  });
+
+  it("opens the stop again on continue when the page's options no longer match the saved answer", async () => {
+    const ws = workspace();
+    const like = await start(ws, [pythonSelect(), submitButton]);
+    const held = heldRun(ws, like, [sensitivePause("Gender", "gender", { options: GENDER_OPTIONS })]);
+    saveFact(ws.database, { key: "eeo_gender", scope: { kind: "global" }, value: "female" });
+    expect((await recheckRunPauses(ws.database, held.id, { apply: true })).matches).toHaveLength(1);
+    const page = fakePage({ controls: [genderControl(["Male", "Decline To Self Identify"]), submitButton] });
+    const continued = await continueBrowserRun(held.id, { database: ws.database, dataDir: ws.dataDir, openPage: async () => page, pauseReviewer: null });
+    expect(page.filled.has("gender")).toBe(false);
+    expect(continued.run.status).toBe("paused-needs-input");
+    expect(continued.run.pauses.find((pause) => pause.fieldId === "gender")).toMatchObject({ status: "open", answer: null, sensitive: true });
+    ws.database.close();
+  });
+
+  it("keeps non-identity sensitive wordings, page failures, and unsaved categories open, and writes nothing for them", async () => {
+    const ws = workspace();
+    const like = await start(ws, [pythonSelect(), submitButton]);
+    const held = heldRun(ws, like, [
+      sensitivePause("Veteran Self-Identification Status of your spouse", "spouse-veteran", { options: ["Declines to Self-Identify", "Not a Protected Veteran", "Protected Veteran"] }),
+      sensitivePause("Do you have a disability or chronic condition that requires accommodation?", "accommodation", { options: ["Yes", "No", "I do not wish to answer"] }),
+      sensitivePause("My manager is Hispanic or Latino", "manager", { fieldKind: "checkbox", options: undefined }),
+      sensitivePause("I am Hispanic or Latino.", "hispanic-box", { fieldKind: "checkbox", options: undefined }),
+      sensitivePause("Gender", "gender-failed", { options: GENDER_OPTIONS, question: 'The agent could not fill "Gender": the option was not found. Answer it here, or fill it in the browser.' }),
+      sensitivePause("Sexual Orientation", "orientation", { options: ["Heterosexual", "Gay", "Decline to self-identify"] })
+    ]);
+    saveFact(ws.database, { key: "eeo_veteran_status", scope: { kind: "global" }, value: "not_veteran" });
+    saveFact(ws.database, { key: "eeo_disability_status", scope: { kind: "global" }, value: "no_disability" });
+    saveFact(ws.database, { key: "eeo_race_ethnicity", scope: { kind: "global" }, value: "white" });
+    saveFact(ws.database, { key: "eeo_gender", scope: { kind: "global" }, value: "female" });
+    const before = rowsText(ws);
+    const result = await recheckRunPauses(ws.database, held.id, { apply: true });
+    expect(result.matches).toEqual([]);
+    expect(result.skipped).toBe(1);
+    // A single sensitive box is never settled by the re-check (see the next test).
+    expect(result.left.map((entry) => [entry.label, entry.aiEligible])).toEqual([
+      ["Veteran Self-Identification Status of your spouse", false],
+      ["Do you have a disability or chronic condition that requires accommodation?", false],
+      ["My manager is Hispanic or Latino", false],
+      ["I am Hispanic or Latino.", false],
+      ["Sexual Orientation", false]
+    ]);
+    expect(getBrowserRun(ws.database, held.id)!.pauses.every((pause) => pause.status === "open")).toBe(true);
+    expect(rowsText(ws)).toBe(before);
+    ws.database.close();
+  });
+
+  it("never settles a single self-identification box in either direction, so the re-check's outcome never shows the saved answer", async () => {
+    for (const value of ["hispanic_or_latino", "white"] as const) {
+      const ws = workspace();
+      const like = await start(ws, [pythonSelect(), submitButton]);
+      const held = heldRun(ws, like, [
+        sensitivePause("I am Hispanic or Latino.", "hispanic-box", { fieldKind: "checkbox", options: undefined }),
+        sensitivePause("Disabled Veteran", "disabled-veteran", { fieldKind: "checkbox", options: undefined })
+      ]);
+      saveFact(ws.database, { key: "eeo_race_ethnicity", scope: { kind: "global" }, value });
+      saveFact(ws.database, { key: "eeo_veteran_status", scope: { kind: "global" }, value: "not_veteran" });
+      const before = rowsText(ws);
+      const result = await recheckRunPauses(ws.database, held.id, { apply: true });
+      expect(result.matches, value).toEqual([]);
+      expect(result.left.map((entry) => [entry.label, entry.aiEligible]), value).toEqual([["I am Hispanic or Latino.", false], ["Disabled Veteran", false]]);
+      expect(rowsText(ws), value).toBe(before);
+      ws.database.close();
+    }
+  });
+
+  it("settles a pronoun question an older run recorded as sensitive from the saved pronouns answer, never through a recorded wording", async () => {
+    const ws = workspace();
+    const like = await start(ws, [pythonSelect(), submitButton]);
+    const options = ["He/him", "She/her", "They/them", "Prefer not to say"];
+    const held = heldRun(ws, like, [sensitivePause("What are your pronouns?", "pronouns", { fieldKind: "radio", options })]);
+    // Before a pronouns answer is saved, a question-memory answer with this exact wording recorded against it does not settle it.
+    const stored = saveQuestionAnswer(ws.database, { candidateId: LOCAL_CANDIDATE_ID, question: "Favorite pronoun set", answerKind: "option", answer: "She/her", sourceRunId: null });
+    recordQuestionAlias(ws.database, {
+      candidateId: LOCAL_CANDIDATE_ID, wording: "What are your pronouns?", target: { kind: "question", questionKey: stored.answer.questionKey },
+      atsKind: "greenhouse", options, source: "candidate_answer", sourceRunId: null
+    });
+    const unsaved = await recheckRunPauses(ws.database, held.id, { apply: false });
+    expect(unsaved.matches).toEqual([]);
+    expect(unsaved.left).toEqual([{ index: 0, label: "What are your pronouns?", aiEligible: false }]);
+    saveFact(ws.database, { key: "pronouns", scope: { kind: "global" }, value: "she/her" });
+    const result = await recheckRunPauses(ws.database, held.id, { apply: true });
+    expect(result.matches).toEqual([{ index: 0, fieldId: "pronouns", label: "What are your pronouns?", kind: "self_identification" }]);
+    expect(getBrowserRun(ws.database, held.id)!.pauses[0]).toMatchObject({ status: "answered", answer: null, sensitive: true });
+    expect(eventDetails(ws)).toContain('Answer to "What are your pronouns?" settled by your saved pronouns answer; it no longer waits for you.');
+    // No wording is recorded against the protected stop; the one recorded above is the only one.
+    expect(aliasRows(ws.database).map((row) => row.source)).toEqual(["candidate_answer"]);
+    expect(JSON.stringify({ events: eventDetails(ws), runs: pausesText(ws) })).not.toMatch(/she\/her/i);
+    const page = fakePage({ controls: [{ tag: "input", type: "radio", id: "pronouns", label: "What are your pronouns?", required: true, options }, submitButton] });
+    const continued = await continueBrowserRun(held.id, { database: ws.database, dataDir: ws.dataDir, openPage: async () => page, pauseReviewer: null });
+    expect(page.filled.get("pronouns")).toBe("She/her");
+    expect(continued.run.status).toBe("awaiting-approval");
+    ws.database.close();
+  });
+});
+
 describe("pnpm profile:answers and pnpm questions:recheck", () => {
   it("lists recorded wordings under each answer and revokes one", async () => {
     const ws = workspace();
@@ -489,7 +654,7 @@ describe("pnpm profile:answers and pnpm questions:recheck", () => {
     const runLine = `Run ${run.id.slice(0, 8)}: ${ws.company} — Software Engineering Intern: Q1 question_memory_exact`;
     expect(output).toEqual([
       runLine,
-      "open pauses: 2; would be answered by saved answers: 1 (saved_fact 0, standard_answer 0, question_memory_exact 1, question_memory_normalized 0, alias_exact 0, alias_normalized 0, profile_field 0); skipped (safeguard, upload, sensitive, page failures, faults, older runs): 0; still open: 1, of which would reach AI review: 1"
+      "open pauses: 2; would be answered by saved answers: 1 (saved_fact 0, standard_answer 0, question_memory_exact 1, question_memory_normalized 0, alias_exact 0, alias_normalized 0, profile_field 0, self_identification 0); skipped (safeguard, upload, sensitive, page failures, faults, older runs): 0; still open: 1, of which would reach AI review: 1"
     ]);
     expect(getBrowserRun(ws.database, run.id)?.pauses[0]?.status).toBe("open");
     expect(output.join("\n")).not.toContain("Yes");
