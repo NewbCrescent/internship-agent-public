@@ -56,6 +56,7 @@ import {
   hasPostingClosedNotice,
   hasSiteNavigation,
   hasStepButtons,
+  hasSteppedWalk,
   icimsHostOf,
   hasTranscriptField,
   invalidFieldPauses,
@@ -77,6 +78,7 @@ import {
   shouldRunHeadless,
   siteWallReason,
   startRunTrace,
+  steppedWalkEligible,
   submitAndConfirm,
   submitTargetHoldReason,
   submitTargetPause,
@@ -110,6 +112,7 @@ import {
   boundPauseQuestion,
   factDefinitions,
   highSchoolPlaceOf,
+  isSteppedRun,
   isWorkdayErrorPauseId,
   manualOnly,
   normalizeQuestionText,
@@ -190,6 +193,7 @@ import {
   type AliasHit,
   type SavedMatchKind
 } from "./pause-recheck";
+import { continueSteppedRun, startSteppedRun, submitSteppedRun, type SteppedRunDeps } from "./stepped-form-run";
 import { blockedPause, walkWorkday, WorkdaySignInRequired, type WorkdayRunContext } from "./workday-run";
 import { workdayAccountWait, type WorkdayAccountRuntime } from "./workday-account-service";
 import { getWorkdayAccount } from "./workday-account-store";
@@ -1004,9 +1008,22 @@ export async function startBrowserRun(
     const flow = atsFlowFor(classification);
     // A form of several pages on a site with no adapter (unknown, approval-only, and several-page kinds (Workday off
     // its adapter); iCIMS is its own flow):
-    // filling only its first page would leave the run stuck at submit, so it stops with the reason.
+    // filling only its first page would leave the run stuck at submit, so it stops with the reason, unless it shows its step count.
     if (!challenge && !inDialog && flow !== "auto" && !onHandshakeHost(page.url()) && !icimsHostOf(page.url()) && hasStepButtons(page)) {
-      const multi = multiStepStopReason(page.url(), await page.stepButtons());
+      const buttons = await page.stepButtons();
+      const multi = multiStepStopReason(page.url(), buttons);
+      // Track 74: a several-page form that shows its step count is walked step by step to its last step, never submitted here.
+      if (multi && hasSteppedWalk(page) && steppedWalkEligible(page.url(), await page.bodyText(), buttons)) {
+        const channel = runChannel(posting.source.applicationType, lock === "transcript");
+        const report = await startSteppedRun(database, steppedRunDeps(database, { candidateId, candidate, dataDir, renderPdf, standing }), page, {
+          jobId, candidateId, posting, current, variantId: variant.id, automatic, lock, formUrl, classification, flow, dataDir, standing, channel,
+          profile: lock === "transcript" || channel ? "transcript" : "default",
+          drafterFactory: () => options.voiceDrafter === undefined ? createDefaultVoiceDrafter({ dataDir, database }) : options.voiceDrafter,
+          reviewerFactory: () => options.pauseReviewer === undefined ? createDefaultPauseReviewer({ database, candidateId }) : options.pauseReviewer
+        });
+        noteMixedProfile(database, report.run, posting.companyName, candidateId, manualPin);
+        return report;
+      }
       if (multi) throw automatic ? new AutomaticRunStopped(multi) : new Error(multi);
     }
     const transcriptRequired = hasTranscriptField(form.fields);
@@ -1605,6 +1622,14 @@ export async function continueBrowserRun(
     });
     return { run: settled, form: { url, title, fields: [] }, applied: countApplied(walk.decisions) };
   }
+  if (isSteppedRun(run)) {
+    // Track 74: a several-page run is walked again from the step the site shows, with the candidate's answers.
+    return continueSteppedRun(database, steppedRunDeps(database, { candidateId: LOCAL_CANDIDATE_ID, candidate: getCandidate(database, LOCAL_CANDIDATE_ID), dataDir, renderPdf: options.renderPdf ?? renderHtmlToPdf, standing }), run, {
+      openPage: options.openPage ?? ((url: string) => defaultOpenPage(url, dataDir, { database, jobId: run.jobId, runId: run.id })), dataDir, standing,
+      drafterFactory: () => options.voiceDrafter === undefined ? createDefaultVoiceDrafter({ dataDir, database }) : options.voiceDrafter,
+      reviewerFactory: () => options.pauseReviewer === undefined ? createDefaultPauseReviewer({ database }) : options.pauseReviewer
+    });
+  }
   const openPage = options.openPage ?? ((url: string) => defaultOpenPage(url, dataDir, { database, jobId: run.jobId, runId: run.id }));
   const channel = runChannel(
     getJobPosting(database, run.jobId)?.source.applicationType,
@@ -1916,6 +1941,12 @@ export async function submitBrowserRun(
     await recordSubmission(database, dataDir, run.jobId, walk.fieldLabels, options.applicationRecord);
     return submitted;
   }
+  if (isSteppedRun(run)) {
+    // Track 74: re-walked to its last step and submitted there only with this approval; never by the auto-submit policy.
+    return submitSteppedRun(database, steppedRunDeps(database, { candidateId: LOCAL_CANDIDATE_ID, candidate: getCandidate(database, LOCAL_CANDIDATE_ID), dataDir, renderPdf: options.renderPdf ?? renderHtmlToPdf, standing, applicationRecord: options.applicationRecord }), run, {
+      openPage: options.openPage ?? ((url: string) => defaultOpenPage(url, dataDir, { database, jobId: run.jobId, runId: run.id })), dataDir, standing, submitWait: options.submitWait, policyApproval: options.policyApproval
+    });
+  }
   const openPage = options.openPage ?? ((url: string) => defaultOpenPage(url, dataDir, { database, jobId: run.jobId, runId: run.id }));
   const channel = runChannel(
     getJobPosting(database, run.jobId)?.source.applicationType,
@@ -2124,6 +2155,21 @@ export function getBrowserRuns(jobId: string, database: DatabaseSync = getDataba
 function asWorkdayPage(page: BrowserPage): WorkdayPage {
   if (!("enterApplication" in page)) throw new Error("A Workday run needs the Workday page adapter.");
   return page as WorkdayPage;
+}
+
+/** The orchestrator helpers the stepped several-page walk reuses (Track 74, stepped-form-run.ts). */
+function steppedRunDeps(database: DatabaseSync, input: {
+  candidateId: string; candidate: ReturnType<typeof getCandidate>; dataDir: string; renderPdf: PdfRenderer; standing: StandingConsentSettings;
+  applicationRecord?: ApplicationRecordWriter | null;
+}): SteppedRunDeps {
+  return {
+    resolveFields: (form, context, hits) => resolveFields(form, database, context, hits),
+    plannerInputs: (planner) => plannerInputsFor(database, input.candidateId, input.candidate, planner),
+    prepareUploads: (source, decisions) => prepareUploads(database, input.dataDir, source, decisions, input.renderPdf),
+    withUploadedResume: (decisions, profile) => withUploadedResume(decisions, uploadedResumeFor(profile, database, input.candidateId), profile),
+    applyOptions: (run, page) => coveringDialogCapture(database, input.dataDir, run, page, input.standing),
+    recordSubmission: (jobId, labels) => recordSubmission(database, input.dataDir, jobId, labels, input.applicationRecord)
+  };
 }
 
 function workdayContext(

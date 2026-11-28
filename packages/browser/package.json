@@ -10,9 +10,9 @@
     "build": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest --root ../.. run testing-harness/browser-worker",
-    "test:fast": "vitest --root ../.. run testing-harness/browser-worker/recognition-planner.test.ts testing-harness/browser-worker/self-identification.test.ts testing-harness/browser-worker/ats-classification.test.ts testing-harness/browser-worker/handshake-session.test.ts testing-harness/browser-worker/workday.test.ts testing-harness/browser-worker/standing-consent.test.ts testing-harness/browser-worker/consent-and-facts.test.ts",
+    "test:fast": "vitest --root ../.. run testing-harness/browser-worker/recognition-planner.test.ts testing-harness/browser-worker/self-identification.test.ts testing-harness/browser-worker/ats-classification.test.ts testing-harness/browser-worker/handshake-session.test.ts testing-harness/browser-worker/workday.test.ts testing-harness/browser-worker/standing-consent.test.ts testing-harness/browser-worker/consent-and-facts.test.ts testing-harness/browser-worker/stepped-form.test.ts",
     "test:oracle:local": "vitest --root ../.. run testing-harness/browser-worker/oracle-email-step.integration.test.ts",
-    "test:local": "vitest --root ../.. run testing-harness/browser-worker/run-lifecycle.integration.test.ts testing-harness/browser-worker/self-identification.integration.test.ts testing-harness/browser-worker/workday-session.integration.test.ts testing-harness/browser-worker/manual-application.integration.test.ts testing-harness/browser-worker/account-consent.integration.test.ts"
+    "test:local": "vitest --root ../.. run testing-harness/browser-worker/run-lifecycle.integration.test.ts testing-harness/browser-worker/self-identification.integration.test.ts testing-harness/browser-worker/workday-session.integration.test.ts testing-harness/browser-worker/manual-application.integration.test.ts testing-harness/browser-worker/account-consent.integration.test.ts testing-harness/browser-worker/stepped-form-run.integration.test.ts"
   },
   "dependencies": {
     "@internship-agent/db": "workspace:*",

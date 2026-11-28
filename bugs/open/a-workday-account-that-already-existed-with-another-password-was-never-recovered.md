@@ -40,6 +40,8 @@ and reset-polling cases in
 
 fixture: modelled (the "Forgot your password?" control id is captured, 2026-11-19; the forgot form, the reset email (sender, subject, and two-hour expiry from public sources, 2025-11-06), the reset link's path and the reset page are modelled)
 
+Track 75: the first three real reset requests (2026-11-27) got no answer from Workday and no email; see workdays-forgot-password-request-got-no-answer-and-no-email-on-three-hosts.md.
+
 Move to bugs/resolved/ once a real pass resets the password on one of these hosts and signs in.
 
 ## Refuted causes

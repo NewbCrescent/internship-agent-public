@@ -3,8 +3,10 @@ import type { Page } from "playwright-core";
 import { icimsAccountSteps, type IcimsAccountSteps } from "./ats/icims-account";
 import { passJobviteConsent, type JobviteConsentOutcome } from "./ats/jobvite-consent";
 import { oracleApplySteps, type OracleApplySteps } from "./ats/oracle-apply";
+import { rejectCookieConsent } from "./cookie-consent";
 import { createPlaywrightPage, ensureNameShim, type BrowserPage } from "./handshake-executor";
 import { advanceToApplicationForm, readClosedPostingNotice, readStepButtonsIn, type NavigationOutcome, type StepButtons } from "./site-navigation";
+import { STEP_NEXT_MARK, tagStepNextIn } from "./stepped-form";
 
 /**
  * The page adapter generic (non-Workday) runs open: the Playwright page plus
@@ -13,7 +15,8 @@ import { advanceToApplicationForm, readClosedPostingNotice, readStepButtonsIn, t
  * Cloud HCM's email and one-time-code step (ats/oracle-apply.ts), which the
  * orchestrator takes with the saved email and the candidate's own mailbox,
  * the bounded navigation toward an unrecognized site's form
- * (site-navigation.ts), and the page's step buttons.
+ * (site-navigation.ts), and the page's step buttons and its several-page
+ * steps (stepped-form.ts).
  */
 export type ApplicationPage = BrowserPage & {
   icims: IcimsAccountSteps;
@@ -23,6 +26,10 @@ export type ApplicationPage = BrowserPage & {
   advanceToApplicationForm(): Promise<NavigationOutcome>;
   /** Whether the page shows a submit control, and its "Next" control if any. */
   stepButtons(): Promise<StepButtons>;
+  /** Clicks the step's own Next control (stepped-form.ts tagStepNextIn); false when none matched or the click failed. Never a submit control. */
+  clickStepNext(text: string): Promise<boolean>;
+  /** Rejects or takes necessary-only on a cookie banner (cookie-consent.ts). */
+  rejectCookies(): Promise<unknown>;
   /** The closed-posting words on the page and its same-host frames (site-navigation.ts readClosedPostingNotice), or null. */
   postingClosedNotice(): Promise<string | null>;
 };
@@ -35,6 +42,17 @@ export function createApplicationPage(page: Page): ApplicationPage {
     jobviteConsent: (choose) => passJobviteConsent(page, choose),
     advanceToApplicationForm: () => advanceToApplicationForm(page),
     postingClosedNotice: () => readClosedPostingNotice(page),
+    rejectCookies: () => rejectCookieConsent(page).catch(() => null),
+    clickStepNext: async (text) => {
+      try {
+        await ensureNameShim(page);
+        if (!(await page.locator("body").evaluate(tagStepNextIn, text))) return false;
+        await page.locator(`[${STEP_NEXT_MARK}]`).first().click({ timeout: 10_000 });
+        return true;
+      } catch {
+        return false;
+      }
+    },
     stepButtons: async () => {
       try {
         await ensureNameShim(page);

@@ -1,4 +1,5 @@
 import { ATS_KIND_LABELS, atsKindNeedsApproval } from "./ats";
+import { isSteppedRun, STEPPED_FORM_BLOCKER } from "./stepped-form";
 
 /**
  * Manual checklist mode. When on, the AI submission flow (package approval,
@@ -69,7 +70,7 @@ type RunForAutoSubmit = {
   /** The kind the classifier suggested when the run was not confirmed automatically. */
   suggestedAtsKind?: string | null;
   pauses: ReadonlyArray<{ safeguard: boolean; status?: string; draft?: { source?: string } | null }>;
-  decisions: ReadonlyArray<{ action: string; basis: { kind: string } | null; reason?: string }>;
+  decisions: ReadonlyArray<{ fieldId?: string; action: string; basis: { kind: string } | null; reason?: string }>;
 };
 
 /**
@@ -82,6 +83,7 @@ type RunForAutoSubmit = {
  * candidate's decision, 2026-11-26). A value a form field already showed
  * with nothing saved against it does not hold the run; a shown value on a
  * question only the candidate's saved answers may answer does.
+ * A several-page form the stepped walk filled (Track 74) is always the candidate's to approve.
  */
 export function autoSubmitBlockers(run: RunForAutoSubmit): string[] {
   const blockers: string[] = [];
@@ -99,6 +101,7 @@ export function autoSubmitBlockers(run: RunForAutoSubmit): string[] {
       blockers.push("The application site type was not recognized automatically.");
     }
   }
+  if (isSteppedRun({ decisions: run.decisions })) blockers.push(STEPPED_FORM_BLOCKER);
   if (run.decisions.some((decision) => decision.basis?.kind === "voice_draft")) blockers.push("An answer was drafted in your voice; you review those.");
   // The AI review of a pause batch (pause-review.ts): a suggested draft holds the run while its question is unanswered;
   // once the candidate answers it (with the draft or their own text) it is the candidate's answer, as with voice drafts.

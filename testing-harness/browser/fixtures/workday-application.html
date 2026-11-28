@@ -64,6 +64,7 @@
     // account), or New Password / Verify New Password with a "Submit" click filter over resetPasswordSubmitButton; a
     // matching password that meets the create step's rule replaces the account's password, drops the token, and shows
     // "Your password has been reset.".
+    // &reset=silent (Track 75; the end state is captured from three real hosts' workday-account evidence, 2026-11-27: the Forgot Password form still on screen with the email typed, no message, no error, and no email; the cause is not known, so the drop is modelled): the Forgot Password submit is dropped with no message, no token and no request count; localStorage "fixture-workday-ignored-resets" counts the drops.
     // ?dwell=1 (like Workday's sign-in widget, candidate-experience-apply-flow 2026.47.19, read 2026-11-24): an account submit clicked under 500 ms after its submit button mounted is dropped with no message; window.fixtureAccount counts the drops (ignoredSubmits) and records each submit's delay from its button's mount (submitDelays, ms).
     // Save and Continue validation draws Workday-style errors: an errorMessage alert inside each
     // missing field's formField-* container, an errorBanner listing them, and a plain
@@ -757,6 +758,7 @@
           : coveredId === "resetPasswordSubmitButton" ? "Reset Password"
           : "Sign In";
         const handlers = { "Create Account": createAccount, "Sign In": signIn, "Forgot Password": requestReset, "Reset Password": resetPassword };
+        if (action === "Forgot Password" && params.get("reset") === "silent") { bump("fixture-workday-ignored-resets"); return; }
         if (dwellMode && (action === "Create Account" || action === "Sign In")) {
           const mountedAt = covered ? submitMounts.get(covered) : undefined;
           const elapsed = mountedAt === undefined ? 0 : performance.now() - mountedAt;

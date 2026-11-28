@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Applying for a job | Fixture Steps Careers</title>
+  <style>
+    .osano-cm-dialog { position: fixed; left: 0; right: 0; bottom: 0; min-height: 80px; padding: 16px; background: #fff; border-top: 1px solid #333; z-index: 10; }
+    .osano-cm-dialog--hidden { visibility: hidden; }
+    .osano-cm-button { margin-right: 8px; padding: 8px 16px; }
+    .error { color: #a00; }
+  </style>
+</head>
+<body>
+  <!--
+    A synthetic Phenom-style several-page apply flow ("Fixture Steps", job R400004) behind an Osano-style cookie
+    banner, served at /us/en/apply?jobSeqNo=R400004&step=<n> (Track 74). MODELLED: the structure of step 1 is derived
+    from phenom-steps-application.html (itself derived from the 2026-11-25 read-only capture of a live Phenom step 1,
+    Track 38): a step list ending in "Review", an explicit type="submit" "Next" inside the step's form, and an Osano
+    banner whose three buttons carry no type attribute. The later steps were never captured on a live site; their
+    fields, the Next navigation (location.assign to step=<n+1>), the field error, and the Review step's "Submit" are
+    assumptions. Every name, host, id, and value is fictional.
+    `?invalid=1` adds a "Preferred Location" box on step 2 that is not marked required in the DOM, but Next marks it
+    aria-invalid with "This field is required." and stays on the step while it is empty.
+    State (values per step, nextClicks, submitClicks, acceptClicks, denyClicks) is kept in sessionStorage.
+  -->
+  <div class="osano-cm-window">
+    <div class="osano-cm-window__dialog osano-cm-dialog osano-cm-dialog--position_bottom osano-cm-dialog--type_bar" role="dialog" aria-label="Cookie Consent Banner">
+      <div class="osano-cm-dialog__content osano-cm-content">This website uses cookies.</div>
+      <div class="osano-cm-dialog__buttons osano-cm-buttons">
+        <button class="osano-cm-accept osano-cm-buttons__button osano-cm-button osano-cm-button--type_accept">Accept</button>
+        <button class="osano-cm-deny osano-cm-buttons__button osano-cm-button osano-cm-button--type_deny">Deny Non-Essential</button>
+        <button class="osano-cm-manage osano-cm-buttons__button osano-cm-button osano-cm-button--type_manage">Manage Preferences</button>
+      </div>
+    </div>
+  </div>
+  <header>
+    <nav><button class="subnav-dropdown">Career Paths</button></nav>
+  </header>
+  <main>
+    <h1>You are applying for - Robotics Intern (R400004)</h1>
+    <ol class="steps">
+      <li>My Information</li>
+      <li>Application Questions</li>
+      <li>Review</li>
+    </ol>
+    <div id="step"></div>
+  </main>
+  <script>
+    const KEY = "fixture-stepped-phenom";
+    const params = new URL(location.href).searchParams;
+    const step = Math.max(1, Math.min(3, Number.parseInt(params.get("step") || "1", 10) || 1));
+    const invalid = params.get("invalid") === "1";
+    const load = () => JSON.parse(sessionStorage.getItem(KEY) || "{}");
+    const save = (state) => sessionStorage.setItem(KEY, JSON.stringify(state));
+    const state = Object.assign({ values: {}, nextClicks: 0, submitClicks: 0, acceptClicks: 0, denyClicks: 0, banner: null }, load());
+    save(state);
+    window.fixtureState = () => load();
+
+    const dialog = document.querySelector(".osano-cm-dialog");
+    if (state.banner) dialog.classList.add("osano-cm-dialog--hidden");
+    document.querySelector(".osano-cm-accept").addEventListener("click", () => {
+      const now = load(); now.acceptClicks += 1; now.banner = "accepted"; save(now);
+      dialog.classList.add("osano-cm-dialog--hidden");
+    });
+    document.querySelector(".osano-cm-deny").addEventListener("click", () => {
+      const now = load(); now.denyClicks += 1; now.banner = "denied"; save(now);
+      dialog.classList.add("osano-cm-dialog--hidden");
+    });
+
+    const field = (id, label, input) => `<div class="form-group field field-string"><label class="control-label" for="${id}">${label}</label><div>${input}</div></div>`;
+    const steps = {
+      1: `<form class="rjsf" id="application">
+            ${field("cntryFields.firstName", "First Name", '<input type="text" class="form-control" id="cntryFields.firstName" required>')}
+            ${field("cntryFields.lastName", "Last Name", '<input type="text" class="form-control" id="cntryFields.lastName" required>')}
+            ${field("email", "Email Address", '<input type="text" class="form-control" id="email" name="email" required>')}
+            <div class="navigation personalInformation-step"><button type="submit" id="next" class="btn btn-navigate btn-next">Next</button></div>
+          </form>`,
+      2: `<form class="rjsf" id="application">
+            ${field("questions.adult", "Are you at least 18 years of age?", '<select class="form-control" id="questions.adult" required><option value="">Select</option><option>Yes</option><option>No</option></select>')}
+            ${invalid ? field("questions.location", "Preferred Location", '<input type="text" class="form-control" id="questions.location"><div id="questions.location-error" class="error" hidden></div>') : ""}
+            <div class="navigation applicationQuestions-step"><button type="submit" id="next" class="btn btn-navigate btn-next">Next</button></div>
+          </form>`,
+      3: `<section id="review">
+            <h2>Review</h2>
+            <p>Check your application before you send it.</p>
+            <button type="button" id="submit-application" class="btn btn-primary">Submit</button>
+          </section>`
+    };
+    document.getElementById("step").innerHTML = steps[step];
+
+    const form = document.getElementById("application");
+    if (form) {
+      for (const control of form.querySelectorAll("input, select")) {
+        const saved = state.values[`${step}:${control.id}`];
+        if (saved !== undefined) control.value = saved;
+      }
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const now = load();
+        now.nextClicks += 1;
+        for (const control of form.querySelectorAll("input, select")) now.values[`${step}:${control.id}`] = control.value;
+        save(now);
+        const location_ = document.getElementById("questions.location");
+        if (location_ && location_.value.trim() === "") {
+          const error = document.getElementById("questions.location-error");
+          location_.setAttribute("aria-invalid", "true");
+          location_.setAttribute("aria-describedby", "questions.location-error");
+          error.textContent = "This field is required.";
+          error.hidden = false;
+          return;
+        }
+        const next = new URL(location.href);
+        next.searchParams.set("step", String(step + 1));
+        next.searchParams.set("stepname", step + 1 === 2 ? "applicationQuestions" : "review");
+        location.assign(next.toString());
+      });
+    }
+    document.getElementById("submit-application")?.addEventListener("click", () => {
+      const now = load(); now.submitClicks += 1; save(now);
+      document.getElementById("review").innerHTML = "<h2>Thank you for applying</h2><p>Your application for Robotics Intern was received.</p>";
+    });
+  </script>
+</body>
+</html>

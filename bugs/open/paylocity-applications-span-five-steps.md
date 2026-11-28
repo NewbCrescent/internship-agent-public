@@ -12,3 +12,9 @@ step: a capture of the later steps (questions, EEO, review, submit, and the
 confirmation) from a session the candidate opens, then a Paylocity walker
 with a disposable-Chromium regression; until then `paylocity` stays in
 `ATS_KINDS_NEEDING_APPROVAL`.
+
+Update 2026-11-27 (Track 74): the stepped walk (`packages/browser/src/stepped-form.ts`)
+now fills Paylocity's steps while they show "Step n of 5", pausing on County
+and on unknown questions, and stops at the last step for the candidate's
+approval. `paylocity` stays in `ATS_KINDS_NEEDING_APPROVAL` because no later
+step or confirmation has been seen live.

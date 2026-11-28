@@ -56,7 +56,8 @@
  * An existing account with another password goes through "Forgot your password?": the reset email's link is opened, a
  * new password is saved (0600) only once the reset form shows, and the agent signs in (reset, and no-email-reset after
  * the third empty verification read); no reset email holds as interrupted and a later pass does not ask again
- * (reset-no-email), and a CAPTCHA on the reset page holds with the saved password unchanged (reset-captcha). No
+ * (reset-no-email), a request Workday shows no answer to still reads the mailbox and holds saying so (reset-silent),
+ * and a CAPTCHA on the reset page holds with the saved password unchanged (reset-captcha). No
  * password, reset link, or token reaches the database, logs, or errors.
  * Never reads process.env for accounts or Gmail.
  *
@@ -185,7 +186,7 @@ async function main(): Promise<void> {
     const storedAccount = (tab: Page) => tab.evaluate((email) =>
       (JSON.parse(localStorage.getItem("fixture-workday-accounts") || "{}") as Record<string, StoredAccount>)[email] ?? null, EMAIL);
     /** The fixture's resend and reset-request counters (localStorage, so they survive the flow's reloads). */
-    const counter = (tab: Page, key: "fixture-workday-resends" | "fixture-workday-resets") =>
+    const counter = (tab: Page, key: "fixture-workday-resends" | "fixture-workday-resets" | "fixture-workday-ignored-resets") =>
       tab.evaluate((name) => Number(localStorage.getItem(name) || 0), key);
     /** Stores a fixture account for a host before its scenario, from a tab that closes again. */
     const seedFixtureAccount = async (host: string, mode: string, value: StoredAccount) => {
@@ -1043,6 +1044,7 @@ async function main(): Promise<void> {
     mail = async () => [];
     const resetNoEmail = await scenario("reset-no-email", resetNoEmailHost, "create&forgot=1");
     held("reset-no-email", resetNoEmail, "none arrived");
+    if (resetNoEmail.error?.message.includes("Workday showed no answer")) failures.push("reset-no-email: a confirmed request was reported as unanswered");
     const resetNoEmailEntry = getWorkdayAccount(file, resetNoEmailHost);
     if (resetNoEmailEntry?.hold?.kind !== "interrupted" || resetNoEmailEntry.account !== "pending" || !resetNoEmailEntry.resetAt) {
       failures.push(`reset-no-email: entry is ${resetNoEmailEntry?.account} with hold ${resetNoEmailEntry?.hold?.kind}`);
@@ -1058,6 +1060,25 @@ async function main(): Promise<void> {
       failures.push(`reset-no-email later pass: entry is ${resetNoEmailLaterEntry?.account} with hold ${resetNoEmailLaterEntry?.hold?.kind}`);
     }
     if (await counter(resetNoEmailLater.tab, "fixture-workday-resets") !== 1) failures.push("reset-no-email later pass: Workday was asked for a second reset within 24 hours");
+
+    // Workday gives no answer to the reset request (three real hosts, 2026-11-27: the form stays with the email typed,
+    // no message, no email): the mailbox is still read, and the hold says Workday showed no answer.
+    const resetSilentHost = "fixture-reset-silent.wd1.myworkdayjobs.com";
+    await seedFixtureAccount(resetSilentHost, "create&forgot=1&reset=silent", { password: OLD_PASSWORD, verified: true, token: "resetsilenttoken" });
+    mail = async () => [];
+    const resetSilent = await scenario("reset-silent", resetSilentHost, "create&forgot=1&reset=silent", { clock: virtualClock().clock });
+    held("reset-silent", resetSilent, "Workday showed no answer");
+    const resetSilentEntry = getWorkdayAccount(file, resetSilentHost);
+    if (resetSilentEntry?.hold?.kind !== "interrupted" || resetSilentEntry.account !== "pending" || !resetSilentEntry.resetAt) {
+      failures.push(`reset-silent: entry is ${resetSilentEntry?.account} with hold ${resetSilentEntry?.hold?.kind}`);
+    }
+    if (!resetSilentEntry?.password || !PASSWORD_RULE.test(resetSilentEntry.password)) failures.push("reset-silent: the create's saved password changed");
+    if (await counter(resetSilent.tab, "fixture-workday-resets") !== 0) failures.push("reset-silent: the fixture counted a reset request");
+    if (await counter(resetSilent.tab, "fixture-workday-ignored-resets") !== 1) failures.push("reset-silent: expected one ignored reset request");
+    if ((await storedAccount(resetSilent.tab))?.password !== OLD_PASSWORD) failures.push("reset-silent: Workday's password changed");
+    if (!events().includes(`Workday ${resetSilentHost}: Workday does not let the agent sign in with the saved password, so the agent asked for a password-reset email with Workday's Forgot your password? control, as you allowed on 2026-11-27.`)) {
+      failures.push("reset-silent: no reset-request event");
+    }
 
     // A CAPTCHA on the reset page: held, and the saved password is not replaced (the new one is made only on the form).
     const resetCaptchaHost = "fixture-reset-captcha.wd1.myworkdayjobs.com";
@@ -1103,7 +1124,7 @@ async function main(): Promise<void> {
     console.error(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"failed","failures":${JSON.stringify(failures)}}`);
     process.exit(1);
   }
-  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":52}`);
+  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":53}`);
 }
 
 main().catch((error) => {

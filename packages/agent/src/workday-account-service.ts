@@ -393,7 +393,8 @@ export async function ensureWorkdayAccount(
    * Workday does not let the agent sign in with the saved password: on automatic runs with a mailbox, once per call
    * and once per host per day, the agent asks for a password-reset email with Workday's "Forgot your password?"
    * control, opens the emailed link, sets a new generated password (saved only once the reset form shows, right
-   * before it is typed), and signs in. `fallback` (the earlier hold) runs when no reset can be asked for.
+   * before it is typed), and signs in. `fallback` (the earlier hold) runs when no reset can be asked for. A request
+   * Workday shows no answer to ("no-answer") still reads the mailbox and, with no email, holds with a reason that says so.
    */
   const resetFlow = async (fallback: () => Promise<"signed-in" | "created">): Promise<"signed-in" | "created"> => {
     const request = page.requestPasswordReset?.bind(page);
@@ -424,6 +425,7 @@ export async function ensureWorkdayAccount(
       default:
         break;
     }
+    const unanswered = asked.result === "no-answer";
     event(`Workday ${host}: Workday does not let the agent sign in with the saved password, so the agent asked for a password-reset email with Workday's Forgot your password? control, as you allowed on 2026-11-27.`);
     const timeoutMs = runtime.mailTimeoutMs ?? 180_000;
     let result: Awaited<ReturnType<typeof pollPasswordResetLink>>;
@@ -436,6 +438,9 @@ export async function ensureWorkdayAccount(
       throw error;
     }
     if (result.kind === "none") {
+      if (unanswered) {
+        return hold("interrupted", `Workday ${host}: the agent asked Workday for a password-reset email, but Workday showed no answer: its Forgot your password? form stayed on screen with no message, and no email arrived within ${minutes(timeoutMs)}; it asks at most once a day. ${YOURSELF}`);
+      }
       return hold("interrupted", `Workday ${host}: the agent asked Workday for a password-reset email, and none arrived within ${minutes(timeoutMs)}; it asks at most once a day. ${YOURSELF}`);
     }
     if (result.kind === "ambiguous") {

@@ -526,7 +526,7 @@ export async function createWorkdayAccount(
 }
 
 export type WorkdayResendResult = "sent" | "missing" | "captcha" | "other" | "error";
-export type WorkdayResetRequestResult = "sent" | "missing" | "captcha" | "other" | "refused" | "error";
+export type WorkdayResetRequestResult = "sent" | "no-answer" | "missing" | "captcha" | "other" | "refused" | "error";
 export type WorkdayResetResult = "reset" | "expired" | "captcha" | "other" | "password-refused" | "error" | "no-answer";
 
 /**
@@ -720,8 +720,26 @@ export async function resendWorkdayVerification(
 }
 
 /**
+ * The Forgot your password? form is still on screen as the agent submitted it: the same text, the account email
+ * still typed, its submit still shown, no new error, and no password field. Three real hosts (2026-11-27) left the
+ * form this way, with no message, and sent no email.
+ */
+async function resetFormUnanswered(page: Page, host: string, email: string, before: string, errorsBefore: string): Promise<boolean> {
+  if (!onHost(page, host) || await shown(page, PASSWORD)) return false;
+  const field = emailField(page);
+  if ((await field.count().catch(() => 0)) !== 1) return false;
+  const value = (await field.first().inputValue().catch(() => "")).trim().toLocaleLowerCase("en-US");
+  if (value !== email.trim().toLocaleLowerCase("en-US")) return false;
+  if (!(await authSubmit(page))) return false;
+  if ((await errorText(page)) !== errorsBefore) return false;
+  return (await scopeText(page)) === before;
+}
+
+/**
  * Clicks "Forgot your password?" once ("missing", with nothing clicked, when the page shows no such control), types
- * the account email into the form that opens, and submits it once. Without a confirmation the result is "sent".
+ * the account email into the form that opens, and submits it once. Without a confirmation the result is "no-answer"
+ * when the form is still on screen as submitted (resetFormUnanswered), otherwise "sent"; the mailbox read decides
+ * either way.
  */
 export async function requestWorkdayPasswordReset(
   page: Page,
@@ -779,7 +797,11 @@ export async function requestWorkdayPasswordReset(
     if (await readWorkdayAccountScreen(page) === "sign-in") return { result: "sent" };
     return null;
   });
-  return outcome ?? { result: "sent", detail: "Workday showed no confirmation" };
+  if (outcome) return outcome;
+  if (await resetFormUnanswered(page, host, email, before, errorsBefore)) {
+    return { result: "no-answer", detail: "Workday's Forgot your password? form stayed on screen with no message" };
+  }
+  return { result: "sent", detail: "Workday showed no confirmation" };
 }
 
 /**

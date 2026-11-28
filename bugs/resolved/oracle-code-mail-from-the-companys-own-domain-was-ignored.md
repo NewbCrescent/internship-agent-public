@@ -35,6 +35,9 @@ Boundary: the laboratory's mail body was never read, so the code's wording
 in it is assumed to match the existing anchors (code, PIN, passcode). A live
 requeue of the Oracle holds confirms it.
 
+Confirmed live (2026-11-27, Track 75 triage, read-only): after Track 63 merged, job <run id> passed the laboratory's email step on three automatic runs (04:33Z, 05:59Z, 12:28Z) and reached the application's questions, each a second after a "Confirm your identity" mail from the laboratory's domain; the fixed matcher over the mail received within a minute of each of the five Next clicks (01:23Z, 01:27Z, and those three) found exactly one code each, so the code's wording matches the existing anchors.
+The two jobs this bug was found on (<run id>, <run id>) still hold the pass-28 job-level stop, which pipeline:retry --held does not release; they need pipeline:retry --job … --verified-hold.
+
 ## Refuted causes
 
 - The code mail never arrived. Evidence: the header listing of 2026-11-27 shows the laboratory's "Confirm your identity" mails at 01:23:09Z and 01:27:03Z, seconds after each run's Next.
