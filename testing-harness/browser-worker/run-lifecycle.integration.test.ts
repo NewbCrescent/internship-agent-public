@@ -4312,3 +4312,51 @@ describe("stop evidence and run traces (Track 42)", () => {
     paused.close();
   });
 });
+
+describe("Greenhouse's board API opens an employer page's gh_jid application (Track 77)", () => {
+  const EMPLOYER = "https://careers.fixturerobotics.example/jobs/intern?gh_jid=4000001";
+  const EMBED = "https://job-boards.greenhouse.io/embed/job_app?for=fixturerobotics&token=4000001";
+  const boardEvents = (database: DatabaseSync, jobId: string) =>
+    (database.prepare("SELECT detail FROM application_events WHERE job_id = ? AND detail LIKE 'Greenhouse''s board API%'").all(jobId) as Array<{ detail: string }>).map((row) => row.detail);
+
+  it("opens the Greenhouse embed the board API confirms, saves it as the run's address, and logs it", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = approvedJobId(database);
+    const opened: string[] = [];
+    const lookups: Array<{ applicationUrl: string; companyName: string }> = [];
+    const started = await startBrowserRun(jobId, EMPLOYER, {
+      database,
+      dataDir,
+      openPage: async (url: string) => { opened.push(url); return fakePage({ url: EMBED }); },
+      greenhouseEmbeds: async (input) => { lookups.push(input); return { board: "fixturerobotics", jobId: "4000001", embedUrl: EMBED }; }
+    });
+    expect(lookups).toHaveLength(1);
+    expect(lookups[0]?.applicationUrl).toBe(EMPLOYER);
+    expect(opened[0]).toBe(EMBED);
+    expect(started.run.applicationUrl).toBe(EMBED);
+    expect(boardEvents(database, jobId)).toEqual([
+      `Greenhouse's board API lists job 4000001 on the fixturerobotics board with careers.fixturerobotics.example as its page; the run opens its Greenhouse application at ${EMBED}.`
+    ]);
+    database.close();
+  });
+
+  it("opens the employer page as before when the lookup is off or finds nothing", async () => {
+    for (const greenhouseEmbeds of [null, async () => null]) {
+      const database = disposableDatabase();
+      const dataDir = disposableDataDir();
+      const jobId = approvedJobId(database);
+      const opened: string[] = [];
+      const started = await startBrowserRun(jobId, EMPLOYER, {
+        database,
+        dataDir,
+        openPage: async (url: string) => { opened.push(url); return fakePage({ url: EMPLOYER }); },
+        greenhouseEmbeds
+      });
+      expect(opened[0]).toBe(EMPLOYER);
+      expect(started.run.applicationUrl).toBe(EMPLOYER);
+      expect(boardEvents(database, jobId)).toEqual([]);
+      database.close();
+    }
+  });
+});

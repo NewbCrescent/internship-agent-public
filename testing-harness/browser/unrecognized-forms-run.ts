@@ -227,10 +227,12 @@ async function main(): Promise<void> {
     {
       const tab = await open(POSTING_URL);
       const posting = await recognizeCurrentForm(createPlaywrightPage(tab));
-      check(posting.fields.some((field) => field.id === "notifiedEmail"), "the job-alert box was not read");
+      // Its `aside.job-alert` container makes it a signup box, which is not read at all (Track 77); isSignupField's
+      // read-and-skip of the bare notifiedEmail id is covered by the fast and local suites.
+      check(!posting.fields.some((field) => field.id === "notifiedEmail"), "the job-alert box was read as a field");
       check(!hasApplicationFields(posting.fields), "the posting's job-alert box counted as an application field");
       const skipped = planAutofill(posting, { profile: PROFILE, resolutions: new Map(), packageAnswers: [], variantId: null });
-      check(skipped.decisions.find((decision) => decision.fieldId === "notifiedEmail")?.action === "skip", "the job-alert box was not left empty");
+      check(!skipped.decisions.some((decision) => decision.fieldId === "notifiedEmail" && decision.action !== "skip"), "the job-alert box was not left empty");
       check(!skipped.pauses.some((pause) => pause.fieldId === "notifiedEmail"), "the job-alert box paused");
       const outcome = await createApplicationPage(tab).advanceToApplicationForm();
       check(outcome.stop === "form" && outcome.moved && outcome.hops.some((hop) => hop.kind === "apply") && outcome.url === APPLY_URL,

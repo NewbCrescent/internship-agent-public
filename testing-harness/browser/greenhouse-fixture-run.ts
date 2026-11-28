@@ -36,6 +36,15 @@
  * inside a closed shadow root (?turnstile=) is a challenge when shown and not
  * when hidden, and one drawn by the Apply click holds the submit as challenged
  * with evidence while nothing is sent.
+ * Workable (fixtures/workable-application.html, reduced from the 2026-11-27
+ * read-only apply.workable.com capture, Track 77) reads its Yes/No questions
+ * (div[role=radio] options over aria-hidden native radios) as required radio
+ * questions labelled by their question text, never the hidden city, postcode,
+ * or country inputs or the Turnstile token; it is classified workable with
+ * the automatic flow; the contact fields and the resume fill from the
+ * profile, YES and NO are chosen by clicking the options and read back from
+ * aria-checked, and the submit's "Your application has been submitted
+ * successfully." is confirmed.
  * Lever (fixtures/lever-application.html, derived) labels carry no "✱" or
  * widget status text; Full name and Phone map; a radio question is one field
  * and the right radio is checked; the data-retention consent checkbox pauses
@@ -191,6 +200,8 @@ const ASHBY_SURVEY = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-400
 /** The Visa Support question's field path in fixtures/ashby-value-select.html (its field id; its entry id is "<render id>_<path>"). */
 const ASHBY_VISA_PATH = "9a0b1c2d-0000-4000-8000-0000000000d1";
 const LEVER = "https://jobs.lever.co/fixturerobotics/00000000-0000-4000-8000-0000000000b1/apply";
+/** A Workable application form (apply.workable.com/<account>/j/<shortcode>/apply/). */
+const WORKABLE = "https://apply.workable.com/fixturerobotics/j/FIXTURE001/apply/";
 /** Where app.dover.io application links land (they redirect to jobs.dover.com/job/<id>). */
 const DOVER = "https://jobs.dover.com/job/00000000-0000-4000-8000-0000000000d1";
 const CAREERS_POSTING = "https://careers.fixturerobotics.com/jobs/1001";
@@ -245,7 +256,8 @@ async function main(): Promise<void> {
       "jobs.smartrecruiters.com": fixture("smartrecruiters-application.html"),
       "jobs.ashbyhq.com": fixture("ashby-application.html"),
       "jobs.lever.co": fixture("lever-application.html"),
-      "jobs.dover.com": fixture("dover-application.html")
+      "jobs.dover.com": fixture("dover-application.html"),
+      "apply.workable.com": fixture("workable-application.html")
     };
     const oracleEmail = fixture("oracle-apply-email.html");
     // Posting pages behind an Apply link, chosen by host and path.
@@ -1023,6 +1035,63 @@ async function main(): Promise<void> {
       const doverConfirmation = await submitAndConfirm(dover, { timeoutMs: 5_000, pollMs: 100 }).catch((error: unknown) => `ERROR ${String(error)}`);
       check(doverConfirmation.includes("Thanks for applying"), `Dover confirmation: ${doverConfirmation.slice(0, 200)}`);
       await doverTab.close();
+    }
+
+    // Workable (apply.workable.com, Track 77): each Yes/No question is a fieldset role=radiogroup whose options are
+    // div[role=radio] over aria-hidden, tabindex=-1 native radios; they are read as radio questions (never dropped as
+    // react-select shadow inputs), chosen by clicking the option, and read back from aria-checked. The hidden city,
+    // postcode, and country inputs and the Turnstile token are not questions; it is classified workable (automatic);
+    // the contact fields and the resume fill from the profile; the submit shows Workable's success text.
+    {
+      const workableTab = await open(WORKABLE);
+      const workable = createPlaywrightPage(workableTab);
+      check(await workable.visibleChallenge!() === null, "Workable: a challenge was read on the form");
+      const workableForm = await recognizeCurrentForm(workable);
+      const labels = workableForm.fields.map((field) => field.label);
+      const AUTHORIZED = "Are you legally authorized to work in the United States?";
+      const SPONSORSHIP = "Do you or will you require Visa sponsorship upon offer of employment?";
+      check(!labels.some((label) => UNLABELED_CONTROL_LABEL.test(label)), `Workable: an unlabeled field: ${labels.join("|")}`);
+      check(!workableForm.fields.some((field) => /^(?:city|postcode|country)$/i.test(field.id) || /turnstile/i.test(field.id) || /turnstile/i.test(field.label)),
+        `Workable: a hidden address part or the Turnstile token was read as a question: ${workableForm.fields.map((field) => field.id).join("|")}`);
+      const files = workableForm.fields.filter((field) => field.kind === "file");
+      check(files.length === 1 && /^Resume\b/.test(files[0]?.label ?? ""), `Workable file fields: ${JSON.stringify(files.map((field) => field.label))}`);
+      for (const question of [AUTHORIZED, SPONSORSHIP]) {
+        const field = workableForm.fields.find((candidate) => candidate.label === question);
+        check(field?.kind === "radio" && field.required && field.options?.join("|") === "YES|NO", `Workable question "${question}": ${JSON.stringify(field)}`);
+      }
+      const workableKind = classifyAts(workableForm.url, workableForm.title, await workable.bodyText());
+      check(workableKind.kind === "workable" && atsFlowFor(workableKind) === "auto", `Workable kind: ${workableKind.kind} (${atsFlowFor(workableKind)})`);
+      const workableProfile = { ...PROFILE, legalFirstName: "Jordan", legalLastName: "Rivera" };
+      const workablePlan = planAutofill(workableForm, { profile: workableProfile, resolutions: new Map(), packageAnswers: [], variantId: VARIANT_ID });
+      const workableActions = Object.fromEntries(workablePlan.decisions.map((decision) => [workableForm.fields.find((field) => field.id === decision.fieldId)?.label ?? decision.fieldId, [decision.action, decision.value]]));
+      const expectedWorkable: Record<string, [string, string | null]> = {
+        "First name": ["fill", "Jordan"], "Last name": ["fill", "Rivera"], Email: ["fill", PROFILE.email],
+        "Full Legal Name": ["fill", "Jordan Rivera"], Phone: ["fill", PROFILE.phone], [files[0]?.label ?? "Resume"]: ["upload", null]
+      };
+      for (const [label, action] of Object.entries(expectedWorkable)) {
+        check(JSON.stringify(workableActions[label]) === JSON.stringify(action), `Workable ${label}: ${JSON.stringify(workableActions[label])}`);
+      }
+      check(workableActions[AUTHORIZED]?.[0] !== "choose" && workableActions[SPONSORSHIP]?.[0] !== "choose", `Workable: a Yes/No answer was invented: ${JSON.stringify(workableActions)}`);
+      const fieldIdOf = (label: string) => workableForm.fields.find((field) => field.label === label)?.id ?? `missing-${label}`;
+      const choices: FillDecision[] = [
+        { fieldId: fieldIdOf(AUTHORIZED), action: "choose", value: "YES", basis: null, reason: "fixture", pause: null },
+        { fieldId: fieldIdOf(SPONSORSHIP), action: "choose", value: "NO", basis: null, reason: "fixture", pause: null }
+      ];
+      const decisions = [...workablePlan.decisions.filter((decision) => decision.fieldId !== fieldIdOf(AUTHORIZED) && decision.fieldId !== fieldIdOf(SPONSORSHIP)), ...choices];
+      const workableResult = await applyDecisions(workable, workableForm, decisions, (decision) => (decision.action === "upload" ? resumePdf : null));
+      check(workableResult.unfilled.length === 0, `Workable unfilled: ${JSON.stringify(workableResult.unfilled)}`);
+      type WorkableState = { uploads: Record<string, string | null>; choices: Record<string, string>; submitted: boolean };
+      const workableState = await workableTab.evaluate(() => (window as unknown as { fixture: WorkableState }).fixture);
+      check(JSON.stringify(workableState.uploads) === JSON.stringify({ resume: "resume.pdf" }), `Workable uploads: ${JSON.stringify(workableState.uploads)}`);
+      check(JSON.stringify(workableState.choices) === JSON.stringify({ QA_00000001: "YES", QA_00000002: "NO" }), `Workable choices: ${JSON.stringify(workableState.choices)}`);
+      check(await workableTab.isChecked("#q1yes") && await workableTab.isChecked("#q2no") && await workableTab.getAttribute("#wrapper_q2no", "aria-checked") === "true", "Workable: the chosen options are not checked");
+      check((await choicesNotTaken(workable, workableForm, choices)).length === 0, "Workable: the Yes/No choices did not read back");
+      check(await workableTab.inputValue("#firstname") === "Jordan" && await workableTab.inputValue("#input_phone") === PROFILE.phone, "Workable contact fields were not filled");
+      // The Address box asks for a place the fictional profile above does not hold; the harness types one so the submit can run.
+      await workableTab.fill("#address", "Berkeley, California, United States");
+      const workableConfirmation = await submitAndConfirm(workable, { timeoutMs: 5_000, pollMs: 100 }).catch((error: unknown) => `ERROR ${String(error)}`);
+      check(workableConfirmation.includes("submitted successfully"), `Workable confirmation: ${workableConfirmation.slice(0, 200)}`);
+      await workableTab.close();
     }
 
     // Dover's Turnstile (2026-11-24 real runs): its frame sits in a closed shadow root the page's own DOM read never

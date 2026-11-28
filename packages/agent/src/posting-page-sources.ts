@@ -190,16 +190,24 @@ function fromJsonLd(html: string, url: string): ResolvedPosting {
   };
 }
 
+/**
+ * The Greenhouse board slugs an employer page may belong to: the company name (diacritics stripped, lowercased,
+ * alphanumerics only), then the page host's label before its top-level domain (a leading `www.` dropped). Unique, each
+ * 2–60 lowercase alphanumerics, at most two.
+ */
+export function greenhouseBoardSlugs(companyName: string, host: string): string[] {
+  const fromName = companyName.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const labels = host.replace(/^www\./, "").split(".");
+  const fromHost = labels.length >= 2 ? labels[labels.length - 2]! : "";
+  return unique([fromName, fromHost]).filter((slug) => /^[a-z0-9]{2,60}$/.test(slug)).slice(0, 2);
+}
+
 async function resolveGreenhouseEmbedded(
   target: Extract<PageSourceTarget, { kind: "greenhouseEmbedded" }>,
   fetcher: Fetcher,
   context: { companyName: string }
 ): Promise<ResolvedPosting | null> {
-  const fromName = context.companyName.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
-  const labels = target.host.replace(/^www\./, "").split(".");
-  const fromHost = labels.length >= 2 ? labels[labels.length - 2]! : "";
-  const slugs = unique([fromName, fromHost]).filter((slug) => /^[a-z0-9]{2,60}$/.test(slug)).slice(0, 2);
-  for (const slug of slugs) {
+  for (const slug of greenhouseBoardSlugs(context.companyName, target.host)) {
     const response = await fetcher(
       "https://boards-api.greenhouse.io/v1/boards/" + slug + "/jobs/" + target.id + "?content=true",
       { redirect: "error", signal: AbortSignal.timeout(TIMEOUT_MS), headers: JSON_HEADERS }

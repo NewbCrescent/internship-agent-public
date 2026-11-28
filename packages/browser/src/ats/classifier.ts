@@ -101,6 +101,14 @@ const ADAPTERS: AdapterSignals[] = [
     url: [/recruiting\.paylocity\.com/i, /\.paylocity\.com\/Recruiting\//i],
     title: [],
     body: [/powered by\s+paylocity/i, /recruiting\.paylocity\.com/i]
+  },
+  {
+    // Workable at apply.workable.com/<account>/j/<shortcode>/apply/ (read-only capture of 2026-11-27, Track 77).
+    // No title pattern: postings name the employer. Its footer reads "Powered byWorkable" (no space between the elements).
+    kind: "workable",
+    url: [/apply\.workable\.com/i, /\.workable\.com\//i],
+    title: [],
+    body: [/powered by\s*workable/i, /apply\.workable\.com/i]
   }
 ];
 

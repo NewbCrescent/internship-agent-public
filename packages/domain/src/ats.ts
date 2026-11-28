@@ -7,11 +7,12 @@ import { z } from "zod";
  * corrections are logged as events and never silently applied. Dover
  * (app.dover.io) and Rippling (ats.rippling.com) were added from read-only
  * captures of 2026-11-20, Paylocity (recruiting.paylocity.com) from one of
- * 2026-11-24. A kind is confirmed automatically, and submitted under the
+ * 2026-11-24, Workable (apply.workable.com) from one of 2026-11-27 (Track
+ * 77). A kind is confirmed automatically, and submitted under the
  * auto-submit policy, only on its own site (atsKindOwnsUrl, Track 38).
  */
 
-export const atsKindSchema = z.enum(["greenhouse", "lever", "workday", "handshake", "oracle", "smartrecruiters", "ashby", "jobvite", "icims", "dover", "rippling", "paylocity", "unknown"]);
+export const atsKindSchema = z.enum(["greenhouse", "lever", "workday", "handshake", "oracle", "smartrecruiters", "ashby", "jobvite", "icims", "dover", "rippling", "paylocity", "workable", "unknown"]);
 
 export const atsSignalSchema = z.object({
   source: z.enum(["url", "title", "body"]),
@@ -64,7 +65,8 @@ export const ATS_KIND_LABELS: Record<Exclude<AtsKind, "unknown">, string> = {
   icims: "iCIMS",
   dover: "Dover",
   rippling: "Rippling",
-  paylocity: "Paylocity"
+  paylocity: "Paylocity",
+  workable: "Workable"
 };
 
 /**
@@ -90,7 +92,10 @@ export const ATS_KIND_LABELS: Record<Exclude<AtsKind, "unknown">, string> = {
  * button and no submit on the first), and no success text was found in its
  * own scripts, so it stays approval-needed until an adapter walks it. Dover
  * proceeds like Greenhouse: one page with the form, one Apply submit, and a
- * "Thanks for applying!" the confirmation pattern already reads.
+ * "Thanks for applying!" the confirmation pattern already reads. Workable
+ * proceeds like Dover: one page, one "Submit application" submit, and a
+ * "Your application has been submitted successfully." the confirmation
+ * pattern already reads.
  */
 export const ATS_KINDS_NEEDING_APPROVAL: ReadonlySet<string> = new Set(["oracle", "smartrecruiters", "jobvite", "icims", "rippling", "paylocity"]);
 
@@ -116,7 +121,8 @@ const ATS_OWN_HOSTS: Record<Exclude<AtsKind, "unknown">, RegExp> = {
   icims: /(?:^|\.)icims\.com$/,
   dover: /^(?:app\.dover\.io|jobs\.dover\.com)$/,
   rippling: /(?:^|\.)rippling\.com$/,
-  paylocity: /(?:^|\.)paylocity\.com$/
+  paylocity: /(?:^|\.)paylocity\.com$/,
+  workable: /(?:^|\.)workable\.com$/
 };
 
 /** Whether `url` is on `kind`'s own site or carries its embed marker; false for unknown kinds and unparseable or non-http(s) URLs. Pure. */

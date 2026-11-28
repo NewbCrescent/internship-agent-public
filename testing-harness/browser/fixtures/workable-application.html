@@ -1,0 +1,229 @@
+<!doctype html>
+<!--
+  Workable application form (apply.workable.com/<account>/j/<shortcode>/apply/),
+  reduced from a read-only capture of 2026-11-27 (structure; nothing was
+  clicked or typed, class names and scripts removed, the employer and every
+  value fictional) and Workable's public bundle (texts: "Submit application",
+  "Thank you!", "Your application has been submitted successfully.", "This
+  field is required."). Kept from the capture: the Autofill block with its
+  "Import resume from" dropdown button (no file input); Personal information
+  (first and last name, email, an optional headline, a custom "Full Legal
+  Name", the intl-tel-input phone with its country button and hidden country
+  dialog, the address box and the three aria-hidden, tabindex=-1 city,
+  postcode, and country inputs in 1px containers); Profile (Education and
+  Experience "+ Add" buttons, the summary, the Resume drop zone whose file
+  input is labelled by the Resume label and its "Choose file" label); Details
+  (two Yes/No questions, each a fieldset role=radiogroup labelled by its
+  question span, each option a div role=radio aria-checked over a label
+  holding an aria-hidden, tabindex=-1 native radio and its YES or NO span);
+  the hidden Turnstile container; the Submit application button; the cookie
+  dialog (Cookies settings, Accept all, Decline all); and the footer's
+  "Powered by" Workable.
+  Assumed, not captured: the radio and file inputs' CSS (visually hidden
+  here), the success container markup, the cf-turnstile-response input
+  (Turnstile's page machinery), and the script's own validation in place of
+  the browser's (the form is set to noValidate). The script below stands in for Workable's: a
+  click on a role=radio option checks its radio and sets aria-checked on the
+  pair; Decline all hides the cookie dialog; the submit, with every required
+  field filled and both questions answered, draws the thank-you text in place
+  of the form, and otherwise shows "This field is required." under each empty
+  field and records nothing. State is on window.fixture.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Software Engineering Intern - Fixture Robotics</title>
+  <style>
+    body { font-family: sans-serif; margin: 0; padding: 16px 16px 160px; }
+    .field { margin: 12px 0; }
+    .visually-hidden-input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+    [role="radio"] { display: inline-block; border: 1px solid #888; padding: 8px 16px; margin-right: 8px; cursor: pointer; }
+    [role="radio"][aria-checked="true"] { background: #cde; }
+    .error { color: #b00; }
+    [data-ui="cookie-consent"] { position: fixed; left: 0; right: 0; bottom: 0; background: #fff; border-top: 1px solid #888; padding: 8px; }
+  </style>
+</head>
+<body>
+  <main id="application">
+    <h1>Software Engineering Intern</h1>
+    <p>On-site · Engineering · Berkeley, California, United States</p>
+    <nav><a href="/fixturerobotics/j/FIXTURE001/">Overview</a> <a href="/fixturerobotics/j/FIXTURE001/apply/">Application</a></nav>
+    <form data-ui="application-form">
+      <div>
+        <div>
+          <strong>Autofill application</strong>
+          <p>Save time by importing your resume in one of the following formats: .pdf, .doc, .docx, .odt, or .rtf.</p>
+        </div>
+        <div data-ui="autofill-button">
+          <button aria-haspopup="true" aria-expanded="false" aria-controls="fixture_dropdown" type="button"><span>Import resume from</span></button>
+        </div>
+      </div>
+      <span><span>*</span>&nbsp;<span>Required fields</span></span>
+      <section data-ui="section">
+        <div>
+          <h2 id="section-0_section_name">Personal information</h2>
+          <a tabindex="0" role="button" data-ui="clear-section-0" aria-label="Clear Personal information"><span>Clear</span></a>
+        </div>
+        <div data-ui="section-fields">
+          <div class="field"><label><span><span><strong>*</strong></span><span><span id="firstname_label"><strong>First name</strong></span></span></span>
+            <div data-role="illustrated-input"><div><input aria-required="true" id="firstname" maxlength="127" data-ui="firstname" name="firstname" aria-labelledby="firstname_label" required type="text" dir="auto" value=""></div></div></label></div>
+          <div class="field"><label><span><span><strong>*</strong></span><span><span id="lastname_label"><strong>Last name</strong></span></span></span>
+            <div data-role="illustrated-input"><div><input aria-required="true" id="lastname" maxlength="127" data-ui="lastname" name="lastname" aria-labelledby="lastname_label" required type="text" dir="auto" value=""></div></div></label></div>
+          <div class="field"><label><span><span><strong>*</strong></span><span><span id="email_label"><strong>Email</strong></span></span></span>
+            <div data-role="illustrated-input"><div><input aria-required="true" id="email" maxlength="255" data-ui="email" name="email" aria-labelledby="email_label" required type="email" dir="auto" value=""></div></div></label></div>
+          <div class="field"><label><span><span><span id="headline_label"><strong>Headline</strong></span><span> (Optional)</span></span></span>
+            <div data-role="illustrated-input"><div><input aria-required="false" id="headline" maxlength="255" data-ui="headline" name="headline" aria-labelledby="headline_label" type="text" dir="auto" value=""></div></div></label></div>
+          <div class="field"><label><span><span><strong>*</strong></span><span><span id="CA_00001_label"><strong>Full Legal Name</strong></span></span></span>
+            <div data-role="illustrated-input"><div><input aria-required="true" id="CA_00001" maxlength="127" data-ui="CA_00001" name="CA_00001" aria-labelledby="CA_00001_label" required type="text" dir="auto" value=""></div></div></label></div>
+          <div class="field">
+            <div>
+              <span><span><strong>*</strong></span><span><span id="phone_label"><strong>Phone</strong></span></span></span>
+              <div data-ignore-focus="true" data-ui="phone">
+                <div data-role="illustrated-input"><div><div>
+                  <div>
+                    <button type="button" class="iti__selected-country" aria-expanded="false" aria-label="Change country for phone number, currently selected United States (+1)" aria-haspopup="dialog" aria-controls="iti-0__country-selector" title="United States"><div><div aria-hidden="true"></div></div><div>+1</div></button>
+                    <div id="iti-0__country-selector" class="iti__country-selector iti__hide" role="dialog" aria-modal="true" hidden>
+                      <ul id="iti-0__country-listbox" role="listbox" aria-label="List of countries">
+                        <li role="option" aria-selected="true"><span>United States <span>(+1)</span></span></li>
+                        <li role="option" aria-selected="false"><span>Canada <span>(+1)</span></span></li>
+                      </ul>
+                    </div>
+                  </div>
+                  <input aria-required="true" aria-labelledby="phone_label" maxlength="255" required id="input_phone" aria-describedby="phone_helper" name="phone" type="tel" dir="auto" data-intl-tel-input-id="0" autocomplete="tel" inputmode="tel">
+                </div></div></div>
+              </div>
+            </div>
+            <div><div><span id="phone_helper">The hiring team may use this number to contact you about this job.</span></div></div>
+          </div>
+          <div class="field">
+            <label><span><span><strong>*</strong></span><span><span id="address_label"><strong>Address</strong></span></span></span>
+              <div data-role="illustrated-input"><div><input aria-required="true" id="address" data-ui="address" name="address" aria-labelledby="address_label" aria-describedby="address_helper" required type="text" dir="auto" value=""></div></div></label>
+            <div><div><span id="address_helper">Include your city, region, and country, so that employers can easily manage your application.</span></div></div>
+          </div>
+          <div style="position: absolute; width: 1px; height: 1px; overflow: hidden;"><label><div data-role="illustrated-input"><div><input id="city" aria-hidden="true" tabindex="-1" name="city" type="text" dir="auto" value=""></div></div></label></div>
+          <div style="position: absolute; width: 1px; height: 1px; overflow: hidden;"><label><div data-role="illustrated-input"><div><input id="postcode" aria-hidden="true" tabindex="-1" name="postcode" type="text" dir="auto" value=""></div></div></label></div>
+          <div style="position: absolute; width: 1px; height: 1px; overflow: hidden;"><label><div data-role="illustrated-input"><div><input id="country" aria-hidden="true" tabindex="-1" name="country" type="text" dir="auto" value=""></div></div></label></div>
+        </div>
+      </section>
+      <section data-ui="section">
+        <div>
+          <h2 id="section-1_section_name">Profile</h2>
+          <a tabindex="0" role="button" data-ui="clear-section-1" aria-label="Clear Profile" aria-disabled="true"><span>Clear</span></a>
+        </div>
+        <div data-ui="section-fields">
+          <div data-ui="education"><div><p id="education_label">Education&nbsp;<small>(Optional)</small></p><button data-ui="add-section" aria-label="Add Education" type="button">+ Add</button></div></div>
+          <div data-ui="experience"><div><p id="experience_label">Experience&nbsp;<small>(Optional)</small></p><button data-ui="add-section" aria-label="Add Experience" type="button">+ Add</button></div></div>
+          <div class="field"><label><span><span><span id="summary_label"><strong>Summary</strong></span><span> (Optional)</span></span></span>
+            <div data-role="illustrated-input"><div><textarea aria-required="false" id="summary" data-ui="summary" name="summary" aria-labelledby="summary_label" rows="5" dir="auto"></textarea></div></div></label></div>
+          <div class="field">
+            <div><div>
+              <span><span><strong>*</strong></span><span><span id="fixtureResume_label"><strong>Resume</strong></span></span></span>
+              <div data-role="dropzone">
+                <div><div><div data-role="preview" style="width: 56px; height: 56px;"><label for="input_files_input_fixture01"></label></div></div></div>
+                <div><label tabindex="0" role="button" for="input_files_input_fixture01" id="description_input_fixture01" aria-describedby="fixtureResume_label">Choose file</label> <span>or drag and drop here</span></div>
+                <input data-ui="resume" class="visually-hidden-input" tabindex="-1" id="input_files_input_fixture01" type="file" aria-labelledby="fixtureResume_label description_input_fixture01" accept=".pdf,.doc,.docx,.odt,.rtf,application/pdf" required>
+              </div>
+            </div></div>
+          </div>
+        </div>
+      </section>
+      <section data-ui="section">
+        <div>
+          <h2 id="section-2_section_name">Details</h2>
+          <a tabindex="0" role="button" data-ui="clear-section-2" aria-label="Clear Details" aria-disabled="true"><span>Clear</span></a>
+        </div>
+        <div data-ui="section-fields">
+          <div class="field"><div>
+            <span><span><strong>*</strong></span><span><span id="fixtureQ1_label"><strong>Are you legally authorized to work in the United States?</strong></span></span></span>
+            <div style="--items-count: 2;">
+              <fieldset role="radiogroup" data-ui="QA_00000001" aria-labelledby="fixtureQ1_label">
+                <div data-ui="option" aria-labelledby="fixtureQ1_label radio_label_q1yes" id="wrapper_q1yes" role="radio" aria-checked="false" aria-required="true" tabindex="0">
+                  <label><input class="visually-hidden-input" aria-required="true" required id="q1yes" tabindex="-1" aria-hidden="true" type="radio" name="QA_00000001" dir="auto" value="true"><div><div><span id="radio_label_q1yes">YES</span></div></div></label>
+                </div>
+                <div data-ui="option" aria-labelledby="fixtureQ1_label radio_label_q1no" id="wrapper_q1no" role="radio" aria-checked="false" aria-required="true" tabindex="-1">
+                  <label><input class="visually-hidden-input" aria-required="true" required id="q1no" tabindex="-1" aria-hidden="true" type="radio" name="QA_00000001" dir="auto" value="false"><div><div><span id="radio_label_q1no">NO</span></div></div></label>
+                </div>
+              </fieldset>
+            </div>
+          </div></div>
+          <div class="field"><div>
+            <span><span><strong>*</strong></span><span><span id="fixtureQ2_label"><strong>Do you or will you require Visa sponsorship upon offer of employment?</strong></span></span></span>
+            <div style="--items-count: 2;">
+              <fieldset role="radiogroup" data-ui="QA_00000002" aria-labelledby="fixtureQ2_label">
+                <div data-ui="option" aria-labelledby="fixtureQ2_label radio_label_q2yes" id="wrapper_q2yes" role="radio" aria-checked="false" aria-required="true" tabindex="0">
+                  <label><input class="visually-hidden-input" aria-required="true" required id="q2yes" tabindex="-1" aria-hidden="true" type="radio" name="QA_00000002" dir="auto" value="true"><div><div><span id="radio_label_q2yes">YES</span></div></div></label>
+                </div>
+                <div data-ui="option" aria-labelledby="fixtureQ2_label radio_label_q2no" id="wrapper_q2no" role="radio" aria-checked="false" aria-required="true" tabindex="-1">
+                  <label><input class="visually-hidden-input" aria-required="true" required id="q2no" tabindex="-1" aria-hidden="true" type="radio" name="QA_00000002" dir="auto" value="false"><div><div><span id="radio_label_q2no">NO</span></div></div></label>
+                </div>
+              </fieldset>
+            </div>
+          </div></div>
+        </div>
+      </section>
+      <div id="turnstile-container-000001" hidden><input type="hidden" name="cf-turnstile-response" value=""></div>
+      <button data-ui="apply-button" type="submit">Submit application</button>
+    </form>
+  </main>
+  <div data-ui="cookie-consent" role="dialog" aria-modal="true" aria-label="Cookie Consent" tabindex="-1">
+    <span><span>This website uses cookies to improve user’s experience, personalise ads and analyse traffic. You can accept all cookies, decline all optional cookies, or manage your cookie settings. To learn more, view our <a data-ui="cookie-consent-cookies-policy" href="#cookies">cookies policy</a>.</span></span>
+    <div>
+      <button data-ui="cookie-consent-settings">Cookies settings</button>
+      <div><button data-ui="cookie-consent-accept">Accept all</button> <button data-ui="cookie-consent-decline">Decline all</button></div>
+    </div>
+  </div>
+  <footer data-id="footer">
+    <div><div data-ui="footer-eeoc">Fixture Robotics does not discriminate on the basis of any characteristic protected by law.</div></div>
+    <div><a data-ui="view-jobs-url" href="/fixturerobotics/">View all jobs</a></div>
+    <div data-ui="footer-powered-by"><span><button data-ui="update-cookie-preferences">Cookie settings</button></span><span>Powered by<a href="#workable">Workable</a></span></div>
+  </footer>
+  <script>
+    const state = { uploads: {}, choices: {}, cookies: null, submitted: false };
+    window.fixture = state;
+    document.addEventListener("change", (event) => {
+      if (event.target.type === "file") state.uploads[event.target.getAttribute("data-ui") ?? event.target.id] = event.target.files[0]?.name ?? null;
+    });
+    // Workable's option: a click on the role=radio element (or anything inside it) checks its radio and marks the pair.
+    for (const option of document.querySelectorAll('[role="radio"]')) {
+      option.addEventListener("click", (event) => {
+        event.preventDefault();
+        const radio = option.querySelector('input[type="radio"]');
+        for (const sibling of option.closest('[role="radiogroup"]').querySelectorAll('[role="radio"]')) sibling.setAttribute("aria-checked", "false");
+        option.setAttribute("aria-checked", "true");
+        radio.checked = true;
+        state.choices[radio.name] = option.textContent.trim();
+      });
+    }
+    const consent = document.querySelector('[data-ui="cookie-consent"]');
+    document.querySelector('[data-ui="cookie-consent-decline"]').addEventListener("click", () => { state.cookies = "declined"; consent.hidden = true; });
+    document.querySelector('[data-ui="cookie-consent-accept"]').addEventListener("click", () => { state.cookies = "accepted"; consent.hidden = true; });
+    const form = document.querySelector("form");
+    form.noValidate = true;
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      for (const error of form.querySelectorAll(".error")) error.remove();
+      const missing = [];
+      for (const control of form.querySelectorAll("input[required], textarea[required]")) {
+        if (control.type === "radio") continue;
+        if (control.type === "file" ? control.files.length === 0 : !control.value.trim()) missing.push(control);
+      }
+      for (const group of form.querySelectorAll('[role="radiogroup"]')) {
+        if (!group.querySelector('input[type="radio"]:checked')) missing.push(group);
+      }
+      if (missing.length > 0) {
+        for (const control of missing) {
+          const error = document.createElement("div");
+          error.className = "error";
+          error.textContent = "This field is required.";
+          control.closest(".field")?.appendChild(error);
+        }
+        return;
+      }
+      state.submitted = true;
+      setTimeout(() => {
+        document.getElementById("application").innerHTML = "<h1>Thank you!</h1><p>Your application has been submitted successfully.</p>";
+      }, 200);
+    });
+  </script>
+</body>
+</html>

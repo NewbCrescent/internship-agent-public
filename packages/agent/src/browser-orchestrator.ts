@@ -156,6 +156,7 @@ import { passOracleEmailStep, type OracleEmailStepSettings } from "./oracle-emai
 import { assertHandshakeSignedIn } from "./handshake-session-service";
 import { applyVoiceDrafts, createDefaultVoiceDrafter, draftSourcesFor, type VoiceDrafter } from "./voice-drafting";
 import { createDefaultPauseReviewer, type PauseReviewer } from "./pause-review";
+import { employerGreenhouseJobId, findGreenhouseEmbed, type GreenhouseEmbedLookup } from "./greenhouse-embed-board";
 import { AutomaticRunStopped, IcimsAccountHeld, PostingClosed, WorkdayAccountHeld, WorkdayEntryStopped } from "./run-errors";
 import { postingLocationNames, postingQuestionContext, savedSelfIdentification, usCitizenSettles } from "./saved-answers";
 import {
@@ -207,9 +208,9 @@ export { WorkdayAccountHeld } from "./run-errors";
 export { IcimsAccountHeld } from "./run-errors";
 
 /**
- * Where the application form lives: Lever and Ashby host it on a sibling
- * path of the posting; the others show it on the posting or behind its
- * Apply button.
+ * Where the application form lives: Lever, Ashby, and Workable host it on a
+ * sibling path of the posting; the others show it on the posting or behind
+ * its Apply button.
  */
 export function applicationUrlFor(source: { externalApplicationUrl?: string | null; companyCareersUrl?: string | null; sourceUrl?: string | null }): string | null {
   const url = source.externalApplicationUrl ?? source.companyCareersUrl ?? source.sourceUrl ?? null;
@@ -219,6 +220,8 @@ export function applicationUrlFor(source: { externalApplicationUrl?: string | nu
     const parts = parsed.pathname.split("/").filter(Boolean);
     if (parsed.hostname === "jobs.lever.co" && parts.length === 2) return `https://jobs.lever.co/${parts[0]}/${parts[1]}/apply`;
     if (parsed.hostname === "jobs.ashbyhq.com" && parts.length === 2) return `https://jobs.ashbyhq.com/${parts[0]}/${parts[1]}/application`;
+    // Workable's posting overview: its application form is the sibling /apply/ page (Track 77).
+    if (parsed.hostname === "apply.workable.com" && parts.length === 3 && parts[1] === "j") return `https://apply.workable.com/${parts[0]}/j/${parts[2]}/apply/`;
   } catch {
     return url;
   }
@@ -890,6 +893,8 @@ export async function startBrowserRun(
     icimsAccounts?: IcimsAccountRuntime | null;
     /** Oracle Cloud HCM's email and one-time-code step: the mailbox it reads and its address. Default from INTERNSHIP_AGENT_GMAIL_*; null never takes the step (the email-step stop stays). */
     oracleEmailStep?: OracleEmailStepSettings | null;
+    /** Greenhouse's public board API, asked whether an employer page's gh_jid job is a Greenhouse job whose embed serves its application (greenhouse-embed-board.ts); undefined asks it only when the run opens its own browser (no openPage given), null never. */
+    greenhouseEmbeds?: GreenhouseEmbedLookup | null;
   } = {}
 ): Promise<RunReport> {
   const database = options.database ?? getDatabase();
@@ -919,14 +924,28 @@ export async function startBrowserRun(
   }
 
   const candidate = getCandidate(database, candidateId);
-  const page = await openPage(applicationUrl);
+  // An employer page carrying gh_jid whose job Greenhouse's own board API ties to this page: open the Greenhouse
+  // application itself (its embed), since the page may draw it only after cookies are accepted (Amperity) (Track 77).
+  const lookup = options.greenhouseEmbeds === undefined ? (options.openPage ? null : findGreenhouseEmbed) : options.greenhouseEmbeds;
+  const embed = lookup && employerGreenhouseJobId(applicationUrl)
+    ? await lookup({ applicationUrl, companyName: posting.companyName }).catch(() => null)
+    : null;
+  const startUrl = embed?.embedUrl ?? applicationUrl;
+  if (embed) {
+    const status = getJobPosting(database, jobId)?.status ?? posting.status;
+    logApplicationEvent(database, {
+      jobId, fromStatus: status, toStatus: status,
+      detail: `Greenhouse's board API lists job ${embed.jobId} on the ${embed.board} board with ${hostOf(applicationUrl)} as its page; the run opens its Greenhouse application at ${embed.embedUrl}.`.slice(0, 1_000)
+    });
+  }
+  const page = await openPage(startUrl);
   let handoff: string | null = null;
   try {
     // A signed-out Handshake session stops before anything changes.
     assertHandshakeSignedIn(database, page.url());
     const inDialog = await enterHandshakeDialog(page, posting.source.applicationType);
     let form = await recognizeCurrentForm(page);
-    let formUrl = applicationUrl;
+    let formUrl = startUrl;
     // A posting page with no form: follow its own Apply entry once (never on
     // Handshake, whose Quick apply dialog is enterHandshakeDialog's job), and
     // save the form's address, so continue and submit reopen the form itself.
@@ -999,7 +1018,7 @@ export async function startBrowserRun(
         if (notice) throw new PostingClosed(closedPostingReason(page.url(), notice));
         const signIn = await signInChoicesReasonOn(page);
         if (signIn) throw new AutomaticRunStopped(signIn);
-        throw new AutomaticRunStopped("No application form was found at " + applicationUrl + ". It may sit behind an Apply button; start the run yourself from the form's address.");
+        throw new AutomaticRunStopped("No application form was found at " + startUrl + ". It may sit behind an Apply button; start the run yourself from the form's address.");
       }
     }
     // Read-only: a challenge the candidate would see holds the run; the hidden token field and invisible badge do not.

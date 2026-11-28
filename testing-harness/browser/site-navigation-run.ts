@@ -32,7 +32,12 @@
  * posting whose Apply Now button is drawn 2.5 s after the load event is still
  * followed to its email step; an Eightfold-style Apply Now that opens the
  * employer's Workday posting in a new tab is followed there, the tab closed,
- * and the walker stops as "adapter". (vi) a closed iCIMS job whose notice
+ * and the walker stops as "adapter"; a gh_jid careers page whose only
+ * controls are a Subscribe block and a footer newsletter form (reduced from
+ * the 2026-11-27 Lucid Motors and Amperity fetches) has no application field
+ * and is followed, and walked, to its Greenhouse embed, while an application
+ * section in a "subscription" container that holds an upload is still read.
+ * (vi) a closed iCIMS job whose notice
  * sits only in its same-host content frame is read as closed
  * (readClosedPostingNotice and the application page's postingClosedNotice)
  * while the top document's text never says so, with no Apply entry followed
@@ -76,6 +81,10 @@ const LATE_ORACLE_POSTING = "https://fixture.fa.ocs.oraclecloud.com/hcmUI/Candid
 const EMBED_POSTING = "https://careers.fixturehealth.example/careers/jobs/7000002-robotics-intern?gh_jid=7000002";
 const EMBED_APPLICATION = "https://job-boards.greenhouse.io/embed/job_app?for=fixturehealth&token=7000002";
 const SCRIPT_EMBED_POSTING = "https://careers.fixturehealth.example/careers/jobs/7000003-robotics-intern?gh_jid=7000003";
+/** A gh_jid careers page whose only form controls are a Subscribe block and a footer newsletter form (Track 77). */
+const NEWSLETTER_POSTING = "https://careers.fixturehealth.example/careers/jobs/7000004-robotics-intern?gh_jid=7000004";
+/** An application form inside a container whose class says "subscription" (it holds an upload). */
+const SUBSCRIPTION_APPLICATION = "https://careers.fixturerobotics.example/jobs/6001/apply";
 const EIGHTFOLD_POSTING = "https://jobs.fixturechips.example/careers/job/900001";
 const WORKDAY_POSTING = "https://fixturechips.wd5.myworkdayjobs.com/External/job/US-CA-Santa-Clara/Robotics-Intern_JR1000001?source=Eightfold";
 const ICIMS_CLOSED_POSTING = "https://careers-fixture.icims.com/jobs/9002/job";
@@ -119,6 +128,8 @@ async function main(): Promise<void> {
       "fixture.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/10002": fixture("late-apply-posting.html"),
       "careers.fixturehealth.example/careers/jobs/7000002-robotics-intern": fixture("greenhouse-embed-posting.html"),
       "careers.fixturehealth.example/careers/jobs/7000003-robotics-intern": SCRIPT_EMBED_PAGE,
+      "careers.fixturehealth.example/careers/jobs/7000004-robotics-intern": fixture("newsletter-footer-posting.html"),
+      "careers.fixturerobotics.example/jobs/6001/apply": fixture("subscription-application.html"),
       "job-boards.greenhouse.io/embed/job_app": fixture("greenhouse-embed-application.html"),
       "jobs.fixturechips.example/careers/job/900001": fixture("eightfold-posting.html"),
       "fixturechips.wd5.myworkdayjobs.com/External/job/US-CA-Santa-Clara/Robotics-Intern_JR1000001": WORKDAY_PAGE,
@@ -308,6 +319,34 @@ async function main(): Promise<void> {
       await scripted.close();
     }
 
+    // (v) Newsletter and subscribe boxes (Lucid's Subscribe block, Amperity's footer newsletter form; Track 77) are
+    // never application fields, so the page's Greenhouse embed is followed; an application section in a container
+    // whose class says "subscription" but holds an upload is still read.
+    {
+      const tab = await open(NEWSLETTER_POSTING);
+      const form = await recognizeCurrentForm(createApplicationPage(tab));
+      const signup = form.fields.filter((field) => ["email", "footer-form-email", "footer-form-website"].includes(field.id));
+      check(signup.length === 0, `newsletter boxes read as fields: ${signup.map((field) => `${field.id}:${field.label}`).join("|")}`);
+      check(!hasApplicationFields(form.fields), `newsletter posting has application fields: ${form.fields.map((field) => `${field.id}:${field.label}`).join("|")}`);
+      const reached = await createPlaywrightPage(tab).followApplyEntry!();
+      check(reached === "https://job-boards.greenhouse.io/embed/job_app?for=fixturehealth&token=7000004", `newsletter posting followed to: ${reached}`);
+      await tab.close();
+
+      const walked = await open(NEWSLETTER_POSTING);
+      const outcome = await createApplicationPage(walked).advanceToApplicationForm();
+      check(outcome.stop === "form" && outcome.url === "https://job-boards.greenhouse.io/embed/job_app?for=fixturehealth&token=7000004"
+        && JSON.stringify(outcome.hops.map((hop) => hop.kind)) === JSON.stringify(["embed"]),
+        `newsletter posting walk: ${outcome.stop} at ${outcome.url} (${JSON.stringify(outcome.hops)})`);
+      await walked.close();
+
+      const application = await open(SUBSCRIPTION_APPLICATION);
+      const read = await recognizeCurrentForm(createApplicationPage(application));
+      const ids = read.fields.map((field) => field.id);
+      check(ids.includes("applicant_email") && read.fields.some((field) => field.kind === "file" && field.id === "resume"),
+        `an application section in a "subscription" container was dropped: ${read.fields.map((field) => `${field.id}:${field.label}`).join("|")}`);
+      await application.close();
+    }
+
     // (v) An Oracle posting whose Apply Now is drawn after the load event: still followed to the email step.
     {
       const tab = await open(LATE_ORACLE_POSTING);
@@ -386,7 +425,7 @@ async function main(): Promise<void> {
     console.error(`SITE_NAVIGATION_REPORT {"status":"failed","failures":${JSON.stringify(failures)}}`);
     process.exit(1);
   }
-  console.log(`SITE_NAVIGATION_REPORT {"status":"passed","scenarios":11}`);
+  console.log(`SITE_NAVIGATION_REPORT {"status":"passed","scenarios":12}`);
 }
 
 main().catch((error) => {

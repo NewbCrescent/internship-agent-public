@@ -14,6 +14,7 @@ export * from "./board-location-backfill";
 export * from "./github-job-list-source";
 export * from "./host-pacer";
 export * from "./posting-page-sources";
+export * from "./greenhouse-embed-board";
 export * from "./outcome-orchestrator";
 export * from "./model/openai-compatible-provider";
 export * from "./model/provider";

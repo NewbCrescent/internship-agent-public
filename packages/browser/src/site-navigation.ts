@@ -165,15 +165,23 @@ export function chooseNavigationEntry(
 
 /**
  * A step in front of the application form that no adapter takes yet and the
- * walker must name instead of reporting a form: Oracle Cloud HCM Candidate
- * Experience's email step (/apply/email, or an email box with no name,
- * phone, or resume field), which emails a one-time code before the form.
- * Null for any other page.
+ * walker must name instead of reporting a form: Paycom's "Getting You
+ * Started" step on paycomonline.net or paycomonline.com (a Confirm Email box
+ * and no file upload; Roto's run <run id>, captured 2026-11-27, Track 77),
+ * which sends the name and email before the application, and Oracle Cloud
+ * HCM Candidate Experience's email step (/apply/email, or an email box with
+ * no name, phone, or resume field), which emails a one-time code before the
+ * form. Null for any other page.
  */
 export function siteWallReason(url: string, fields: BrowserField[]): string | null {
   const parsed = parsedUrl(url);
   if (!parsed) return null;
   const host = parsed.hostname.toLowerCase();
+  if (/(?:^|\.)paycomonline\.(?:net|com)$/.test(host)
+    && fields.some((field) => /^confirm e-?mail(?: address)?$/.test(field.label.replace(/\s+/g, " ").trim().toLowerCase()))
+    && !fields.some((field) => field.kind === "file")) {
+    return `Paycom asks for your name and email at ${host} ("Getting You Started") before its application, and the agent has no Paycom adapter yet. Apply in your own browser.`;
+  }
   if (!host.endsWith(".oraclecloud.com") || !parsed.pathname.includes("/hcmUI/CandidateExperience/")) return null;
   const roles = fields.map(classifyFieldRole);
   const emailStep = /\/apply\/email(?:$|[/?#])/.test(parsed.pathname)

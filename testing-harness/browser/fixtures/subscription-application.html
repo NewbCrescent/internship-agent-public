@@ -1,0 +1,25 @@
+<!doctype html>
+<!--
+  A fictional application form inside a container whose class says
+  "subscription" (Track 77 negative control): it holds a resume upload, so it
+  is an application section, never a signup box, and its fields are read.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Apply - Fixture Robotics</title></head>
+<body>
+  <main>
+    <h1>Software Intern (Subscription Platform)</h1>
+    <div class="subscription-details">
+      <form>
+        <label for="first_name">First name</label>
+        <input id="first_name" name="first_name" type="text" required>
+        <label for="applicant_email">Email</label>
+        <input id="applicant_email" name="applicant_email" type="email" required>
+        <label for="resume">Resume</label>
+        <input id="resume" name="resume" type="file" required>
+        <button type="submit">Submit application</button>
+      </form>
+    </div>
+  </main>
+</body>
+</html>

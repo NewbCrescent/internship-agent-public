@@ -940,6 +940,21 @@ export function createPlaywrightPage(page: Page): BrowserPage {
               }
               throw new FieldUnfillable("the site did not keep the choice");
             }
+            // Workable's option: a `role=radio` element over a hidden native radio. Click the option itself and wait for
+            // it to show `aria-checked="true"` (or the radio to be checked); never the DOM fallback below (Track 77).
+            const roleOption = target.locator('xpath=ancestor::*[@role="radio"][1]');
+            if ((await roleOption.count()) === 1) {
+              const kept = async (): Promise<boolean> =>
+                (await roleOption.getAttribute("aria-checked").catch(() => null)) === "true"
+                || (await target.isChecked().catch(() => false));
+              if (await kept()) return;
+              await roleOption.click({ timeout: 10_000 });
+              for (let attempt = 0; attempt < 10; attempt += 1) {
+                if (await kept()) return;
+                await page.waitForTimeout(200);
+              }
+              throw new FieldUnfillable("the site did not keep the choice");
+            }
             try {
               await target.check({ timeout: 10_000 });
             } catch {
@@ -1985,8 +2000,11 @@ export function attachedNamesFromText(text: string): string[] {
  * and preference-center toggles, its vendor search), a share or copy-link
  * box (an id or name saying copy-link or share-link, or a read-only text box
  * holding a URL), a honeypot text box ("Leave this field blank", "for
- * robots", Workday's beecatcher), and Oracle Digital Assistant's chatbot
- * controls on Oracle Cloud hosts are never fields.
+ * robots", Workday's beecatcher), Oracle Digital Assistant's chatbot
+ * controls on Oracle Cloud hosts, and a newsletter, subscribe, mailing-list,
+ * job-alert, or talent-community box (a container within six ancestors whose
+ * id or class says so, holding no file upload and at most four controls) are
+ * never fields.
  */
 export function collectControlsIn(root: Element): RawControl[] {
   const controls: RawControl[] = [];
@@ -1995,6 +2013,26 @@ export function collectControlsIn(root: Element): RawControl[] {
   const COPY_LINK = /(?:^|[-_])copy[-_]?link(?:$|[-_])|share[-_]?link/i;
   const HONEYPOT = /\b(?:honey ?pot|robots? only|for robots|if you(?:'|’| a)re (?:a )?human|leave (?:this )?(?:field )?(?:blank|empty)|do not (?:fill|enter|type))\b|beecatcher/i;
   const TEXT_LIKE = ["text", "email", "url", "tel", "search", "number"];
+  /** A container id or class naming a newsletter, subscribe, mailing-list, job-alert, or talent-community box. */
+  const SIGNUP_BOX = /newsletter|subscri(?:be|ption)|mailing[-_ ]?list|job[-_ ]?alerts?|talent[-_ ]?(?:community|network)/i;
+  /**
+   * A control inside a signup box: the first of its six nearest ancestors whose id or class matches SIGNUP_BOX holds
+   * no file upload and at most four controls a person fills (an application section with an upload is never one).
+   */
+  const inSignupBox = (element: Element): boolean => {
+    let ancestor = element.parentElement;
+    for (let depth = 0; depth < 6 && ancestor && ancestor !== document.body && ancestor !== document.documentElement; depth += 1) {
+      const className = typeof ancestor.className === "string" ? ancestor.className : ancestor.getAttribute("class") ?? "";
+      if (SIGNUP_BOX.test(ancestor.id) || SIGNUP_BOX.test(className)) {
+        if (ancestor.querySelector('input[type="file"]')) return false;
+        const filled = Array.from(ancestor.querySelectorAll("input, textarea, select")).filter((control) =>
+          !(control instanceof HTMLInputElement && ["hidden", "submit", "button", "reset", "image"].includes(control.type)));
+        return filled.length <= 4;
+      }
+      ancestor = ancestor.parentElement;
+    }
+    return false;
+  };
   const TOKEN = /^(?:g-recaptcha-response|h-captcha-response|cf-turnstile-response)(?:-\d+)?$/i;
   const GENERIC_FILE = /^(?:attach|upload|choose (?:a )?file|browse|select|select (?:a )?file|add (?:a )?file|drop (?:files? )?here.*)$/i;
   const MARKER = /\s*(?:[*∗✱＊]+|\(required\))\s*$/i;
@@ -2314,8 +2352,14 @@ export function collectControlsIn(root: Element): RawControl[] {
     // Oracle Digital Assistant's chatbot popup (its required work-summary box, #oda-work-summary-text-area) is not the application's.
     if (location.hostname.endsWith(".oraclecloud.com") && input.closest('[id^="oda-"], .oda-chat-wrapper')) continue;
     if (input instanceof HTMLInputElement && type === "text" && input.readOnly && /^https?:\/\//i.test(input.value)) continue;
-    // React-select's shadow input that only carries `required` for the form.
-    if (input.getAttribute("aria-hidden") === "true" && input.getAttribute("tabindex") === "-1" && type !== "file") continue;
+    // A newsletter or subscribe box (Amperity's footer newsletter form, Lucid's Subscribe block; captured 2026-11-27,
+    // Track 77) asks for a marketing email, not an application answer.
+    if (inSignupBox(input)) continue;
+    // React-select's shadow input that only carries `required` for the form. A native radio inside a `role=radio` option
+    // (Workable's Yes/No questions draw each option as div[role=radio] > label > hidden radio; captured 2026-11-27,
+    // Track 77) is that option's own state, read as the radio question below.
+    if (input.getAttribute("aria-hidden") === "true" && input.getAttribute("tabindex") === "-1" && type !== "file"
+      && !(type === "radio" && input.closest('[role="radio"]'))) continue;
     // The hidden CAPTCHA token field is page machinery.
     if (TOKEN.test(input.name ?? "") || TOKEN.test(input.id ?? "")) continue;
     // Ashby's "Autofill from resume" box parses a resume into the form and redraws it, which drops every data-ia-control
@@ -2348,9 +2392,11 @@ export function collectControlsIn(root: Element): RawControl[] {
         || (group ? textOf(group.querySelector("legend")) || byIds(group.getAttribute("aria-labelledby")) || collapse(group.getAttribute("aria-label")) || textOf(titleLabel) || "" : "")
         || questionLabelNear(input) || nameLabel(input.name);
       // Ashby draws a chosen option from its own state (the option's `data-checked`); a DOM-only `checked` is not its answer.
+      // Workable's `role=radio` option shows its state as `aria-checked`.
       const chosen = (radio: HTMLInputElement): boolean => {
         const option = radio.closest(".ashby-application-form-input-radio-group-option");
-        return option ? option.hasAttribute("data-checked") : radio.checked;
+        if (option) return option.hasAttribute("data-checked");
+        return radio.checked || radio.closest('[role="radio"]')?.getAttribute("aria-checked") === "true";
       };
       const checked = radios.find(chosen);
       const options = radios.map((radio) => {

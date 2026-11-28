@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { fetchEmployerPublication, fetchGitHubJobList, pacePerHost, postingLinkKey, readJobPostingJsonLd } from "@internship-agent/agent";
+import { employerGreenhouseJobId, fetchEmployerPublication, fetchGitHubJobList, findGreenhouseEmbed, greenhouseBoardSlugs, pacePerHost, postingLinkKey, readJobPostingJsonLd } from "@internship-agent/agent";
 import { extractDeterministically, normalizePostingText } from "@internship-agent/jobs";
 
 // Synthetic fixtures for fictional employers; no candidate data and no network.
@@ -469,5 +469,88 @@ describe("posting identities for the new sources", () => {
     expect(await fetchEmployerPublication("https://app.dover.io/apply/job/" + DOVER_ID + "/", fetcher)).toBeNull();
     expect(await fetchEmployerPublication("https://careers.larchsystems.example.com/jobs/9995?icims=1", fetcher)).toBeNull();
     expect(requested).toBe(false);
+  });
+});
+
+describe("findGreenhouseEmbed (Track 77)", () => {
+  // A fictional employer page carrying gh_jid; Greenhouse's answers are faked, so nothing reaches the network.
+  const PAGE = "https://careers.fixturerobotics.example/jobs/intern?gh_jid=4000001";
+  const COMPANY = "Fixture Robotics";
+  const EMBED = "https://job-boards.greenhouse.io/embed/job_app?for=fixturerobotics&token=4000001";
+  type Request = { url: string; init?: RequestInit };
+  const fakeGreenhouse = (answers: (url: string) => Response | Promise<Response>) => {
+    const requests: Request[] = [];
+    const fetcher = async (url: string, init?: RequestInit) => { requests.push({ url, init }); return answers(url); };
+    return { requests, fetcher };
+  };
+  const job = (body: Record<string, unknown>) => new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+  const listed = { id: 4000001, absolute_url: PAGE, title: "Robotics Intern" };
+
+  it("opens the embed of a board that lists this page's job, sending only the board and the job id", async () => {
+    const { requests, fetcher } = fakeGreenhouse((url) => (url.startsWith("https://boards-api.greenhouse.io/") ? job(listed) : new Response("<html></html>", { status: 200 })));
+    expect(await findGreenhouseEmbed({ applicationUrl: PAGE, companyName: COMPANY }, fetcher)).toEqual({ board: "fixturerobotics", jobId: "4000001", embedUrl: EMBED });
+    expect(requests.map((request) => request.url)).toEqual(["https://boards-api.greenhouse.io/v1/boards/fixturerobotics/jobs/4000001", EMBED]);
+    expect(requests[0]?.init?.redirect).toBe("error");
+    expect(requests[1]?.init?.redirect).toBe("manual");
+    for (const request of requests) {
+      expect(request.init?.body).toBeUndefined();
+      expect(request.init?.method ?? "GET").toBe("GET");
+    }
+  });
+
+  it("tries the host's board when the name's board does not exist", async () => {
+    const MOTION_PAGE = "https://careers.fixturemotion.example/jobs/intern?gh_jid=4000001";
+    const { requests, fetcher } = fakeGreenhouse((url) => {
+      if (url.includes("/boards/fixturerobotics/")) return new Response("{}", { status: 404 });
+      if (url.startsWith("https://boards-api.greenhouse.io/")) return job({ ...listed, absolute_url: MOTION_PAGE });
+      return new Response("", { status: 200 });
+    });
+    const match = await findGreenhouseEmbed({ applicationUrl: MOTION_PAGE, companyName: COMPANY }, fetcher);
+    expect(match?.board).toBe("fixturemotion");
+    expect(requests.map((request) => request.url)).toContain("https://boards-api.greenhouse.io/v1/boards/fixturemotion/jobs/4000001");
+  });
+
+  it("never guesses: another job id, another host, or another gh_jid gives no embed", async () => {
+    const cases: Array<Record<string, unknown>> = [
+      { ...listed, id: 4000002 },
+      { ...listed, absolute_url: "https://careers.fixtureother.example/jobs/intern?gh_jid=4000001" },
+      { ...listed, absolute_url: "https://careers.fixturerobotics.example/jobs/intern?gh_jid=4000002" },
+      { ...listed, absolute_url: "https://careers.fixturerobotics.example/jobs/intern" },
+      { ...listed, absolute_url: "http://careers.fixturerobotics.example/jobs/intern?gh_jid=4000001" },
+      { id: "4000001", absolute_url: PAGE }
+    ];
+    for (const body of cases) {
+      const { fetcher } = fakeGreenhouse((url) => (url.startsWith("https://boards-api.greenhouse.io/") ? job(body) : new Response("", { status: 200 })));
+      expect(await findGreenhouseEmbed({ applicationUrl: PAGE, companyName: COMPANY }, fetcher)).toBeNull();
+    }
+  });
+
+  it("gives no embed when the embed redirects, a request fails, or the API errors", async () => {
+    const redirected = fakeGreenhouse((url) => (url.startsWith("https://boards-api.greenhouse.io/") ? job(listed) : new Response(null, { status: 302, headers: { location: "/embed/job_board?for=fixturerobotics&error=true" } })));
+    expect(await findGreenhouseEmbed({ applicationUrl: PAGE, companyName: COMPANY }, redirected.fetcher)).toBeNull();
+    const thrown = fakeGreenhouse(() => { throw new TypeError("fetch failed"); });
+    expect(await findGreenhouseEmbed({ applicationUrl: PAGE, companyName: COMPANY }, thrown.fetcher)).toBeNull();
+    const broken = fakeGreenhouse(() => new Response("oops", { status: 500 }));
+    expect(await findGreenhouseEmbed({ applicationUrl: "https://careers.fixturemotion.example/jobs/intern?gh_jid=4000001", companyName: COMPANY }, broken.fetcher)).toBeNull();
+    // A server error stops the lookup: the host's board is not tried after it.
+    expect(broken.requests).toHaveLength(1);
+  });
+
+  it("reads gh_jid only on https employer pages", async () => {
+    expect(employerGreenhouseJobId(PAGE)).toEqual({ host: "careers.fixturerobotics.example", id: "4000001" });
+    expect(employerGreenhouseJobId("https://boards.greenhouse.io/fixturerobotics/jobs/4000001?gh_jid=4000001")).toBeNull();
+    expect(employerGreenhouseJobId("https://greenhouse.io/jobs?gh_jid=4000001")).toBeNull();
+    expect(employerGreenhouseJobId("http://careers.fixturerobotics.example/jobs/intern?gh_jid=4000001")).toBeNull();
+    expect(employerGreenhouseJobId("https://careers.fixturerobotics.example/jobs/intern?gh_jid=abc")).toBeNull();
+    expect(employerGreenhouseJobId("https://careers.fixturerobotics.example/jobs/intern")).toBeNull();
+    let requested = false;
+    const fetcher = async () => { requested = true; return new Response("{}"); };
+    expect(await findGreenhouseEmbed({ applicationUrl: "https://careers.fixturerobotics.example/jobs/intern", companyName: COMPANY }, fetcher)).toBeNull();
+    expect(requested).toBe(false);
+    // Greenhouse may name the page without its www.
+    const bareListing = { ...listed, absolute_url: "https://fixturerobotics.example/careers/intern?gh_jid=4000001" };
+    const { fetcher: bare } = fakeGreenhouse((url) => (url.startsWith("https://boards-api.greenhouse.io/") ? job(bareListing) : new Response("", { status: 200 })));
+    expect(await findGreenhouseEmbed({ applicationUrl: "https://www.fixturerobotics.example/careers/intern?gh_jid=4000001", companyName: COMPANY }, bare)).not.toBeNull();
+    expect(greenhouseBoardSlugs("IXL Learning", "www.ixl.com")).toEqual(["ixllearning", "ixl"]);
   });
 });

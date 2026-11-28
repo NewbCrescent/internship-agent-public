@@ -1,0 +1,60 @@
+<!doctype html>
+<!--
+  A careers posting carrying gh_jid with two signup boxes, reduced from
+  read-only fetches of Lucid Motors' and Amperity's posting pages on
+  2026-11-27 (Track 77; class suffixes, names, and text fictional). Kept from
+  the captures: Lucid's Subscribe block (div#subscribe > ... >
+  div.SubscribeForm_formBodyWrapper__x > div > input#email, type text, with
+  an example address as placeholder) and Amperity's footer newsletter form
+  (div.styles_newsletter_signup_form__x > div > div > form holding an
+  aria-hidden "Website" honeypot with tabindex -1, a required "Work Email",
+  and a submit button). Greenhouse's embed script and its #grnhse_app box are
+  on the page (the script is aborted by the harness; its src stays), and the
+  posting's own Apply is only an in-page anchor. Neither signup box is an
+  application field.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Robotics Intern - Fixture Health</title></head>
+<body>
+  <main>
+    <h1>Robotics Intern</h1>
+    <p>Fixture Health builds fictional robots for fictional clinics. This internship runs for twelve weeks in the summer.</p>
+    <a href="#apply">Apply</a>
+    <div id="apply">
+      <script src="https://boards.greenhouse.io/embed/job_board/js?for=fixturehealth"></script>
+      <div id="grnhse_app"></div>
+    </div>
+  </main>
+  <section>
+    <div id="subscribe">
+      <div class="SubscribeForm_container__x">
+        <h2>Stay in the loop</h2>
+        <div class="SubscribeForm_formBodyWrapper__x">
+          <div>
+            <input id="email" type="text" placeholder="jsmith@example.com" aria-label="Email">
+            <button type="button">Subscribe</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <footer>
+    <p>Sign up for monthly updates from Fixture Health.</p>
+    <div class="styles_newsletter_signup_form__x">
+      <div>
+        <div>
+          <form>
+            <div aria-hidden="true">
+              <label for="footer-form-website">Website</label>
+              <input id="footer-form-website" name="website" type="text" tabindex="-1" autocomplete="off">
+            </div>
+            <label for="footer-form-email">Work Email</label>
+            <input id="footer-form-email" name="email" type="email" aria-required="true">
+            <button type="submit">Sign up</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

@@ -29,6 +29,7 @@ import {
   type RawControl
 } from "@internship-agent/browser";
 import { ATS_KINDS_NEEDING_APPROVAL, atsKindOwnsUrl, type BrowserField } from "@internship-agent/domain";
+import { applicationUrlFor } from "@internship-agent/agent";
 
 describe("ATS classification", () => {
   it("recognizes Greenhouse, Lever, Workday, and Handshake patterns", () => {
@@ -554,5 +555,54 @@ describe("site ownership (Track 38)", () => {
     expect(claimedSiteHoldReason({ atsKind: "workday", pageUrl: "https://fixture.wd5.myworkdayjobs.com/en-US/careers", runUrl: offSite })).toBeNull();
     expect(claimedSiteHoldReason({ atsKind: "workday", pageUrl: offSite, runUrl: "https://fixture.wd5.myworkdayjobs.com/en-US/careers" })).toBeNull();
     expect(claimedSiteHoldReason({ atsKind: "unknown", pageUrl: offSite, runUrl: offSite })).toBeNull();
+  });
+});
+
+describe("Workable (Track 77)", () => {
+  it("recognizes apply.workable.com and proceeds automatically, like Dover", () => {
+    const workable = classifyAts("https://apply.workable.com/fixturerobotics/j/FIXTURE001/apply/", "Software Engineering Intern - Fixture Robotics", "Submit application\nPowered byWorkable");
+    expect(workable.kind).toBe("workable");
+    expect(atsFlowFor(workable)).toBe("auto");
+    expect(adapterProfileFor("workable")?.multipage).toBe(false);
+    expect(ATS_KINDS_NEEDING_APPROVAL.has("workable")).toBe(false);
+  });
+
+  it("keeps a page that only mentions Workable off its own site below the automatic band", () => {
+    const elsewhere = classifyAts("https://careers.fixturerobotics.example/jobs/1001", "Software Intern", "Apply below\nPowered by Workable");
+    expect(elsewhere.confidence).toBeLessThanOrEqual(ATS_UNOWNED_CEILING);
+    expect(atsFlowFor(elsewhere)).not.toBe("auto");
+  });
+
+  it("owns only Workable's hosts", () => {
+    expect(atsKindOwnsUrl("workable", "https://apply.workable.com/x/j/ABC123/apply/")).toBe(true);
+    expect(atsKindOwnsUrl("workable", "https://careers.fixturerobotics.example/jobs/1001")).toBe(false);
+  });
+
+  it("opens a Workable posting's application page", () => {
+    expect(applicationUrlFor({ sourceUrl: "https://apply.workable.com/fixturerobotics/j/ABC12345/" })).toBe("https://apply.workable.com/fixturerobotics/j/ABC12345/apply/");
+    expect(applicationUrlFor({ sourceUrl: "https://apply.workable.com/fixturerobotics/j/ABC12345/apply/" })).toBe("https://apply.workable.com/fixturerobotics/j/ABC12345/apply/");
+  });
+});
+
+describe("Paycom's Getting You Started step (Track 77)", () => {
+  const PAYCOM = "https://paycomonline.net/v4/ats/web.php/portal/0123456789abcdef0123456789abcdef/jobs/1000001";
+  const field = (overrides: Partial<BrowserField> & Pick<BrowserField, "id" | "label">): BrowserField => ({ kind: "text", required: true, ...overrides });
+  const started = [
+    field({ id: "first", label: "Legal First Name" }),
+    field({ id: "last", label: "Legal Last Name" }),
+    field({ id: "email", label: "Email Address", kind: "email" }),
+    field({ id: "confirm", label: "Confirm Email", kind: "email" })
+  ];
+
+  it("names the step as a wall before anything is typed", () => {
+    expect(siteWallReason(PAYCOM, started)).toBe(
+      "Paycom asks for your name and email at paycomonline.net (\"Getting You Started\") before its application, and the agent has no Paycom adapter yet. Apply in your own browser."
+    );
+  });
+
+  it("is Paycom's only, and never a form with an upload or without Confirm Email", () => {
+    expect(siteWallReason("https://careers.fixturerobotics.example/jobs/1001/apply", started)).toBeNull();
+    expect(siteWallReason(PAYCOM, [...started, field({ id: "resume", label: "Resume", kind: "file" })])).toBeNull();
+    expect(siteWallReason(PAYCOM, started.filter((candidate) => candidate.id !== "confirm"))).toBeNull();
   });
 });

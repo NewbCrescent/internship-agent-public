@@ -22,6 +22,7 @@ export type AdapterProfile = {
  * recognized for display only (a progress bar on its application page and no
  * success text the agent can recognize), and so is Paylocity (a form of
  * several steps behind the posting's Apply, and no known success text).
+ * Workable is one page filled by the generic filler, like Dover.
  */
 export const ADAPTER_PROFILES: Record<AdapterProfile["kind"], AdapterProfile> = {
   greenhouse: {
@@ -95,6 +96,12 @@ export const ADAPTER_PROFILES: Record<AdapterProfile["kind"], AdapterProfile> = 
     readiness: ["Paylocity application page present (/Recruiting/Jobs/Apply/<id>, behind the posting's Apply)"],
     notes: ["The application is a form of five steps (\"Step 1 of 5\", a \"Next Step\" button, no submit on the first) behind a OneTrust cookie banner; its success text is not known; recognized for display only, the candidate approves each run"],
     multipage: true
+  },
+  workable: {
+    kind: "workable",
+    readiness: ["Workable application form present (apply.workable.com/<account>/j/<shortcode>/apply/)", "Submit control labeled Submit application"],
+    notes: ["One page, filled by the generic filler; Yes/No questions are div[role=radio] options over hidden native radios"],
+    multipage: false
   }
 };
 
