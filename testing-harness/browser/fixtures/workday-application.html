@@ -53,6 +53,7 @@
     // Clicking it gives the account for the email field's value, if unverified, a new token (the old one no longer
     // verifies), counts the click in localStorage "fixture-workday-resends", and shows "We sent a new verification email.
     // Check your inbox." (modelled).
+    // &resend=form (Track 76, modelled: no real resend form was captured): the same control instead opens an email-only "Resend Account Verification" form (email field, a "Submit" click filter over resendVerificationSubmitButton in a noCaptchaWrapper); its submit has the resend effect above.
     // &forgot (modelled, except the captured forgotPasswordLink id of the 2026-11-19 captures): the synthetic create and
     // sign-in forms draw "Forgot your password?" (forgotPasswordLink), and a click on that control, in any markup, opens a
     // Forgot Password form (email field, a "Submit" click filter over forgotPasswordSubmitButton in a noCaptchaWrapper,
@@ -65,7 +66,7 @@
     // matching password that meets the create step's rule replaces the account's password, drops the token, and shows
     // "Your password has been reset.".
     // &reset=silent (Track 75; the end state is captured from three real hosts' workday-account evidence, 2026-11-27: the Forgot Password form still on screen with the email typed, no message, no error, and no email; the cause is not known, so the drop is modelled): the Forgot Password submit is dropped with no message, no token and no request count; localStorage "fixture-workday-ignored-resets" counts the drops.
-    // ?dwell=1 (like Workday's sign-in widget, candidate-experience-apply-flow 2026.47.19, read 2026-11-24): an account submit clicked under 500 ms after its submit button mounted is dropped with no message; window.fixtureAccount counts the drops (ignoredSubmits) and records each submit's delay from its button's mount (submitDelays, ms).
+    // ?dwell=1 (like Workday's sign-in widget, candidate-experience-apply-flow 2026.47.19, read 2026-11-24): an account submit (Create Account, Sign In, and since Track 76 the Forgot Password and resend-form submits; the dwell on these two is modelled) clicked under 500 ms after its submit button mounted is dropped with no message; window.fixtureAccount counts the drops (ignoredSubmits) and records each submit's delay from its button's mount (submitDelays, ms); localStorage keeps them across reloads ("fixture-workday-early-submits" counts drops, "fixture-workday-submit-delays" lists { action, ms }).
     // Save and Continue validation draws Workday-style errors: an errorMessage alert inside each
     // missing field's formField-* container, an errorBanner listing them, and a plain
     // errorMessage for missing items that have no container (history rows, Resume/CV).
@@ -144,7 +145,8 @@
     }
     const accountMode = params.get("account");
     const signInError = params.get("signin-error");
-    const resendMode = params.get("resend") === "1";
+    const resendMode = params.get("resend") === "1" || params.get("resend") === "form";
+    const resendForm = params.get("resend") === "form";
     const forgotMode = params.has("forgot");
     const passwordReset = /\/passwordreset\/([A-Za-z0-9]+)/.exec(location.pathname);
     const bump = (key) => localStorage.setItem(key, String(Number(localStorage.getItem(key) || 0) + 1));
@@ -155,7 +157,7 @@
     const submitMounts = new WeakMap();
     if (dwellMode) {
       new MutationObserver(() => {
-        for (const button of document.querySelectorAll('[data-automation-id="createAccountSubmitButton"], [data-automation-id="signInSubmitButton"]')) {
+        for (const button of document.querySelectorAll('[data-automation-id="createAccountSubmitButton"], [data-automation-id="signInSubmitButton"], [data-automation-id="forgotPasswordSubmitButton"], [data-automation-id="resendVerificationSubmitButton"]')) {
           if (!submitMounts.has(button)) submitMounts.set(button, performance.now());
         }
       }).observe(document.documentElement, { childList: true, subtree: true });
@@ -590,6 +592,16 @@
       document.getElementById("account-notice").innerHTML = "<p>We sent a new verification email. Check your inbox.</p>";
     }
 
+    /** &resend=form (modelled; no real resend form was captured): the resend control opens an email-only form whose "Submit" click filter covers resendVerificationSubmitButton; its submit runs resendVerification. */
+    function renderResendForm() {
+      document.querySelector('[data-automation-id="signInContent"]').innerHTML = `
+        <h2>Resend Account Verification</h2>
+        <div id="account-errors"></div>
+        <div id="account-notice"></div>
+        <label for="resend-email">Email Address*</label><input id="resend-email" type="text" data-automation-id="email">
+        ${wrappedSubmit("resendVerificationSubmitButton", "Submit")}`;
+    }
+
     function createAccount() {
       const email = accountInput("email").value.trim().toLowerCase();
       const password = accountInput("password").value;
@@ -742,7 +754,7 @@
       } else if (target.matches('[data-automation-id="createAccountLink"]')) {
         renderAccount("create");
       } else if (target.matches("[data-fixture-resend]")) {
-        resendVerification();
+        if (resendForm) renderResendForm(); else resendVerification();
       } else if (forgotMode && target.matches('[data-automation-id="forgotPasswordLink"]')) {
         renderForgot();
       } else if (target.matches('[data-automation-id="utilityMenu"] [data-automation-id="click_filter"]')) {
@@ -756,14 +768,19 @@
         const action = coveredId === "createAccountSubmitButton" ? "Create Account"
           : coveredId === "forgotPasswordSubmitButton" ? "Forgot Password"
           : coveredId === "resetPasswordSubmitButton" ? "Reset Password"
+          : coveredId === "resendVerificationSubmitButton" ? "Resend Verification"
           : "Sign In";
-        const handlers = { "Create Account": createAccount, "Sign In": signIn, "Forgot Password": requestReset, "Reset Password": resetPassword };
+        const handlers = { "Create Account": createAccount, "Sign In": signIn, "Forgot Password": requestReset, "Reset Password": resetPassword, "Resend Verification": resendVerification };
         if (action === "Forgot Password" && params.get("reset") === "silent") { bump("fixture-workday-ignored-resets"); return; }
-        if (dwellMode && (action === "Create Account" || action === "Sign In")) {
+        if (dwellMode && ["Create Account", "Sign In", "Forgot Password", "Resend Verification"].includes(action)) {
           const mountedAt = covered ? submitMounts.get(covered) : undefined;
-          const elapsed = mountedAt === undefined ? 0 : performance.now() - mountedAt;
-          window.fixtureAccount.submitDelays.push(Math.round(elapsed));
-          if (elapsed < 500) { window.fixtureAccount.ignoredSubmits += 1; return; }
+          const elapsed = Math.round(mountedAt === undefined ? 0 : performance.now() - mountedAt);
+          window.fixtureAccount.submitDelays.push(elapsed);
+          // Kept in localStorage too, since the account flow reloads the tab after a link is opened.
+          const delays = JSON.parse(localStorage.getItem("fixture-workday-submit-delays") || "[]");
+          delays.push({ action, ms: elapsed });
+          localStorage.setItem("fixture-workday-submit-delays", JSON.stringify(delays));
+          if (elapsed < 500) { window.fixtureAccount.ignoredSubmits += 1; bump("fixture-workday-early-submits"); return; }
         }
         Promise.resolve(window.onFixtureAccountSubmit?.(action)).then(() => handlers[action]());
       } else if (target.closest("[data-add]")) {

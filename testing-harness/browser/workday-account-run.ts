@@ -29,7 +29,12 @@
  * after its form appears (the candidate's choice, 2026-11-24): under the
  * fixture's dwell mode, which drops a submit clicked under 500 ms after its
  * button mounts as Workday's sign-in widget does, the account is created and
- * the sign-in drawn right after it signs in (dwell). Workday's generic sign-in
+ * the sign-in drawn right after it signs in (dwell). Since Track 76 (the
+ * candidate's choice, 2026-11-27) the Forgot Password submit and an
+ * email-only resend form's submit wait the same way: under that mode the
+ * reset request is counted and the account signs in (reset-dwell), and a
+ * resend form the control opens (modelled) is counted and its new link
+ * verifies the account (resend-form-dwell). Workday's generic sign-in
  * failure ("…or your account might be locked") is a refused sign-in, not a
  * lockout: with a pending saved password the agent submits the create form
  * once with it and never signs in twice in a call (signed in; created or
@@ -186,8 +191,11 @@ async function main(): Promise<void> {
     const storedAccount = (tab: Page) => tab.evaluate((email) =>
       (JSON.parse(localStorage.getItem("fixture-workday-accounts") || "{}") as Record<string, StoredAccount>)[email] ?? null, EMAIL);
     /** The fixture's resend and reset-request counters (localStorage, so they survive the flow's reloads). */
-    const counter = (tab: Page, key: "fixture-workday-resends" | "fixture-workday-resets" | "fixture-workday-ignored-resets") =>
+    const counter = (tab: Page, key: "fixture-workday-resends" | "fixture-workday-resets" | "fixture-workday-ignored-resets" | "fixture-workday-early-submits") =>
       tab.evaluate((name) => Number(localStorage.getItem(name) || 0), key);
+    /** Every dwell-mode submit's action and delay from its button's mount (localStorage, so it survives the flow's reloads). */
+    const dwellDelays = (tab: Page) => tab.evaluate(() =>
+      JSON.parse(localStorage.getItem("fixture-workday-submit-delays") || "[]") as Array<{ action: string; ms: number }>);
     /** Stores a fixture account for a host before its scenario, from a tab that closes again. */
     const seedFixtureAccount = async (host: string, mode: string, value: StoredAccount) => {
       const tab = await context.newPage();
@@ -949,6 +957,26 @@ async function main(): Promise<void> {
     ]) if (!events().includes(text)) failures.push(`resend: no event "${text}"`);
     mail = async () => [];
 
+    // Track 76: an email-only resend form (modelled) that the resend control opens is submitted no sooner than one second
+    // after it appears, so a site that drops a submit made under 500 ms after its button mounts (dwell=1) still resends.
+    const resendFormHost = "fixture-resend-form.wd1.myworkdayjobs.com";
+    let resendFormTab: Page | null = null;
+    mail = async () => {
+      const messages = await staleLink(resendFormHost)();
+      if (resendFormTab && await counter(resendFormTab, "fixture-workday-resends") >= 1) messages.push(...(await linkFor(resendFormHost, () => resendFormTab)()));
+      return messages;
+    };
+    const resendForm = await scenario("resend-form-dwell", resendFormHost, "notice&resend=form&dwell=1", { clock: virtualClock().clock }, (tab) => { resendFormTab = tab; });
+    if (resendForm.result !== "signed-in" && resendForm.result !== "created") failures.push(`resend-form-dwell: expected a sign-in, got ${resendForm.result ?? resendForm.error?.message}`);
+    await opensFlow("resend-form-dwell", resendForm.page);
+    if (!(await storedAccount(resendForm.tab))?.verified) failures.push("resend-form-dwell: the fixture account was not verified");
+    if (await counter(resendForm.tab, "fixture-workday-resends") !== 1) failures.push(`resend-form-dwell: ${await counter(resendForm.tab, "fixture-workday-resends")} resends counted, expected 1`);
+    const resendFormDelays = await dwellDelays(resendForm.tab);
+    if (await counter(resendForm.tab, "fixture-workday-early-submits") !== 0) failures.push(`resend-form-dwell: submits dropped as too early (delays ${resendFormDelays.map((entry) => `${entry.action} ${entry.ms}`).join(", ")} ms)`);
+    const resendSubmitDelays = resendFormDelays.filter((entry) => entry.action === "Resend Verification").map((entry) => entry.ms);
+    if (resendSubmitDelays.length !== 1 || resendSubmitDelays[0]! < 950) failures.push(`resend-form-dwell: resend-form submit delays ${resendSubmitDelays.join(", ")} ms, expected one of at least 950`);
+    mail = async () => [];
+
     // A found link from an account created 27 hours ago is not opened first: the agent clicks the resend control and
     // opens only the new email's link.
     const hoursAgo = (hours: number) => new Date(Date.now() - hours * 3_600_000).toISOString();
@@ -1013,6 +1041,24 @@ async function main(): Promise<void> {
       `Workday ${resetHost}: Workday does not let the agent sign in with the saved password, so the agent asked for a password-reset email with Workday's Forgot your password? control, as you allowed on 2026-11-27.`,
       `Workday ${resetHost}: the password was reset through Workday's emailed link; the new password is saved locally.`
     ]) if (!events().includes(text)) failures.push(`reset: no event "${text}"`);
+    mail = async () => [];
+
+    // Track 76 (the candidate's choice, 2026-11-27): the Forgot Password submit waits one second after its form appears,
+    // like the sign-in and create submits, so a site that drops a submit made under 500 ms after its button mounts
+    // (dwell=1) still counts the reset request.
+    const resetDwellHost = "fixture-reset-dwell.wd1.myworkdayjobs.com";
+    await seedFixtureAccount(resetDwellHost, "create&forgot=1&dwell=1", { password: OLD_PASSWORD, verified: true, token: "resetdwelltoken" });
+    let resetDwellTab: Page | null = null;
+    mail = resetMail(resetDwellHost, () => resetDwellTab);
+    const resetDwell = await scenario("reset-dwell", resetDwellHost, "create&forgot=1&dwell=1", undefined, (tab) => { resetDwellTab = tab; });
+    if (resetDwell.result !== "signed-in") failures.push(`reset-dwell: expected "signed-in", got ${resetDwell.result ?? resetDwell.error?.message}`);
+    await opensFlow("reset-dwell", resetDwell.page);
+    if (await counter(resetDwell.tab, "fixture-workday-resets") !== 1) failures.push(`reset-dwell: ${await counter(resetDwell.tab, "fixture-workday-resets")} reset requests counted, expected 1`);
+    const resetDwellDelays = await dwellDelays(resetDwell.tab);
+    if (await counter(resetDwell.tab, "fixture-workday-early-submits") !== 0) failures.push(`reset-dwell: submits dropped as too early (delays ${resetDwellDelays.map((entry) => `${entry.action} ${entry.ms}`).join(", ")} ms)`);
+    const forgotDelays = resetDwellDelays.filter((entry) => entry.action === "Forgot Password").map((entry) => entry.ms);
+    if (forgotDelays.length !== 1 || forgotDelays[0]! < 950) failures.push(`reset-dwell: Forgot Password submit delays ${forgotDelays.join(", ")} ms, expected one of at least 950`);
+    if (accountSubmits.get(resetDwellHost)?.join(",") !== "Create Account,Sign In,Forgot Password,Reset Password,Sign In") failures.push(`reset-dwell: account submits ${accountSubmits.get(resetDwellHost)?.join(",")}`);
     mail = async () => [];
 
     // The third empty verification read on a host where the candidate had an account before: the reset runs, and the
@@ -1124,7 +1170,7 @@ async function main(): Promise<void> {
     console.error(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"failed","failures":${JSON.stringify(failures)}}`);
     process.exit(1);
   }
-  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":53}`);
+  console.log(`WORKDAY_ACCOUNT_RUN_REPORT {"status":"passed","scenarios":55}`);
 }
 
 main().catch((error) => {

@@ -7,7 +7,7 @@ The workday-account evidence saved at each hold (3 minutes after the click) show
 So Workday never answered the submit; the reset email was never sent.
 
 Likely cause, not verified: `requestWorkdayPasswordReset` clicks the reset submit right after typing the email, while Workday's sign-in widget silently drops an account submit made under 500 ms after its button mounts (see workday-ignored-an-account-submit-made-within-500-ms-of-the-form-appearing.md).
-Sign-in and create wait one second since 2026-11-24, but AGENTS.md allows that wait only for sign-in and create-account submits.
+Sign-in and create wait one second since 2026-11-24; until 2026-11-27 AGENTS.md allowed that wait only for sign-in and create-account submits.
 No DOM or network of the forgot form was captured (the reset step is kept out of run traces).
 Not ruled out either: the account email at these sites may differ from the mailbox address.
 
@@ -15,9 +15,12 @@ Fix so far (Track 75): the outcome is now reported truthfully.
 `requestWorkdayPasswordReset` returns `no-answer` when the form is still on screen as submitted after its 20-second answer wait, and `resetFlow` (packages/agent/src/workday-account-service.ts) still reads the mailbox and holds as `interrupted` with "…but Workday showed no answer: its Forgot your password? form stayed on screen with no message, and no email arrived within 3 minutes…".
 Regression: the `reset-silent` scenario in testing-harness/browser/workday-account-run.ts (`pnpm test:browser:workday-account`), against the fixture's `&reset=silent` mode.
 
-fixture: modelled (the end state, the form left as submitted with no message and no email, is captured from three real hosts' evidence, 2026-11-27; the silent drop itself is modelled)
+fixture: modelled (the end state, the form left as submitted with no message and no email, is captured from three real hosts' evidence, 2026-11-27; the silent drop itself is modelled; the Track 76 dwell drop of the Forgot Password and resend-form submits is modelled on the 2026-11-24 widget read)
 
-Open: waiting on the candidate's decision whether the one-second wait may also cover the forgot-password (and resend) submits (an AGENTS.md site-safeguard change); until then these hosts stay held.
+The candidate extended the one-second wait to the forgot-password and resend-verification submits on 2026-11-27 ("Yes, extend the 1-second wait"; AGENTS.md's site-safeguard invariant).
+Fix (Track 76): `requestWorkdayPasswordReset` clicks the Forgot Password submit no sooner than 1 second after the form's email field appears (`waitAfterFormShown`, `SUBMIT_DWELL_MS` in packages/browser/src/ats/workday-account.ts), and `resendWorkdayVerification` waits the same way before it submits an email-only resend form.
+Regression: the `reset-dwell` and `resend-form-dwell` scenarios in testing-harness/browser/workday-account-run.ts (`pnpm test:browser:workday-account`), against the fixture's `?dwell=1` mode, which now also drops a Forgot Password or resend-form submit clicked under 500 ms after its button mounts (`&forgot=1`, and the modelled `&resend=form`).
+Open: the too-early drop is still only the likely cause; a live pass on the held hosts (GM, NVIDIA, Carrier, Motorola, Cadence) must get Workday's answer to a reset request before this moves.
 Move to bugs/resolved/ once a real pass gets Workday's answer (an email or a message) to a reset request.
 
 ## Refuted causes

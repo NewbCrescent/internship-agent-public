@@ -153,6 +153,7 @@ const WRAPPER_FILTER = 'xpath=ancestor::*[@data-automation-id="noCaptchaWrapper"
  * Workday's sign-in widget (candidate-experience-apply-flow 2026.47.19) silently drops an account
  * submit made under 500 ms after the form's submit button mounts. The candidate chose on 2026-11-24
  * ("yes a second") to let the agent click no sooner than this long after the form appears.
+ * On 2026-11-27 the candidate extended the same wait to the forgot-password and resend-verification form submits ("Yes, extend the 1-second wait").
  */
 const SUBMIT_DWELL_MS = 1_000;
 const METHOD_EMAIL = '[data-automation-id="SignInWithEmailButton"]';
@@ -253,7 +254,7 @@ async function typeInto(field: Locator, value: string, failure: string): Promise
 
 /**
  * Waits until SUBMIT_DWELL_MS have passed since `shownAt`, the moment the agent first saw the form
- * (its own submit button, or the click filter over it, visible), so time spent typing counts and a
+ * (its own submit button, or the click filter over it, visible; for the Forgot your password? and resend forms, the form's email field visible), so time spent typing counts and a
  * slow page does not wait twice. Real time, even when tests inject a virtual clock for the answer wait.
  */
 async function waitAfterFormShown(page: Page, shownAt: number): Promise<void> {
@@ -666,7 +667,8 @@ const STEP_DETAIL = "a text-message, phone, or security-question step";
 
 /**
  * Clicks the sign-in page's own resend-verification control once, found by its label ("missing", with nothing
- * clicked, when the page shows none). The email field gets the account email only when it holds another value; the
+ * clicked, when the page shows none); an email-only form the control opens is submitted once, no sooner than one
+ * second after it appears (SUBMIT_DWELL_MS). The email field gets the account email only when it holds another value; the
  * password is never touched. Without a confirmation from Workday the result is "sent": the mailbox read decides.
  */
 export async function resendWorkdayVerification(
@@ -700,9 +702,14 @@ export async function resendWorkdayVerification(
     // The control may open an email-only form of its own: it is submitted once.
     if (!submitted && (await emailField(page).count().catch(() => 0)) > 0 && !(await shown(page, PASSWORD))) {
       submitted = true;
+      // The resend form has just shown: its submit waits like the account submits (the candidate's choice, 2026-11-27).
+      const shownAt = Date.now();
       await fillEmail();
       const submit = await authSubmit(page);
-      if (submit) await submit.click({ timeout: 10_000 }).catch(() => { throw new WorkdayAccountStepError("the resend form could not be submitted"); });
+      if (submit) {
+        await waitAfterFormShown(page, shownAt);
+        await submit.click({ timeout: 10_000 }).catch(() => { throw new WorkdayAccountStepError("the resend form could not be submitted"); });
+      }
       return null;
     }
     const errors = await errorText(page);
@@ -737,7 +744,8 @@ async function resetFormUnanswered(page: Page, host: string, email: string, befo
 
 /**
  * Clicks "Forgot your password?" once ("missing", with nothing clicked, when the page shows no such control), types
- * the account email into the form that opens, and submits it once. Without a confirmation the result is "no-answer"
+ * the account email into the form that opens, and submits it once, no sooner than one second after the form appears
+ * (SUBMIT_DWELL_MS). Without a confirmation the result is "no-answer"
  * when the form is still on screen as submitted (resetFormUnanswered), otherwise "sent"; the mailbox read decides
  * either way.
  */
@@ -770,11 +778,14 @@ export async function requestWorkdayPasswordReset(
   });
   if (!opened) return { result: "other", detail: "the Forgot your password? form did not open" };
   if (opened !== "ready") return opened;
+  // The form's email field has just shown: Workday's minimum-time check counts from about here (the candidate's choice, 2026-11-27).
+  const shownAt = Date.now();
   const field = emailField(page);
   if ((await field.count().catch(() => 0)) !== 1) return { result: "other", detail: "the Forgot your password? form has unexpected fields" };
   await typeInto(field.first(), email, "the email field could not be filled");
   const submit = await authSubmit(page);
   if (!submit) return { result: "other", detail: "the Forgot your password? form has no submit control" };
+  await waitAfterFormShown(page, shownAt);
   const before = await scopeText(page);
   const errorsBefore = await errorText(page);
   await submit.click({ timeout: 10_000 }).catch(() => { throw new WorkdayAccountStepError("the Forgot your password? submit could not be clicked"); });
