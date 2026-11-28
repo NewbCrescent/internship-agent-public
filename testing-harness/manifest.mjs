@@ -482,6 +482,30 @@ export const suiteManifest = [
     description: "pnpm profile:coursework against a disposable workspace: validates the whole file before opening the database (strict keys, so no grades; statuses; duplicate codes; ID-like numbers; at most 40 courses), replaces the set atomically under the pipeline lock, prints added/changed/removed lines and the coursework answer, skips an unchanged set, dry run writes nothing, and --list shows the saved courses."
   },
   {
+    id: "profile-address-command",
+    features: ["profile", "database"],
+    tier: "local",
+    script: "test:agent:profile-address",
+    requires: ["node", "pnpm", "node-sqlite"],
+    network: "none",
+    mutation: "local-temporary",
+    timeoutMs: 45_000,
+    reportPrefixes: [],
+    description: "pnpm profile:address against a disposable workspace with fictional values (Track 84): validates the file with the profile schema's address fields before opening the database (unknown keys refused by name, over-long values refused without echoing them, an empty file refused), saves through updateCandidateProfile under the pipeline lock keeping every other profile field, clears a field given as an empty string, skips the lock when nothing changes, dry run writes nothing, a held lock writes nothing, --list shows set or not set, and no address value ever appears in the output."
+  },
+  {
+    id: "profile-address-cli",
+    features: ["profile"],
+    tier: "benchmark",
+    script: "profile:address",
+    requires: ["node", "pnpm", "node-sqlite"],
+    network: "none",
+    mutation: "local-profile-database",
+    timeoutMs: 60_000,
+    reportPrefixes: [],
+    description: "Explicit operational command, never selected by a gate: sets or lists the candidate profile's mailing address fields in the chosen workspace under the pipeline lock, printing field names only. Agents never run it against the real workspace without the manager's clearance."
+  },
+  {
     id: "profile-resume-command",
     features: ["profile", "browser"],
     tier: "local",

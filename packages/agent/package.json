@@ -34,6 +34,7 @@
     "test:aliases:local": "vitest --root ../.. run testing-harness/agent/question-aliases.integration.test.ts",
     "test:pause-review:local": "vitest --root ../.. run testing-harness/agent/pause-review.integration.test.ts",
     "test:profile-coursework": "vitest --root ../.. run testing-harness/agent/profile-coursework.integration.test.ts",
+    "test:profile-address": "vitest --root ../.. run testing-harness/agent/profile-address.integration.test.ts",
     "test:profile-resume": "vitest --root ../.. run testing-harness/agent/profile-resume.integration.test.ts",
     "test:workday-account": "vitest --root ../.. run testing-harness/agent/workday-account.test.ts",
     "test:workday-account:local": "vitest --root ../.. run testing-harness/agent/workday-account-store.integration.test.ts",
