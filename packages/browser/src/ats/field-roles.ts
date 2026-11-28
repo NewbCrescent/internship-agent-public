@@ -8,7 +8,8 @@ type RolePattern = { role: FieldRole; pattern: RegExp };
  * questions, which are sensitive by construction — they pause unless the
  * candidate's saved voluntary self-identification answer matches exactly one
  * offered option (ats/self-identification.ts), and answers given in-session
- * are never remembered.
+ * are never remembered. A pronoun question is not `eeo`, even worded "gender
+ * pronouns": it takes the saved pronouns answer (Track 82).
  */
 const ROLE_PATTERNS: RolePattern[] = [
   { role: "email", pattern: /\b(e-?mail|email address)\b/i },
@@ -25,7 +26,7 @@ const ROLE_PATTERNS: RolePattern[] = [
   { role: "name", pattern: /\b(full name|first name|last name|preferred name|your name)\b/i },
   {
     role: "eeo",
-    pattern: /\b(gender|race|racial|ethnicity|ethnic|veteran|disability|sexual orientation|transgender|age over|are you (hispanic|latino)|equal opportunity|voluntary self-identification|demographic|sex(?!\s*offend))\b/i
+    pattern: /\b(gender|race|racial|ethnicity|ethnic|veterans?|disabilit(?:y|ies)|sexual orientation|transgender|age over|hispanic|latin[oaxe]|lgbt\w*|equal opportunity|voluntary self-identification|demographic|sex(?!\s*offend))\b/i
   }
 ];
 
@@ -33,8 +34,11 @@ export function classifyFieldRole(field: BrowserField): FieldRole {
   if (field.kind === "email") return "email";
   if (field.kind === "tel") return "phone";
   if (field.kind === "file") return classifyUploadRole(field.label, field.id);
+  // A pronoun question is the saved pronouns answer's (question-mapper.ts `pronouns`), not self-identification, even
+  // worded "gender pronouns" (Strava, Track 82); "gender identity and pronouns" still names gender and stays eeo.
+  const label = field.label.replace(/\bgender\s+pronouns?\b/gi, "pronouns");
   for (const { role, pattern } of ROLE_PATTERNS) {
-    if (pattern.test(field.label)) return role;
+    if (pattern.test(label)) return role;
   }
   return field.kind === "unknown" ? "unknown" : "custom";
 }

@@ -1014,7 +1014,18 @@ export function createPlaywrightPage(page: Page): BrowserPage {
       } else if (field.kind === "checkbox") {
         // A checkbox group answered as one question: check the one chosen option.
         const group = shape.group ? control : within().getByRole("group", { name: field.label });
-        await group.getByRole("checkbox", { name: option, exact: true }).first().check({ timeout: 10_000 });
+        const box = group.getByRole("checkbox", { name: option, exact: true }).first();
+        if ((await box.count()) === 0) throw new FieldUnfillable("the option was not found");
+        try {
+          await box.check({ timeout: 10_000 });
+        } catch {
+          // A box drawn under an icon (Ashby's checkbox span holds an svg) may refuse the click: its own label takes it (Track 82).
+          const id = await box.getAttribute("id").catch(() => null);
+          const label = id ? within().locator(`label[for="${cssValue(id)}"]`) : null;
+          if (!label || (await label.count()) !== 1) throw new FieldUnfillable("the site did not keep the choice");
+          await label.click({ timeout: 10_000 });
+          if (!(await box.isChecked().catch(() => false))) throw new FieldUnfillable("the site did not keep the choice");
+        }
       } else {
         await within().getByRole("radio", { name: option }).first().check({ timeout: 10_000 });
       }
@@ -2464,11 +2475,16 @@ export function collectControlsIn(root: Element): RawControl[] {
         const legend = group.querySelector("legend");
         const rawLabel = textOf(legend) || byIds(group.getAttribute("aria-labelledby")) || collapse(group.getAttribute("aria-label")) || textOf(titleLabel) || "";
         const checked = boxes.filter((box) => box.checked).map(optionLabel).filter(Boolean);
+        // Ashby names each box of a checkbox group after its own option ("She/her", "He/him"), so no box name is the
+        // question's: the group carries a data-ia-control tag instead (Track 82, stop evidence of run <run id>, 2026-11-28).
+        const names = new Set(boxes.map((box) => box.name));
+        const groupId = group.id
+          || (names.size === 1 && boxes[0]!.name ? boxes[0]!.name : names.size > 1 ? refOf(group) : `checkbox-group-${groupsDone.size}`);
         controls.push({
           tag: "input",
           type: "checkbox",
           widget: "checkbox-group",
-          id: group.id || boxes[0]!.name || `checkbox-group-${groupsDone.size}`,
+          id: groupId,
           label: unstar(rawLabel) || undefined,
           required: group.getAttribute("aria-required") === "true" || boxes.some((box) => box.required) || MARKER.test(rawLabel)
             || (!group.closest(TEXTING_CONSENT) && ashbyRequired(group)),

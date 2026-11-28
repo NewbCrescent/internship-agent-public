@@ -114,6 +114,11 @@ describe("never-save rules", () => {
     expect(reason("Your favorite tools", { sensitive: true })).toBe("sensitive");
     expect(reason("Date of birth")).toBe("sensitive");
     expect(reason("Are you a U.S. citizen?", { fieldKind: "select" })).toBe("sensitive");
+    // (Track 82) LGBTQ+ membership and "Latine" wordings are self-identification too.
+    expect(reason("LGBTQIA+ identity")).toBe("sensitive");
+    expect(reason("Are you Latine?")).toBe("sensitive");
+    // (Track 82, round 3) Plural "veterans" wordings too.
+    expect(reason("Are you affiliated with a veterans group?")).toBe("sensitive");
   });
 
   it("never saves contact details", () => {

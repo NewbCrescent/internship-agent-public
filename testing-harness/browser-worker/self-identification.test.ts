@@ -1,13 +1,19 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  classifyFieldRole,
+  isIdentityQuestion,
   matchSelfIdentificationOption,
   planAutofill,
   RACE_ONLY_DECLINE_REASON,
   selfIdentificationCategory,
+  VETERAN_CLASSIFICATION_EMPTY_REASON,
+  veteranClassificationLeftEmpty,
   type FieldResolution
 } from "@internship-agent/browser";
-import { SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON, type BrowserField, type SelfIdentificationAnswers } from "@internship-agent/domain";
+import { SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON, type BrowserField, type PauseRecord, type SelfIdentificationAnswers } from "@internship-agent/domain";
+
+import { pauseReviewEligible } from "../../packages/agent/src/pause-recheck";
 
 // Each case saves one answer at a time: these are option-table checks, not a candidate.
 function field(label: string, options: string[] | undefined, kind: BrowserField["kind"] = "select"): BrowserField {
@@ -103,7 +109,6 @@ describe("voluntary self-identification option matching", () => {
   });
 
   it("holds when the question is not a voluntary single-category select or radio", () => {
-    expect(pick(field("Gender", ["Male", "Female"]), { eeo_gender: "female" })).toBeNull();
     expect(pick(field("Gender", undefined, "text"), { eeo_gender: "female" })).toBeNull();
     expect(pick(field("Gender", undefined, "textarea"), { eeo_gender: "female" })).toBeNull();
     expect(pick(field("Disability", ["Yes", "No", "I do not want to answer"], "checkbox"), { eeo_disability_status: "has_disability" })).toBeNull();
@@ -230,10 +235,10 @@ describe("sexual orientation and transgender identity (2026-11-24)", () => {
     expect(pick(field("Sexual orientation", ["Bisexual", "Asexual", "Decline to answer"]), { eeo_sexual_orientation: "asexual" })).toBe("Asexual");
   });
 
-  it("holds without a decline option, with two matches, or on an LGBTQ+ question", () => {
+  it("holds without a decline option or with two matches; an LGBTQ+ question takes both saved answers (Track 82)", () => {
     expect(pick(field("Sexual orientation", ["Gay", "Queer", "Heterosexual"]), { eeo_sexual_orientation: "queer" })).toBeNull();
     expect(pick(field("Sexual orientation", ["Gay man", "Gay woman", "Decline to answer"]), { eeo_sexual_orientation: "gay" })).toBeNull();
-    expect(pick(field("Do you identify as LGBTQ+?", ["Yes", "No", "Decline to answer"]), { eeo_sexual_orientation: "queer", eeo_transgender: "transgender" })).toBeNull();
+    expect(pick(field("Do you identify as LGBTQ+?", ["Yes", "No", "Decline to answer"]), { eeo_sexual_orientation: "queer", eeo_transgender: "transgender" })).toBe("Yes");
     expect(pick(field("What is your sexual orientation and gender?", ["Queer", "Woman", "Decline to answer"]), { eeo_sexual_orientation: "queer", eeo_gender: "female" })).toBeNull();
   });
 
@@ -334,5 +339,335 @@ describe("race-only lists take their decline option (the candidate's rule, 2026-
     expect(matched.decisions[0]).toMatchObject({
       action: "choose", value: "White", reason: "Your saved voluntary self-identification answer matches one of the offered options."
     });
+  });
+});
+
+describe("held self-identification questions (Track 82, fictional answers)", () => {
+  const optional = (label: string, kind: BrowserField["kind"], options?: string[]): BrowserField =>
+    ({ ...field(label, options, kind), required: false });
+  const resolve = (target: BrowserField, answers: SelfIdentificationAnswers): FieldResolution => {
+    const saved = matchSelfIdentificationOption(target, answers);
+    if (saved) return { status: "SELF_IDENTIFIED", ...saved };
+    if (veteranClassificationLeftEmpty(target, answers)) return { status: "SELF_IDENTIFIED", key: "eeo_veteran_status", option: "", rule: "veteran_classification_empty" };
+    return { status: "UNAVAILABLE" };
+  };
+  const FICTIONAL_VALUES = /female|male|asian|white|hispanic|latin|queer|gay|heterosexual|transgender|veteran_not_protected|not_veteran|protected_veteran|non_binary|they\/them/i;
+
+  it("answers a transgender list worded \"I do not identify as transgender\"", () => {
+    const target = field("Transgender identity", ["I identify as transgender", "I do not identify as transgender", "I don't wish to answer"]);
+    expect(pick(target, { eeo_transgender: "not_transgender" })).toBe("I do not identify as transgender");
+    expect(pick(target, { eeo_transgender: "transgender" })).toBe("I identify as transgender");
+  });
+
+  it("answers \"I am a veteran or active military\" for any saved veteran, never \"not a veteran or active military\"", () => {
+    const target = field("Veteran status", ["I am a veteran or active military", "I am not a veteran or active military", "I don't wish to answer"]);
+    expect(pick(target, { eeo_veteran_status: "veteran_not_protected" })).toBe("I am a veteran or active military");
+    expect(pick(target, { eeo_veteran_status: "protected_veteran" })).toBe("I am a veteran or active military");
+    // Not serving now is not saved: the not-a-veteran answer does not settle "active military".
+    expect(pick(target, { eeo_veteran_status: "not_veteran" })).toBeNull();
+  });
+
+  it("answers a combined \"not a protected veteran / prefer not to answer\" option by its first part", () => {
+    const protectedOption = "I identify as one or more of the Classifications of Protected Veteran Listed above";
+    const target = field("Please select your Protected Veteran Status. (A definition of each group is provided above.)", [
+      protectedOption, "I am not a protected Veteran / I prefer not to answer"
+    ]);
+    expect(pick(target, { eeo_veteran_status: "not_veteran" })).toBe("I am not a protected Veteran / I prefer not to answer");
+    expect(pick(target, { eeo_veteran_status: "veteran_not_protected" })).toBe("I am not a protected Veteran / I prefer not to answer");
+    expect(pick(target, { eeo_veteran_status: "protected_veteran" })).toBe(protectedOption);
+  });
+
+  it("answers an LGBTQ+ membership question from the saved orientation and transgender answers", () => {
+    const cargurus = field("LGBTQIA+ identity", ["I identify as LGBTQIA+", "I do not identify as LGBTQIA+", "I don't wish to answer"]);
+    const community = field(
+      "Do you consider yourself a member of the Lesbian, Gay, Bisexual and/or Transgender, Queer and Questioning (LGBTQ) community?",
+      ["Yes", "No", "Prefer not to say"],
+      "radio"
+    );
+    expect(selfIdentificationCategory(cargurus)).toBe("lgbtq");
+    expect(selfIdentificationCategory(community)).toBe("lgbtq");
+    expect(classifyFieldRole(cargurus)).toBe("eeo");
+    expect(matchSelfIdentificationOption(cargurus, { eeo_sexual_orientation: "gay" })).toEqual({ key: "eeo_sexual_orientation", option: "I identify as LGBTQIA+" });
+    expect(matchSelfIdentificationOption(community, { eeo_sexual_orientation: "gay" })).toEqual({ key: "eeo_sexual_orientation", option: "Yes" });
+    expect(matchSelfIdentificationOption(community, { eeo_sexual_orientation: "heterosexual", eeo_transgender: "transgender" }))
+      .toEqual({ key: "eeo_transgender", option: "Yes" });
+    const straightCis: SelfIdentificationAnswers = { eeo_sexual_orientation: "heterosexual", eeo_transgender: "not_transgender" };
+    expect(pick(cargurus, straightCis)).toBe("I do not identify as LGBTQIA+");
+    expect(pick(community, straightCis)).toBe("No");
+    for (const answers of [{ eeo_sexual_orientation: "heterosexual" }, { eeo_sexual_orientation: "asexual", eeo_transgender: "not_transgender" }, {}] as SelfIdentificationAnswers[]) {
+      expect(pick(cargurus, answers), JSON.stringify(answers)).toBeNull();
+      expect(pick(community, answers), JSON.stringify(answers)).toBeNull();
+    }
+    expect(pick(field("LGBTQIA+ identity", ["I identify as LGBTQIA+", "I do not identify as LGBTQIA+"]), { eeo_sexual_orientation: "gay" })).toBeNull();
+    expect(pick(field("LGBTQ+ and gender identity", ["Yes", "No", "I don't wish to answer"]), { eeo_sexual_orientation: "gay", eeo_gender: "female" })).toBeNull();
+  });
+
+  it("classifies Hispanic, Latinx, or Spanish origin questions as EEO and answers them from the saved race or ethnicity", () => {
+    const origin = field("Are you of Hispanic, Latinx or Spanish origin?", ["Yes", "No", "I don't wish to answer"]);
+    const workday = field("Please indicate if you are Hispanic or Latino", ["Select One", "Yes", "No"]);
+    for (const target of [origin, workday]) {
+      expect(classifyFieldRole(target), target.label).toBe("eeo");
+      expect(selfIdentificationCategory(target), target.label).toBe("hispanic");
+      expect(pick(target, { eeo_race_ethnicity: "hispanic_or_latino" }), target.label).toBe("Yes");
+      expect(pick(target, { eeo_race_ethnicity: "white" }), target.label).toBe("No");
+    }
+    expect(classifyFieldRole(field("Have you lived in Latin America?", ["Yes", "No"]))).not.toBe("eeo");
+  });
+
+  it("fills gender, race, and Hispanic lists without a decline option, never the other categories", () => {
+    expect(pick(field("Gender", ["Male", "Female"]), { eeo_gender: "female" })).toBe("Female");
+    expect(pick(field("Sex", ["Female", "Male"]), { eeo_gender: "female" })).toBe("Female");
+    expect(pick(field("What gender do you identify as?", ["Female", "Male", "Non-binary"], "radio"), { eeo_gender: "non_binary" })).toBe("Non-binary");
+    const race = field("Please identify your race", [
+      "American Indian or Alaskan Native", "Asian", "Black or African American", "White", "Native Hawaiian or Other Pacific Islander", "Two or More Races"
+    ]);
+    expect(pick(race, { eeo_race_ethnicity: "asian" })).toBe("Asian");
+    // No decline option to take: the race-only rule does not apply.
+    expect(pick(race, { eeo_race_ethnicity: "hispanic_or_latino" })).toBeNull();
+    expect(pick(field("Do you have a disability?", ["Yes", "No"]), { eeo_disability_status: "has_disability" })).toBeNull();
+    expect(pick(field("Are you a veteran?", ["Yes", "No"]), { eeo_veteran_status: "protected_veteran" })).toBeNull();
+    expect(pick(field("Sexual orientation", ["Gay", "Queer", "Heterosexual"]), { eeo_sexual_orientation: "queer" })).toBeNull();
+    expect(pick(field("Do you identify as transgender?", ["Yes", "No"]), { eeo_transgender: "transgender" })).toBeNull();
+    const long = `Gender (this voluntary question helps us meet our reporting obligations; ${"it is optional and kept apart from your application ".repeat(2)})`;
+    expect(long.length).toBeGreaterThan(100);
+    expect(pick(field(long, ["Female", "Male"]), { eeo_gender: "female" })).toBeNull();
+  });
+
+  it("reads Lever's concatenated \"asSelect all that apply\" ethnicity list", () => {
+    const tinder = field("I identify my ethnicity asSelect all that apply", [
+      "African American/Black", "East Asian (Chinese, Japanese, Korean, Mongolian, Tibetan, Taiwanese, etc.)", "Hispanic, Latinx, or Spanish origin",
+      "Middle Eastern or North African", "Native American/Alaska Native/First Nations", "Pacific Islander or Native Hawaiian",
+      "South Asian (Bangladeshi, Bhutanese, Indian, Nepali, Pakistani, Sri Lankan)", "Southeast Asian (Burmese, Cambodian, Filipino, Hmong)",
+      "White/Caucasian", "Bi-Racial/Mixed Race - Having 2 or more racial/ethnic groups", "Another race, ethnicity, or origin", "I prefer not to disclose"
+    ], "checkbox");
+    expect(selfIdentificationCategory(tinder)).toBe("race");
+    expect(pick(tinder, { eeo_race_ethnicity: "white" })).toBe("White/Caucasian");
+    expect(pick(tinder, { eeo_race_ethnicity: "hispanic_or_latino" })).toBe("Hispanic, Latinx, or Spanish origin");
+    expect(pick(tinder, { eeo_race_ethnicity: "two_or_more_races" })).toBe("Bi-Racial/Mixed Race - Having 2 or more racial/ethnic groups");
+    expect(pick(tinder, { eeo_race_ethnicity: "asian" })).toBeNull();
+    const hermeus = field("I identify my ethnicity asSelect all that apply", [
+      "Black / African American", "East Asian", "Hispanic / Latinx", "South Asian", "White / Caucasian", "Two or more races"
+    ], "checkbox");
+    expect(pick(hermeus, { eeo_race_ethnicity: "white" })).toBe("White / Caucasian");
+  });
+
+  it("sends pronoun questions to the saved pronouns, even worded \"gender pronouns\"", () => {
+    const radio = field("What are your personal gender pronouns?", ["They/Them/Theirs", "She/Her/Hers", "He/Him/His", "I don't wish to answer", "I prefer to self-describe"], "radio");
+    const text = field("We are dedicated to fostering the same safe and inclusive environment for our candidates as our employees. What are your personal gender pronouns?", undefined, "text");
+    const boxes = field("What pronouns do you use?", ["She/her/hers", "He/him/his", "They/them/theirs", "Prefer not to answer"], "checkbox");
+    expect(classifyFieldRole(radio)).toBe("custom");
+    expect(classifyFieldRole(text)).toBe("custom");
+    expect(classifyFieldRole(field("Gender identity and pronouns", ["Man", "Woman", "I don't wish to answer"]))).toBe("eeo");
+    const pronouns: FieldResolution = { status: "RESOLVED", key: "pronouns", scope: "global", display: "he/him", value: "he/him" };
+    const result = plan([radio, text, boxes], [[radio.id, pronouns], [text.id, pronouns], [boxes.id, pronouns]]);
+    expect(result.pauses).toEqual([]);
+    expect(result.decisions[0]).toMatchObject({ action: "choose", value: "He/Him/His", basis: { kind: "fact", key: "pronouns" } });
+    expect(result.decisions[1]).toMatchObject({ action: "fill", value: "he/him" });
+    expect(result.decisions[2]).toMatchObject({ action: "choose", value: "He/him/his", basis: { kind: "fact", key: "pronouns" } });
+  });
+
+  it("leaves optional veteran classifications empty for a saved not-a-veteran or not-protected answer", () => {
+    const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const fields = [
+      optional("Disabled Veteran", "checkbox"),
+      optional("Armed Forces Service Medal Veteran", "checkbox"),
+      optional("Recently Separated Veteran", "checkbox"),
+      optional("Newly Separated Veteran Discharge Date Month", "select", months),
+      optional("Newly Separated Veteran Discharge Date Year", "text")
+    ];
+    for (const value of ["not_veteran", "veteran_not_protected"]) {
+      const answers: SelfIdentificationAnswers = { eeo_veteran_status: value };
+      for (const target of fields) expect(veteranClassificationLeftEmpty(target, answers), `${target.label} ${value}`).toBe(true);
+      const result = plan(fields, fields.map((target) => [target.id, resolve(target, answers)]));
+      expect(result.pauses).toEqual([]);
+      for (const entry of result.decisions) {
+        expect(entry).toMatchObject({ action: "skip", value: null, reason: VETERAN_CLASSIFICATION_EMPTY_REASON });
+        expect(entry.reason).not.toMatch(FICTIONAL_VALUES);
+      }
+    }
+  });
+
+  it("pauses a veteran classification any other saved answer, a required field, or a different label leaves open", () => {
+    const box = optional("Disabled Veteran", "checkbox");
+    const notVeteran: SelfIdentificationAnswers = { eeo_veteran_status: "not_veteran" };
+    const cases: Array<[BrowserField, SelfIdentificationAnswers]> = [
+      [box, { eeo_veteran_status: "protected_veteran" }],
+      [box, {}],
+      [{ ...box, required: true }, notVeteran],
+      [optional("I am not a protected veteran", "checkbox"), notVeteran],
+      [optional("Veteran", "checkbox"), notVeteran]
+    ];
+    for (const [target, answers] of cases) {
+      expect(veteranClassificationLeftEmpty(target, answers), `${target.label} ${JSON.stringify(answers)}`).toBe(false);
+      const result = plan([target], [[target.id, resolve(target, answers)]]);
+      expect(result.decisions[0], target.label).toMatchObject({ action: "pause" });
+      expect(result.pauses[0], target.label).toMatchObject({ sensitive: true });
+    }
+  });
+
+  it("keeps the newly classified EEO wordings out of the AI pause review", () => {
+    const pauseOf = (target: BrowserField): PauseRecord => ({
+      fieldId: target.id, label: target.label, question: `How should "${target.label}" be answered?`, suggestedKey: null, suggestedScope: null,
+      safeguard: false, sensitive: false, upload: false, status: "open", answer: null, draft: null, fieldKind: target.kind, options: target.options
+    });
+    for (const target of [
+      field("Are you of Hispanic, Latinx or Spanish origin?", ["Yes", "No", "I don't wish to answer"]),
+      field("LGBTQIA+ identity", ["I identify as LGBTQIA+", "I do not identify as LGBTQIA+", "I don't wish to answer"])
+    ]) {
+      expect(pauseReviewEligible(pauseOf(target), target), target.label).toBe(false);
+    }
+    const ordinary = field("Which office would you prefer?", ["Austin", "Remote"]);
+    expect(pauseReviewEligible(pauseOf(ordinary), ordinary)).toBe(true);
+  });
+
+  it("never names a saved value in a self-identification decision reason", () => {
+    const targets: Array<[BrowserField, SelfIdentificationAnswers]> = [
+      [field("LGBTQIA+ identity", ["I identify as LGBTQIA+", "I do not identify as LGBTQIA+", "I don't wish to answer"]), { eeo_sexual_orientation: "queer" }],
+      [field("Sex", ["Female", "Male"]), { eeo_gender: "female" }],
+      [field("Are you of Hispanic, Latinx or Spanish origin?", ["Yes", "No", "I don't wish to answer"]), { eeo_race_ethnicity: "hispanic_or_latino" }],
+      [field("Veteran status", ["I am a veteran or active military", "I am not a veteran or active military", "I don't wish to answer"]), { eeo_veteran_status: "protected_veteran" }]
+    ];
+    for (const [target, answers] of targets) {
+      const result = plan([target], [[target.id, resolve(target, answers)]]);
+      expect(result.pauses, target.label).toEqual([]);
+      expect(result.decisions[0]!.reason, target.label).not.toMatch(FICTIONAL_VALUES);
+    }
+  });
+});
+
+describe("protected answers answer only identity questions (Track 82, rounds 2–3, fictional answers)", () => {
+  const YES_NO = ["Yes", "No", "Prefer not to say"];
+  const TOYOTA = "Do you consider yourself a member of the Lesbian, Gay, Bisexual and/or Transgender, Queer and Questioning (LGBTQ) community?";
+  const optional = (label: string, kind: BrowserField["kind"], options?: string[]): BrowserField =>
+    ({ ...field(label, options, kind), required: false });
+  // Built exactly as resolveFields in packages/agent/src/browser-orchestrator.ts builds it.
+  const resolve = (target: BrowserField, answers: SelfIdentificationAnswers): FieldResolution => {
+    const saved = matchSelfIdentificationOption(target, answers);
+    return saved ? { status: "SELF_IDENTIFIED", key: saved.key, option: saved.option } : { status: "UNAVAILABLE" };
+  };
+  const hispanic: SelfIdentificationAnswers = { eeo_race_ethnicity: "hispanic_or_latino" };
+  const veteran: SelfIdentificationAnswers = { eeo_veteran_status: "protected_veteran" };
+  const disabled: SelfIdentificationAnswers = { eeo_disability_status: "has_disability" };
+  const lgbtq: SelfIdentificationAnswers = { eeo_sexual_orientation: "gay" };
+  const gender: SelfIdentificationAnswers = { eeo_gender: "female" };
+  const negatives: Array<[string, SelfIdentificationAnswers, string[]?]> = [
+    // Round 2 (N1–N11, N13, N14)
+    ["Are you interested in joining our LGBTQ+ employee resource group?", lgbtq],
+    ["Do you have experience working with LGBTQ+ communities?", lgbtq],
+    ["Are you a member of the Latinx Professionals Association?", hispanic],
+    ["Do you speak Spanish? (Hispanic markets role)", hispanic],
+    ["Are you interested in our disability ERG?", disabled],
+    ["Do you identify as an LGBTQ+ ally?", { eeo_sexual_orientation: "heterosexual", eeo_transgender: "not_transgender" }],
+    ["Did you attend a Hispanic-Serving Institution?", hispanic],
+    ["Are you a member of a veterans' association?", veteran],
+    ["Would you like to join our Women in Engineering network? (gender)", gender, ["Yes", "No", "I don't wish to answer"]],
+    ["Do you have experience supporting employees with disabilities?", disabled],
+    ["Are you interested in Hispanic/Latino outreach programs?", hispanic],
+    ["Do you consider yourself part of the Hispanic business community?", hispanic],
+    ["Do you consider yourself a member of the LGBTQ+ ally community?", lgbtq],
+    // The round-2 recheck's probes
+    ["Are you part of a Hispanic student group?", hispanic],
+    ["Are you affiliated with a veterans group?", veteran],
+    ["Do you identify with any disability advocacy groups?", disabled],
+    ["Are you an LGBTQ+ advocate?", lgbtq],
+    ["Are you passionate about LGBTQ+ equity?", lgbtq],
+    ["Are you comfortable with Hispanic customers?", hispanic],
+    ["Are you familiar with disability accessibility standards (WCAG)?", disabled],
+    ["Are you a veteran-owned business?", veteran],
+    ["Are you a veteran of the software industry?", veteran],
+    ["Are you applying through a veterans hiring initiative?", veteran],
+    ["Which LGBTQ+ community events would you attend?", lgbtq],
+    ["Do you identify as an LGBTQ+ ally?", lgbtq],
+    // A parenthetical that is not a list hint stays part of the question (round 3)
+    ["Are you a veteran? (veteran-owned business)", veteran],
+    ["Gender (Women in Engineering network)", gender],
+    ["Are you LGBTQ+ (ally)?", lgbtq],
+    ["Disability (accessibility standards WCAG)", disabled],
+    ["Veteran (of the software industry)", veteran],
+    ["Are you Hispanic (customers)?", hispanic]
+  ];
+  const FICTIONAL_VALUE_TOKENS = /gay|hispanic_or_latino|female|has_disability|protected_veteran/i;
+
+  it("never answers a wording that is not, in full, an identity shape", () => {
+    for (const [label, answers, options] of negatives) {
+      const target = field(label, options ?? YES_NO);
+      expect(isIdentityQuestion(label), label).toBe(false);
+      expect(matchSelfIdentificationOption(target, answers), label).toBeNull();
+      expect(classifyFieldRole(target), label).toBe("eeo");
+      const result = plan([target], [[target.id, resolve(target, answers)]]);
+      expect(result.decisions[0], label).toMatchObject({ action: "pause" });
+      expect(result.pauses[0], label).toMatchObject({ sensitive: true });
+      for (const entry of result.decisions) expect(entry.reason, label).not.toMatch(FICTIONAL_VALUE_TOKENS);
+    }
+  });
+
+  it("leaves a veteran classification empty only on its exact label", () => {
+    const notVeteran: SelfIdentificationAnswers = { eeo_veteran_status: "not_veteran" };
+    const months = ["January", "February", "March"];
+    for (const target of [
+      { ...field("Disabled Veteran Outreach Program", ["Disabled Veteran Outreach Program"], "checkbox"), required: false },
+      optional("Disabled Veteran Outreach Program", "checkbox"),
+      optional("Disabled veterans group member", "checkbox"),
+      optional("Veteran discharge date of your spouse", "select", months)
+    ]) {
+      expect(veteranClassificationLeftEmpty(target, notVeteran), target.label).toBe(false);
+    }
+    for (const target of [
+      optional("Disabled Veteran", "checkbox"),
+      optional("Armed Forces Service Medal Veteran", "checkbox"),
+      optional("Recently Separated Veteran", "checkbox"),
+      optional("Newly Separated Veteran Discharge Date Month", "select", months)
+    ]) {
+      expect(veteranClassificationLeftEmpty(target, notVeteran), target.label).toBe(true);
+    }
+  });
+
+  it("still answers real self-identification wordings", () => {
+    const orientation = field("How would you describe your sexual orientation? (mark all that apply)", [
+      "Asexual", "Bisexual and/or pansexual", "Gay", "Heterosexual", "Lesbian", "Queer", "I prefer to self-describe", "I don't wish to answer"
+    ], "checkbox");
+    expect(pick(field("Gender", ["Male", "Female", "Decline To Self Identify"]), gender)).toBe("Female");
+    expect(pick(field("Are you Hispanic/Latino?", ["Yes", "No", "Decline To Self Identify"]), hispanic)).toBe("Yes");
+    expect(pick(greenhouseVeteran, { eeo_veteran_status: "not_veteran" })).toBe("I am not a protected veteran");
+    expect(pick(workdayVeteran, { eeo_veteran_status: "not_veteran" })).toBe("I am not a veteran");
+    expect(pick(yesNoVeteran, veteran)).toBe("Yes");
+    expect(pick(field("Are you a veteran?", YES_NO), veteran)).toBe("Yes");
+    expect(pick(disability, { eeo_disability_status: "no_disability" })).toBe("No, I do not have a disability");
+    expect(pick(field("Do you have a disability?", YES_NO), disabled)).toBe("Yes");
+    expect(pick(field("LGBTQIA+ identity", ["I identify as LGBTQIA+", "I do not identify as LGBTQIA+", "I don't wish to answer"]), lgbtq))
+      .toBe("I identify as LGBTQIA+");
+    expect(pick(field("Do you identify as LGBTQ+?", YES_NO), lgbtq)).toBe("Yes");
+    expect(pick(field("Do you identify as transgender?", ["Yes", "No", "I don't wish to answer"]), { eeo_transgender: "transgender" })).toBe("Yes");
+    expect(pick(orientation, { eeo_sexual_orientation: "queer" })).toBe("Queer");
+    expect(pick(field(TOYOTA, YES_NO, "radio"), lgbtq)).toBe("Yes");
+    expect(pick(field("Sex", ["Female", "Male"]), gender)).toBe("Female");
+    expect(pick(field("Are you of Hispanic, Latinx or Spanish origin?", ["Yes", "No", "I don't wish to answer"]), hispanic)).toBe("Yes");
+    expect(pick(field("Please indicate if you are Hispanic or Latino", ["Select One", "Yes", "No"]), hispanic)).toBe("Yes");
+  });
+
+  it("counts real self-identification labels, with or without list hints, as identity questions", () => {
+    for (const label of [
+      "Gender", "Sex", "Race", "Race/Ethnicity", "Ethnicity", "What is your race or ethnicity?", "Disability", "Disability Status",
+      "Veteran Status", "Veteran status", "Sexual orientation", "Transgender identity", "LGBTQIA+ identity",
+      "What is your gender?", "What is your racial category?", "Are you Hispanic/Latino?", "Are you a protected veteran?", "Are you a veteran?",
+      "Do you have a disability?", "Do you identify as transgender?", "Do you identify as LGBTQ+?",
+      "How would you describe your gender identity? (mark all that apply)",
+      "How would you describe your racial/ethnic background? (mark all that apply)",
+      "How would you describe your sexual orientation? (mark all that apply)",
+      "Please identify your race",
+      "Please indicate if you are Hispanic or Latino",
+      "Please select the veteran status which most accurately describes your status",
+      "Please select your Protected Veteran Status. (A definition of each group is provided above.)",
+      "What gender do you identify as?",
+      "I identify my ethnicity asSelect all that apply",
+      "I identify my ethnicity as (mark all that apply):",
+      "Are you of Hispanic, Latinx or Spanish origin?",
+      "Which ethnicity(ies) do you identify with? Please select all that apply.",
+      "How do you identify your sexual orientation? Please select all that apply.",
+      "Please select the ethnicity(ies) which most accurately describes how you identify yourself.",
+      TOYOTA
+    ]) {
+      expect(isIdentityQuestion(label), label).toBe(true);
+    }
   });
 });

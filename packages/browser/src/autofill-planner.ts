@@ -10,7 +10,7 @@ import { clipDecisionText } from "@internship-agent/domain";
 import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, fieldOfStudyCategoryOption, isStandardAnswerKey, matchOfferedOption, namedSchoolRelation, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption, usPersonYesNoOption } from "@internship-agent/domain";
 
 import { classifyFieldRole, classifyUploadRole, isSensitiveRole } from "./ats/field-roles";
-import { RACE_ONLY_DECLINE_REASON, type SelfIdentificationRule } from "./ats/self-identification";
+import { RACE_ONLY_DECLINE_REASON, VETERAN_CLASSIFICATION_EMPTY_REASON, type SelfIdentificationRule } from "./ats/self-identification";
 import { isHearAboutQuestion, pickHearAboutOption } from "./ats/hear-about";
 import { usStateAlternate } from "./ats/us-states";
 import { isListSearchBox, isSafeguardField, isSignupField, stripRequiredMarker } from "./form-recognition";
@@ -150,9 +150,14 @@ export function planAutofill(form: RecognizedForm, inputs: PlannerInputs): Autof
       // Demographic and equal-opportunity questions are filled only from the
       // candidate's saved voluntary self-identification answers, and only when
       // exactly one offered option matches (or, under the candidate's race-only
-      // rule of 2026-11-26, the list's one decline option); otherwise the candidate answers
-      // in-session and nothing is stored.
+      // rule of 2026-11-26, the list's one decline option); a veteran classification
+      // that the saved veteran answer leaves empty stays empty (Track 82); otherwise
+      // the candidate answers in-session and nothing is stored.
       const saved = inputs.resolutions.get(field.id);
+      if (saved?.status === "SELF_IDENTIFIED" && saved.rule === "veteran_classification_empty") {
+        decisions.push(skip(field, VETERAN_CLASSIFICATION_EMPTY_REASON));
+        continue;
+      }
       if (saved?.status === "SELF_IDENTIFIED" && (field.kind === "select" || field.kind === "radio" || (field.kind === "checkbox" && (field.options?.length ?? 0) >= 2)) &&
         field.options?.includes(saved.option)) {
         decisions.push({
@@ -365,6 +370,18 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
           fieldId: field.id,
           action: "choose",
           value: matches[0]!,
+          basis: { kind: "fact", key: resolution.key, scope: resolution.scope },
+          reason: "A remembered fact matches one of the offered options.",
+          pause: null
+        };
+      }
+      // (Track 82) Saved pronouns pick a longer option of a checkbox group ("He/him/his"), as on a list.
+      const pronoun = resolution.key === "pronouns" ? matchPronounOption(resolution.display, field.options!) : undefined;
+      if (pronoun) {
+        return {
+          fieldId: field.id,
+          action: "choose",
+          value: pronoun,
           basis: { kind: "fact", key: resolution.key, scope: resolution.scope },
           reason: "A remembered fact matches one of the offered options.",
           pause: null

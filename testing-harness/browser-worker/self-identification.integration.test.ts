@@ -17,7 +17,7 @@ import {
   startBrowserRun,
   type VoiceDrafter
 } from "@internship-agent/agent";
-import { RACE_ONLY_DECLINE_REASON, type BrowserPage, type RawControl } from "@internship-agent/browser";
+import { RACE_ONLY_DECLINE_REASON, VETERAN_CLASSIFICATION_EMPTY_REASON, type BrowserPage, type RawControl } from "@internship-agent/browser";
 import {
   createDatabase,
   getBrowserRun,
@@ -262,7 +262,7 @@ describe("saved voluntary self-identification answers in browser runs", () => {
     database.close();
   });
 
-  it("never uses the saved answers for gender questions that are not voluntary self-identification", async () => {
+  it("never uses the saved gender answer for a pronoun or open gender question, and fills a plain gender list without a decline option (Track 82)", async () => {
     const database = disposableDatabase();
     const jobId = approvedJobId(database, saveFixtureSelfIdentification);
     const controls: RawControl[] = [
@@ -274,11 +274,42 @@ describe("saved voluntary self-identification answers in browser runs", () => {
     ];
     const { run, page } = await runWith(database, jobId, controls);
 
-    for (const fieldId of ["pronouns", "identity", "plain"]) {
-      expect(decision(run, fieldId), fieldId).toMatchObject({ action: "pause" });
-      expect(run.pauses.find((pause) => pause.fieldId === fieldId), fieldId).toMatchObject({ sensitive: true });
+    // A pronoun question is the saved pronouns answer's, and none is saved: an ordinary optional question, left
+    // untouched and never answered from the gender answer.
+    expect(decision(run, "pronouns")).toMatchObject({ action: "skip", value: null });
+    expect(run.pauses.find((pause) => pause.fieldId === "pronouns")).toBeUndefined();
+    expect(page.filled.has("pronouns")).toBe(false);
+    expect(decision(run, "identity")).toMatchObject({ action: "pause" });
+    expect(run.pauses.find((pause) => pause.fieldId === "identity")).toMatchObject({ sensitive: true });
+    expect(page.filled.has("identity")).toBe(false);
+    // The fixture's saved gender is "female".
+    expect(page.filled.get("plain")).toBe("Female");
+    expect(decision(run, "plain")).toMatchObject({ action: "choose", basis: { kind: "fact", key: "eeo_gender" } });
+    database.close();
+  });
+
+  it("leaves optional veteran classifications empty for a saved not-a-veteran answer (Track 82)", async () => {
+    const database = disposableDatabase();
+    const jobId = approvedJobId(database, (db) => saveFact(db, "eeo_veteran_status", { kind: "global" }, "not_veteran"));
+    const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const controls: RawControl[] = [
+      { tag: "input", type: "checkbox", id: "disabled-veteran", label: "Disabled Veteran", required: false },
+      { tag: "select", id: "discharge-month", label: "Newly Separated Veteran Discharge Date Month", required: false, options: months },
+      START,
+      SUBMIT
+    ];
+    const { run, page } = await runWith(database, jobId, controls);
+
+    expect(run.pauses).toEqual([]);
+    expect(run.status).toBe("awaiting-approval");
+    for (const fieldId of ["disabled-veteran", "discharge-month"]) {
+      expect(decision(run, fieldId), fieldId).toMatchObject({ action: "skip", value: null, reason: VETERAN_CLASSIFICATION_EMPTY_REASON });
       expect(page.filled.has(fieldId), fieldId).toBe(false);
     }
+    expect(autoSubmitBlockers(run)).toEqual([]);
+    const events = (database.prepare("SELECT detail FROM application_events WHERE job_id = ?").all(jobId) as Array<{ detail: string | null }>)
+      .map((row) => row.detail ?? "");
+    for (const text of [...events, JSON.stringify(run.decisions)]) expect(text).not.toContain("not_veteran");
     database.close();
   });
 

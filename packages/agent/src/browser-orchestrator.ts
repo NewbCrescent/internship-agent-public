@@ -91,6 +91,7 @@ import {
   traceArtifactsDir,
   traceSnapshotsWanted,
   unfilledPause,
+  veteranClassificationLeftEmpty,
   wrapUntracedMethods,
   type ApplyDecisionsOptions,
   type BrowserPage,
@@ -766,7 +767,14 @@ async function resolveFields(
     }
     if (isSensitiveRole(classifyFieldRole(field))) {
       const saved = matchSelfIdentificationOption(field, selfIdentification);
-      resolutions.set(field.id, saved ? { status: "SELF_IDENTIFIED", key: saved.key, option: saved.option, ...(saved.rule ? { rule: saved.rule } : {}) } : { status: "UNAVAILABLE" });
+      if (saved) {
+        resolutions.set(field.id, { status: "SELF_IDENTIFIED", key: saved.key, option: saved.option, ...(saved.rule ? { rule: saved.rule } : {}) });
+      } else if (veteranClassificationLeftEmpty(field, selfIdentification)) {
+        // (Track 82) A saved "not a veteran" or "veteran, not protected" answer leaves a veteran classification empty.
+        resolutions.set(field.id, { status: "SELF_IDENTIFIED", key: "eeo_veteran_status", option: "", rule: "veteran_classification_empty" });
+      } else {
+        resolutions.set(field.id, { status: "UNAVAILABLE" });
+      }
       continue;
     }
     const resolution = await resolveCandidateQuestion(field.label, { ...context, fieldKind: field.kind }, { database });
