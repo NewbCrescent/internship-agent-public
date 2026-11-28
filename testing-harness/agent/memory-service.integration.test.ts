@@ -223,6 +223,66 @@ describe("company-, country-, and protected-scoped answers", () => {
     database.close();
   });
 
+  it("answers conditional, own-expense, and on-site relocation questions from the saved U.S. answers (Track 83)", async () => {
+    const database = workspace();
+    save(database, "willing_to_relocate", { kind: "country", code: "US" }, true);
+    save(database, "work_arrangement", { kind: "global" }, true);
+    const us: QuestionContext = { postingCountryCode: "US" };
+    const fixtureCity: QuestionContext = { postingCountryCode: "US", postingPlaces: [{ city: "Fixture City", countryCode: "US" }] };
+    const onYourOwn = "At this time we do not offer relocation assistance to interns. If hired, are you able to relocate on your own if you are not based locally?";
+    const noStipend = "Are you able to work onsite at the location specified during the role's duration? Please note that, while this role is paid, a separate relocation stipend will not be provided.";
+    // Without a saved own-expense answer, the own-expense question waits.
+    expect(await resolveCandidateQuestion(onYourOwn, us, { database })).toMatchObject({ status: "NEEDS_INPUT" });
+    save(database, "willing_to_relocate_at_own_expense", { kind: "country", code: "US" }, true);
+    for (const [question, context] of [
+      ["If you do not live in the Fixture Bay area, are you able to relocate?", us],
+      ["If you do not currently live a commutable distance, are you able to relocate for the summer for this intern position?", us],
+      ["If this position is located in Fixture City, CO as Hybrid, are you willing to relocate to Fixture City if you are not already local?", fixtureCity],
+      [onYourOwn, us],
+      [noStipend, us]
+    ] as const) {
+      expect(await resolveCandidateQuestion(question, context, { database }), question).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
+    }
+    // A move after the internship stays with the candidate.
+    expect(await resolveCandidateQuestion("Are you able to relocate to any of the locations below following the end of the internship, at Fixture's discretion?", us, { database }))
+      .toMatchObject({ status: "NEEDS_INPUT", reason: "It asks about a permanent move or one after the internship." });
+    database.close();
+  });
+
+  it("answers full-time availability inside the saved window, an ACT question from a saved did-not-take, and County (Track 83, round 2)", async () => {
+    const database = workspace();
+    const airbnbShape = "Are you able to commit to a full-time internship (40 hours per week) from May 24, 2031 - August 13, 2031?";
+    save(database, "available_full_time", { kind: "global" }, true);
+    // Without a saved end date, a dated question waits.
+    save(database, "available_start_date", { kind: "global" }, "2031-05-15");
+    expect(await resolveCandidateQuestion(airbnbShape, {}, { database })).toMatchObject({ status: "NEEDS_INPUT" });
+    save(database, "available_end_date", { kind: "global" }, "2031-08-15");
+    for (const question of [
+      airbnbShape,
+      "Are you available to work full-time (40 hours per week) between June 7, 2031 - August 13, 2031?",
+      "Are you available for a 12-week full-time (40 hours per week) internship during your select term(s)?",
+      "Are you available to work full time?"
+    ]) {
+      expect(await resolveCandidateQuestion(question, {}, { database }), question).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes", fact: { key: "available_full_time" } });
+    }
+    expect(await resolveCandidateQuestion("Are you able to commit to a full-time internship from May 24, 2031 - August 29, 2031?", {}, { database }))
+      .toMatchObject({ status: "NEEDS_INPUT", reason: "It states dates outside your saved availability, or your availability dates are not saved." });
+
+    // ACT: a saved did-not-take answers the score question; a saved score wins; a saved Yes to taking it answers nothing.
+    expect(await resolveCandidateQuestion("ACT Score", {}, { database })).toMatchObject({ status: "NEEDS_INPUT" });
+    save(database, "act_taken", { kind: "global" }, false);
+    expect(await resolveCandidateQuestion("ACT Score", {}, { database })).toMatchObject({ status: "RESOLVED", displayAnswer: "No", fact: { key: "act_taken" } });
+    save(database, "act_score", { kind: "global" }, "30");
+    expect(await resolveCandidateQuestion("ACT Score", {}, { database })).toMatchObject({ status: "RESOLVED", fact: { key: "act_score" } });
+    database.close();
+    const took = workspace();
+    save(took, "act_taken", { kind: "global" }, true);
+    expect(await resolveCandidateQuestion("ACT Score", {}, { database: took })).toMatchObject({ status: "NEEDS_INPUT" });
+    save(took, "county", { kind: "global" }, "Fixture County");
+    expect(await resolveCandidateQuestion("County", {}, { database: took })).toMatchObject({ status: "RESOLVED", displayAnswer: "Fixture County", fact: { key: "county" } });
+    took.close();
+  });
+
   it("answers age thresholds one way only: 18-or-older Yes answers 16-or-older, 16-or-older No answers 18-or-older, never the reverse (Track 57)", async () => {
     const sixteen = "Are you 16 years or older?";
     const eighteen = "Are you 18 or older?";

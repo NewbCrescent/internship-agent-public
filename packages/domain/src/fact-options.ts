@@ -34,14 +34,25 @@ export const FACT_OPTION_KEYS: ReadonlySet<string> = new Set([
   "willing_background_check",
   "graduation_date",
   "sat_score",
-  "act_score"
+  "act_score",
+  // (Track 83)
+  "act_taken",
+  "county"
 ]);
 
 /**
  * `question` is the field's label (a graduation comparison or a test-type question reads it); `closest` says the
  * label asks for the closest date ("Select the closest date"), so a single-month option near the date may be picked.
  */
-export type FactOptionContext = { today?: string; nearPosting: boolean; degreeLevel?: "bachelor" | null; question?: string; closest?: boolean };
+export type FactOptionContext = {
+  today?: string;
+  nearPosting: boolean;
+  degreeLevel?: "bachelor" | null;
+  question?: string;
+  closest?: boolean;
+  /** (Track 83) The profile's two-letter state code, so a "<County>, <ST>" list matches only the profile's state. */
+  regionCode?: string;
+};
 
 /** Option text compared: NFKC, lower case, straight quotes, "-" for dashes, whitespace collapsed. */
 function optionKey(option: string): string {
@@ -259,8 +270,15 @@ const RELOCATION_DISJUNCTION = [
   /\b(?:commut\w*|located|live|living|reside|residing|based|nearby|near|local)\b.{0,80}?\b(?:or|if not)\b.{0,40}?\brelocat/,
   /\brelocat\w*.{0,40}?\bor\b.{0,80}?\b(?:commut\w*|located|live|living|reside|residing|based|nearby|near|local)\b/
 ];
+// Living nearby asked as a condition ("If you do not live in the area, are you able to relocate?") (Track 83).
+const RELOCATION_CONDITIONAL_LOCAL = [
+  /\bif (?:you are|you're|you) (?:not|do not|don't)\b[^?.!]{0,60}?\b(?:local(?:ly)?|live|living|reside|residing|based|commut\w*|nearby|near)\b/,
+  /\bif (?:you are |you're )?not (?:already )?(?:local(?:ly)?|based locally|nearby)\b/
+];
 const RELOCATION_TEMPORARY = /\btemporar\w*/;
-const RELOCATION_LATER = /\bpermanent\w*|\bfull[- ]?time (?:role|position|job|offer|employment|opportunit\w*)\b|\bupon (?:completion|graduation)\b|\bafter (?:you )?graduat\w*|\bpost[- ]?graduat\w*/;
+// A temporary move for the internship or program is the internship relocation itself (Track 83).
+const RELOCATION_FOR_PROGRAM = /\b(?:during|for|throughout) (?:the|this|your) (?:program|internship(?: program)?|summer|duration of (?:the|your) internship)\b/;
+const RELOCATION_LATER = /\bpermanent\w*|\bfull[- ]?time (?:role|position|job|offer|employment|opportunit\w*)\b|\bupon (?:completion|graduation)\b|\bafter (?:you )?graduat\w*|\bpost[- ]?graduat\w*|\bfollowing the (?:end|completion|conclusion) of (?:the |your |this )?internship\b|\bafter (?:the|your|this) internship\b|\bat the end of (?:the|your|this) internship\b|\bonce (?:the|your) internship (?:ends|is over)\b/;
 const RELOCATION_SUPPORT = /\b(?:support|assistance|assist|reimburs\w*|packages?|stipends?|housing|expenses?|costs?|pay for|own expense)\b/;
 const RELOCATION_DATES = [
   /\b(?:january|february|march|april|june|july|august|september|october|november|december|jan|feb|apr|jun|jul|aug|sept?|oct|nov|dec)\b/,
@@ -273,21 +291,23 @@ const RELOCATION_REMOTE = /\bremote(?:ly)?\b/;
 
 /**
  * What else a relocation question asks besides relocating (Track 62): `onSite` when it names office or on-site work
- * or a number of days a week, `local` when it offers living nearby or commuting joined to relocating by "or", and
- * `held` the reason a part the saved relocation answer cannot settle stays open (a temporary or permanent move, who
- * pays, stated dates or lengths, remote work, or living nearby asked alongside relocating). Only the relocation part
- * is answered from the saved relocation answer.
+ * or a number of days a week, `local` when it offers living nearby or commuting joined to relocating by "or", or a
+ * condition: "if you do not live in the area, are you able to relocate?" (Track 83), and `held` the reason a part the
+ * saved relocation answer cannot settle stays open (a temporary move not tied to the internship or program, a
+ * permanent move or one after the internship, who pays, stated dates or lengths, remote work, or living nearby asked
+ * alongside relocating). With `ownExpense` (the own-expense question) who pays is not a held part: the own-expense
+ * answer settles it (Track 83). Only the relocation part is answered from the saved relocation answer.
  */
-export function relocationQuestionParts(question: string): { onSite: boolean; local: boolean; held: string | null } {
+export function relocationQuestionParts(question: string, options: { ownExpense?: boolean } = {}): { onSite: boolean; local: boolean; held: string | null } {
   const text = optionKey(question);
   const onSite = RELOCATION_ON_SITE.test(text);
   const localWords = RELOCATION_LOCAL_WORDS.test(text);
-  const disjunction = RELOCATION_DISJUNCTION.some((pattern) => pattern.test(text));
+  const disjunction = RELOCATION_DISJUNCTION.some((pattern) => pattern.test(text)) || RELOCATION_CONDITIONAL_LOCAL.some((pattern) => pattern.test(text));
   const local = localWords && disjunction;
   let held: string | null = null;
-  if (RELOCATION_TEMPORARY.test(text)) held = "It asks about a temporary move.";
+  if (RELOCATION_TEMPORARY.test(text) && !RELOCATION_FOR_PROGRAM.test(text)) held = "It asks about a temporary move.";
   else if (RELOCATION_LATER.test(text)) held = "It asks about a permanent move or one after the internship.";
-  else if (RELOCATION_SUPPORT.test(text)) held = "It also says who pays for the move or what support comes with it.";
+  else if (!options.ownExpense && RELOCATION_SUPPORT.test(text)) held = "It also says who pays for the move or what support comes with it.";
   else if (RELOCATION_DATES.some((pattern) => pattern.test(text))) held = "It also asks about your availability on stated dates or for a stated length.";
   else if (RELOCATION_REMOTE.test(text)) held = "It also asks about remote work.";
   else if (localWords && !disjunction) held = "It also asks whether you already live nearby or can commute.";
@@ -297,6 +317,8 @@ export function relocationQuestionParts(question: string): { onSite: boolean; lo
 const LOCAL = /\b(?:located|live|living|reside|residing|based)\b.{0,40}\b(?:in|near|within|close to|around)\b/;
 const OWN = /\brelocat\w*\b.{0,60}\b(?:(?:my |your )?own (?:expense|cost)s?|without (?:relocation )?(?:assistance|support|reimbursement)|self[- ]funded)\b/;
 const NEGATED = /\b(?:not|unwilling|unable|cannot|can't|won't|will not)\b/;
+// A willingness statement option ("I am willing to temporarily relocate") (Track 83).
+const WILLING_TO_RELOCATE = /^(?:yes\b[\s,:;.–—-]*)?(?:i am|i'm|im|i would be|i'd be) (?:willing|able|open) to (?:temporarily )?relocat\w*\b/;
 
 const isLocal = (key: string) => LOCAL.test(key) && !key.includes("relocat") && !/^no\b/.test(key) && !NEGATED.test(key);
 const isOwn = (key: string) => OWN.test(key) && !NEGATED.test(key);
@@ -306,7 +328,9 @@ const isOwn = (key: string) => OWN.test(key) && !NEGATED.test(key);
  * you willing to relocate at your own expense?" question: "already located"
  * only when the profile's place is the posting's, else the own-expense option
  * when the saved answer is yes. A plain Yes/No list takes Yes only for a
- * saved yes. Null otherwise (a saved no pauses; nothing is guessed).
+ * saved yes; otherwise a saved yes takes the one option that states the
+ * willingness ("I am willing to temporarily relocate", not negated) (Track 83).
+ * Null otherwise (a saved no pauses; nothing is guessed).
  */
 export function relocationOption(value: boolean, options: readonly string[], nearPosting: boolean): { option: string; local: boolean } | null {
   const keys = options.map(optionKey);
@@ -325,9 +349,10 @@ export function relocationOption(value: boolean, options: readonly string[], nea
   if (own.length === 1) return { option: own[0]!, local: false };
   if (plain) {
     const yes = booleanOption(true, options);
-    return yes ? { option: yes, local: false } : null;
+    if (yes) return { option: yes, local: false };
   }
-  return null;
+  const willing = options.filter((_, index) => WILLING_TO_RELOCATE.test(keys[index]!) && !NEGATED.test(keys[index]!));
+  return willing.length === 1 ? { option: willing[0]!, local: false } : null;
 }
 
 const placeKey = (place: string) => place.replace(/\s+/g, " ").trim().toLocaleLowerCase("en-US");
@@ -552,7 +577,114 @@ export function factOption(key: string, value: boolean | string, options: readon
     const option = Number.isFinite(score) ? numericRangeOption(score, options) : null;
     return option ? { option, reason: `Your saved ${key === "sat_score" ? "SAT" : "ACT"} score falls in "${option}".` } : null;
   }
+  if (key === "act_taken") {
+    const option = value === false ? notTakenOption(options) : null;
+    return option ? { option, reason: "You have not taken the ACT (your saved answer)." } : null;
+  }
+  if (key === "county" && typeof value === "string") {
+    const option = countyOption(value, options, context.regionCode);
+    return option ? { option, reason: "The county of your saved address." } : null;
+  }
   return null;
+}
+
+const NOT_TAKEN = /\b(?:did not|didn'?t|have not|haven'?t|never) (?:take|taken|took)\b|\bnot taken\b|\b(?:do not|don'?t) have (?:an? )?(?:act )?(?:score|scores)\b|\bno (?:act )?scores?\b|^(?:n\/?a|none|not applicable)\b/;
+
+/** (Track 83) The one option saying the test was not taken ("Did not take/Do not recall", "I don't have ACT score", "N/A"); null when none or several. */
+function notTakenOption(options: readonly string[]): string | null {
+  const hits = options.filter((option) => NOT_TAKEN.test(optionKey(option)));
+  return hits.length === 1 ? hits[0]! : null;
+}
+
+const COUNTY_SUFFIX = /\s+(?:county|parish)$/;
+const STATE_SUFFIX = /,\s*([a-z]{2})$/;
+
+/**
+ * (Track 83) The one option naming the saved county ("Fixture", "Fixture County", "Fixture, CA"). An option with a
+ * ", XX" state suffix matches only when the profile's state is known and is XX. Null when none or several match.
+ */
+function countyOption(value: string, options: readonly string[], regionCode: string | undefined): string | null {
+  const name = optionKey(value).replace(COUNTY_SUFFIX, "").trim();
+  if (!name) return null;
+  const region = regionCode?.trim().toLocaleLowerCase("en-US");
+  const hits = options.filter((option) => {
+    let text = optionKey(option);
+    const state = STATE_SUFFIX.exec(text);
+    if (state) {
+      if (!region || state[1] !== region) return false;
+      text = text.slice(0, state.index).trim();
+    }
+    return text.replace(COUNTY_SUFFIX, "").trim() === name;
+  });
+  return hits.length === 1 ? hits[0]! : null;
+}
+
+const STATED_MONTH = "january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec";
+const STATED_WORD_DATE = new RegExp(`\\b(${STATED_MONTH})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?,?\\s+(\\d{4})\\b`, "g");
+const STATED_SLASH_DATE = /\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/g;
+
+function isoDate(year: number, month: number, day: number): string | null {
+  const iso = `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  return utcDay(iso) === null ? null : iso;
+}
+
+/**
+ * (Track 83) The date range a question states: exactly two full dates with years ("May 24, 2027 - August 13, 2027",
+ * "5/24/2027 to 8/13/2027"), as ISO dates. Null when there are not exactly two, a date is invalid, or the end is
+ * before the start.
+ */
+export function statedDateRange(question: string): { from: string; to: string } | null {
+  const text = optionKey(question);
+  const found: { index: number; iso: string | null }[] = [];
+  for (const match of text.matchAll(STATED_WORD_DATE)) {
+    const word = match[1]!;
+    const month = MONTH_WORDS.findIndex((name) => name.startsWith(word.slice(0, 3))) + 1;
+    found.push({ index: match.index, iso: month > 0 ? isoDate(Number(match[3]), month, Number(match[2])) : null });
+  }
+  for (const match of text.matchAll(STATED_SLASH_DATE)) {
+    found.push({ index: match.index, iso: isoDate(Number(match[3]), Number(match[1]), Number(match[2])) });
+  }
+  if (found.length !== 2) return null;
+  found.sort((left, right) => left.index - right.index);
+  const [from, to] = [found[0]!.iso, found[1]!.iso];
+  if (!from || !to || to < from) return null;
+  return { from, to };
+}
+
+const NUMBER_WORDS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
+const STATED_LENGTH = new RegExp(`\\b(\\d{1,2}|${NUMBER_WORDS.join("|")})[- ]?(week|month)s?\\b`, "g");
+
+/** (Track 83) The length a question states ("12-week", "10 weeks", "three months") in days (a week is 7, a month 30); null when none or several. */
+export function statedLengthDays(question: string): number | null {
+  const matches = [...optionKey(question).matchAll(STATED_LENGTH)];
+  if (matches.length !== 1) return null;
+  const count = /^\d+$/.test(matches[0]![1]!) ? Number(matches[0]![1]) : NUMBER_WORDS.indexOf(matches[0]![1]!) + 1;
+  if (count < 1) return null;
+  return count * (matches[0]![2] === "week" ? 7 : 30);
+}
+
+// "may" counts only before a day or year, so the verb "you may" is not a date word.
+const DATE_WORDS = /\b(?:january|february|march|april|june|july|august|september|sept|october|november|december)\b|\bmay\s+\d|\b20\d\d\b/;
+
+const OUTSIDE_WINDOW = "It states dates outside your saved availability, or your availability dates are not saved.";
+const LENGTH_NOT_COVERED = "It states a length your saved availability does not cover.";
+const DATES_UNREAD = "It states dates the agent cannot compare with your saved availability.";
+
+/**
+ * (Track 83) Why a saved full-time availability answer does not answer this question, or null. A stated date range
+ * must fall inside the saved start..end window, a stated length must fit in it, and any other date words hold. A
+ * saved No answers only a question without dates, a length, or date words.
+ */
+export function availabilityWindowHold(question: string, window: { start: string | null; end: string | null }, value: boolean): string | null {
+  const range = statedDateRange(question);
+  const length = range ? null : statedLengthDays(question);
+  const dateWords = !range && length === null && DATE_WORDS.test(optionKey(question));
+  if (!value) return range ? OUTSIDE_WINDOW : length !== null ? LENGTH_NOT_COVERED : dateWords ? DATES_UNREAD : null;
+  const start = window.start ? utcDay(window.start) : null;
+  const end = window.end ? utcDay(window.end) : null;
+  if (range) return start !== null && end !== null && window.start! <= range.from && range.to <= window.end! ? null : OUTSIDE_WINDOW;
+  if (length !== null) return start !== null && end !== null && end - start + 1 >= length ? null : LENGTH_NOT_COVERED;
+  return dateWords ? DATES_UNREAD : null;
 }
 
 /** (Track 79) "Test type", "Score type", "Which standardized test did you take?": which test a score is for. */

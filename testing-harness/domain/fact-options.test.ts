@@ -296,7 +296,7 @@ describe("what else a relocation question asks (relocationQuestionParts, Track 6
     expect(relocationQuestionParts("Can you relocate to Fixture Bay for the Summer internship (June-August)?").held).toBe(AVAILABILITY);
     expect(relocationQuestionParts("Are you available and willing to relocate to the site location for the full duration of a 12-consecutive-week, in-person internship starting between May and July?").held).toBe(AVAILABILITY);
     expect(relocationQuestionParts("Will you be willing to commute/drive or temporarily relocate to state/cities where there is a Fixture Dynamics office in your region during the program?NOTE: Fixture Dynamics does not provide relocation support or housing.").held)
-      .toBe("It asks about a temporary move.");
+      .toBe("It also says who pays for the move or what support comes with it.");
     expect(relocationQuestionParts("If offered a full-time role upon completion of your degree, would you be willing to relocate permanently?").held)
       .toBe("It asks about a permanent move or one after the internship.");
     expect(relocationQuestionParts("Do you live within 50 miles of Fixture Bay and are you willing to relocate?").held)

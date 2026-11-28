@@ -12,7 +12,7 @@ import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, fieldOf
 import { classifyFieldRole, classifyUploadRole, isSensitiveRole } from "./ats/field-roles";
 import { RACE_ONLY_DECLINE_REASON, VETERAN_CLASSIFICATION_EMPTY_REASON, type SelfIdentificationRule } from "./ats/self-identification";
 import { isHearAboutQuestion, pickHearAboutOption } from "./ats/hear-about";
-import { usStateAlternate } from "./ats/us-states";
+import { US_STATE_NAMES_BY_CODE, usStateAlternate } from "./ats/us-states";
 import { isListSearchBox, isSafeguardField, isSignupField, stripRequiredMarker } from "./form-recognition";
 import { standingFieldDecision, textMessageConsentDecision, type StandingInputs } from "./standing-fields";
 
@@ -75,6 +75,8 @@ export type PlannerInputs = {
   postingLocations?: string[];
   /** The candidate's schools, for questions that name high school or ask for every school attended (the candidate's rule, 2026-11-26). */
   schools?: SchoolInputs;
+  /** (Track 83, set by planAutofill) Another field on the form asks the city or ZIP/postal code. */
+  addressSplit?: boolean;
 };
 
 export type SchoolInputs = { rows: EducationRow[]; highSchoolPlace?: HighSchoolPlace };
@@ -86,6 +88,10 @@ export type EducationInputs = {
   startMonth?: string;
   /** The run profile's graduation date (YYYY-MM-DD) and where it came from; absent when that profile has none. */
   graduation?: { date: string; basis: NonNullable<FillDecision["basis"]> };
+  /** (Track 83, set by planAutofill) The form has a "Still Student?" box. */
+  stillStudentAsked?: boolean;
+  /** (Track 83, set by planAutofill) The form's Ashby education End Date year list has no option for the graduation year. */
+  endYearMissing?: boolean;
 };
 
 export type AutofillPlan = {
@@ -100,7 +106,8 @@ export type AutofillPlan = {
  * everything else pauses for the candidate or skips when optional. The
  * planner never invents a value and never routes around a safeguard.
  */
-export function planAutofill(form: RecognizedForm, inputs: PlannerInputs): AutofillPlan {
+export function planAutofill(form: RecognizedForm, planned: PlannerInputs): AutofillPlan {
+  const inputs = withAddressFormFlag(form, withEducationFormFlags(form, planned));
   const decisions: FillDecision[] = [];
   const pauses: PauseRecord[] = [];
   let safeguardHalt = false;
@@ -199,6 +206,62 @@ export function planAutofill(form: RecognizedForm, inputs: PlannerInputs): Autof
   return { decisions, pauses, safeguardHalt };
 }
 
+/**
+ * (Track 83) The education inputs with what the whole form says: a "Still Student?" box, and an Ashby education End
+ * Date year list without the graduation year. Unchanged when the run has no education inputs.
+ */
+function withEducationFormFlags(form: RecognizedForm, inputs: PlannerInputs): PlannerInputs {
+  const education = inputs.education;
+  if (!education) return inputs;
+  const stillStudentAsked = form.fields.some(isStillStudentBox);
+  const year = yearMonthOf(education.graduation?.date)?.year;
+  const endYearMissing = year !== undefined && form.fields.some((field) => {
+    const date = ASHBY_EDUCATION_DATE_LABEL.exec(normalizedLabel(field.label));
+    return date?.[1] === "end" && date[2] === "year" && (field.options?.length ?? 0) > 0 && !field.options!.some((option) => option.trim() === year);
+  });
+  if (!stillStudentAsked && !endYearMissing) return inputs;
+  return { ...inputs, education: { ...education, stillStudentAsked, endYearMissing } };
+}
+
+/** (Track 83) The inputs with `addressSplit`: whether another field on the form is labelled as a city or ZIP/postal code. */
+function withAddressFormFlag(form: RecognizedForm, inputs: PlannerInputs): PlannerInputs {
+  const patterns = CONTACT_LABELS.filter((entry) => entry.key === "addressCity" || entry.key === "addressPostalCode").map((entry) => entry.pattern);
+  const addressSplit = form.fields.some((field) => {
+    const label = normalizedLabel(field.label).replace(/[\s:?*]+$/, "");
+    return patterns.some((pattern) => pattern.test(label));
+  });
+  return addressSplit ? { ...inputs, addressSplit } : inputs;
+}
+
+const PREFIXED_ADDRESS = /^(?:permanent|mailing|home|current|residential)(?: street)? address$/;
+const WHOLE_ADDRESS = /^(?:full|complete) (?:(?:permanent|mailing|home|current|residential) )?address$|^(?:(?:permanent|mailing|home|current|residential) )?address \((?:street,? )?(?:including )?city,? state,? (?:and )?zip(?: code)?\)$/;
+
+/**
+ * (Track 83) An address asked whole ("Full address", "Address (City, State, Zip)", or a text area labelled "Address" or
+ * "Home Address") gets the profile address on one line, only when street, city, state and ZIP are all on the profile.
+ * A bare "Mailing / Home / Permanent / Current Address" text box gets the street line when the form asks the city or
+ * ZIP separately. "(Home|Mailing|Permanent) Street Address" keeps the existing contact rule. Null otherwise.
+ */
+function addressDecision(field: BrowserField, inputs: PlannerInputs): FillDecision | null {
+  if (field.widget === "autocomplete") return null;
+  const label = normalizedLabel(field.label).replace(/[\s:*]+$/, "");
+  const street = / street address$/.test(label);
+  const profile = inputs.profile;
+  const textBox = TEXT_KINDS.has(field.kind);
+  if (WHOLE_ADDRESS.test(label) ? textBox || field.kind === "textarea" : field.kind === "textarea" && !street && (label === "address" || PREFIXED_ADDRESS.test(label))) {
+    const [line1, line2, city, region, postal, country] = [profile.addressLine1, profile.addressLine2, profile.addressCity, profile.addressRegion, profile.addressPostalCode, profile.addressCountry]
+      .map((part) => part?.trim() ?? "");
+    if (!line1 || !city || !region || !postal) return null;
+    const abroad = country && matchCountryOption(country, ["United States"]) === null ? `, ${country}` : "";
+    return fill(field, `${line1}${line2 ? `, ${line2}` : ""}, ${city}, ${region} ${postal}${abroad}`, { kind: "profile", field: "address" }, "The address on your profile, on one line.");
+  }
+  if (textBox && !street && PREFIXED_ADDRESS.test(label) && inputs.addressSplit) {
+    const line1 = profile.addressLine1?.trim();
+    return line1 ? fill(field, line1, { kind: "profile", field: "addressLine1" }, "The street line of the address on your profile (the form asks city and ZIP separately).") : null;
+  }
+  return null;
+}
+
 function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
   const resolution = inputs.resolutions.get(field.id);
 
@@ -227,6 +290,9 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
     }
   }
 
+  const address = addressDecision(field, inputs);
+  if (address) return address;
+
   const contact = contactValue(field.label, inputs.profile);
   // A phone question asked as a number box (an Ashby Number question labelled "Phone", Track 67) takes the profile
   // phone's digits only: a number box takes no "+", spaces, brackets, or dashes. Fewer than 7 or more than 15 digits is no phone.
@@ -247,7 +313,7 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
     }
     if (field.widget === "autocomplete") {
       // A Country type-ahead searches by the country's name: a "US" / "USA" profile value types "United States".
-      const typed = contact.key === "addressCountry" && US_COUNTRY_KEYS.has(countryKey(contact.value)) ? "United States" : contact.value;
+      const typed = contact.key === "addressCountry" && US_COUNTRY_KEYS.has(countryKey(contact.value)) ? "United States" : typeAheadText(contact, field.options);
       return suggest(field, typed, { kind: "profile", field: contact.key });
     }
     if (TEXT_KINDS.has(field.kind) || contactArea) return fill(field, contact.value, { kind: "profile", field: contact.key }, "Contact details from your profile.");
@@ -365,7 +431,8 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
     if (resolution?.status === "RESOLVED") {
       const wanted = resolution.display.toLocaleLowerCase("en-US");
       const matches = field.options!.filter((option) => option.toLocaleLowerCase("en-US") === wanted);
-      if (matches.length === 1) {
+      // (Track 83) a saved ACT "not taken" never picks a literal "No" option.
+      if (matches.length === 1 && resolution.key !== "act_taken") {
         return {
           fieldId: field.id,
           action: "choose",
@@ -629,13 +696,16 @@ function factOptionDecision(field: BrowserField, resolution: Extract<FieldResolu
   // A combined "located near the city, or relocate at your own expense?" list is decided only by its rule:
   // its plain "No" would also deny living near the city, so a saved No never picks it.
   const relocation = resolution.key === "willing_to_relocate_at_own_expense";
-  const exact = !relocation && listed?.some((option) => option.toLocaleLowerCase("en-US") === resolution.display.toLocaleLowerCase("en-US"));
+  // (Track 83) A saved "did not take the ACT" picks only a "did not take" option; its "No" is never chosen or typed.
+  const actTaken = resolution.key === "act_taken";
+  const exact = !relocation && !actTaken && listed?.some((option) => option.toLocaleLowerCase("en-US") === resolution.display.toLocaleLowerCase("en-US"));
   const picked = listed && !exact ? factOption(resolution.key, resolution.value, listed, {
     today: inputs.standing?.today,
     nearPosting: samePlace(contactField("currentLocation", inputs.profile), inputs.postingLocations),
     degreeLevel: inputs.education?.degree && bachelorKind(inputs.education.degree) ? "bachelor" : null,
     question: field.label,
-    closest: /\b(?:closest|nearest)\b/.test(normalizedLabel(field.label))
+    closest: /\b(?:closest|nearest)\b/.test(normalizedLabel(field.label)),
+    regionCode: profileRegionCode(inputs.profile.addressRegion)
   }) : null;
   if (picked) return { fieldId: field.id, action: "choose", value: picked.option, basis, reason: picked.reason, pause: null };
   // (Track 79) Which test a saved score is for: only its own "SAT" / "ACT" option, never the score typed or echoed.
@@ -647,7 +717,7 @@ function factOptionDecision(field: BrowserField, resolution: Extract<FieldResolu
       safeguard: false
     });
   }
-  if ((resolution.key === "salary_expectation_rule" || (relocation && listed)) && !exact) {
+  if ((resolution.key === "salary_expectation_rule" || actTaken || (relocation && listed)) && !exact) {
     return pauseDecision(field, {
       question: `The saved answer is not among the options for "${field.label}". How should it be answered?`,
       key: resolution.key,
@@ -656,6 +726,15 @@ function factOptionDecision(field: BrowserField, resolution: Extract<FieldResolu
     });
   }
   return null;
+}
+
+/** (Track 83) The profile's state as a two-letter code ("CA", or "California" read as CA); undefined otherwise. */
+function profileRegionCode(region: string | undefined): string | undefined {
+  const text = region?.trim();
+  if (!text) return undefined;
+  if (/^[a-z]{2}$/i.test(text)) return text.toUpperCase();
+  const code = usStateAlternate(text);
+  return code && /^[a-z]{2}$/i.test(code) ? code.toUpperCase() : undefined;
 }
 
 /** A graduation date asked for as a year only ("Expected graduation year"): the year option, or the year typed. */
@@ -1014,6 +1093,15 @@ function degreeLevelOption(label: string, education: EducationInputs, options: r
 }
 
 const EDUCATION_DATE_LABEL = /^(start|end) date (month|year)$/;
+/** (Track 83) Ashby's unlabeled education month and year lists, as the executor labels them ("Education End Date year"). */
+const ASHBY_EDUCATION_DATE_LABEL = /^education (start|end) date (month|year)$/;
+const STILL_STUDENT_LABEL = /^(?:still (?:a )?student|currently (?:a )?student|currently attending|currently enrolled)\??$/;
+
+/** (Track 83) An education block's "Still Student?" box (Ashby's `_systemfield_education_history-isCurrent`). */
+function isStillStudentBox(field: BrowserField): boolean {
+  if (field.kind !== "checkbox" || (field.options?.length ?? 0) > 1) return false;
+  return field.id.includes("education_history-isCurrent") || STILL_STUDENT_LABEL.test(normalizedLabel(field.label));
+}
 /** Greenhouse's education date ids ("start-month--0"); its employment block uses "start-date-month--0" with the same English labels. */
 const EDUCATION_DATE_ID = /^(?:start|end)-(?:month|year)--\d+$/;
 const MONTH_NAMES = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
@@ -1055,7 +1143,10 @@ function stateSuffixedOption(school: string, options: string[]): string | null {
  * no field of study from the degree, no default graduation date on another
  * profile. The dates also need Greenhouse's education ids, because its
  * employment block repeats the same "Start date month" labels and must never
- * take education dates.
+ * take education dates. Ashby's education lists are read by their executor
+ * label ("Education Start Date month"); its "Still Student?" box is ticked
+ * while the graduation date is ahead, and then an End Date whose year list
+ * stops before the graduation year stays empty, month and year (Track 83).
  */
 function educationDecision(field: BrowserField, education: EducationInputs | undefined, today?: string): FillDecision | null {
   if (!education) return null;
@@ -1111,8 +1202,24 @@ function educationDecision(field: BrowserField, education: EducationInputs | und
     }
     return TEXT_KINDS.has(field.kind) && field.widget !== "autocomplete" ? fill(field, degree, basis, "The degree on your profile.") : null;
   }
-  const date = EDUCATION_DATE_ID.test(field.id) ? EDUCATION_DATE_LABEL.exec(label) : null;
+  const ahead = Boolean(education.graduation?.date && today && education.graduation.date > today);
+  if (isStillStudentBox(field)) {
+    if (!ahead) return null;
+    return {
+      fieldId: field.id,
+      action: "check",
+      value: "true",
+      basis: education.graduation!.basis,
+      reason: "Your graduation date is still ahead, so you are still a student.",
+      pause: null
+    };
+  }
+  const ashby = ASHBY_EDUCATION_DATE_LABEL.exec(label);
+  const date = (EDUCATION_DATE_ID.test(field.id) ? EDUCATION_DATE_LABEL.exec(label) : null) ?? ashby;
   if (!date) return null;
+  if (ashby && ashby[1] === "end" && education.endYearMissing && education.stillStudentAsked && ahead) {
+    return skip(field, "You are still a student: the end date stays empty and Still Student? is ticked.");
+  }
   const start = date[1] === "start";
   const value = start ? yearMonthOf(education.startMonth) : yearMonthOf(education.graduation?.date);
   if (!value) return null;
@@ -1621,6 +1728,20 @@ function profileListDecision(field: BrowserField, contact: { key: ContactKey; va
       : null;
   }
   return null;
+}
+
+/**
+ * (Track 83) What a type-ahead is typed for a profile value its suggestions name differently: a two-letter U.S. state
+ * code types the state's name ("CA" types "California", so "California, United States" is picked), except in a
+ * "State Abbreviation" box; a field of study types the one read option naming its category ("Engineering - Computer
+ * Science / Software"). Otherwise the profile value.
+ */
+function typeAheadText(contact: { key: ContactKey; value: string; label: string }, options: string[] | undefined): string {
+  if (contact.key === "addressRegion" && /^[a-z]{2}$/i.test(contact.value) && !/abbreviation/.test(contact.label)) {
+    return US_STATE_NAMES_BY_CODE[contact.value.toUpperCase()] ?? contact.value;
+  }
+  if (contact.key === "fieldOfStudy" && options?.length) return fieldOfStudyCategoryOption(contact.value, options) ?? contact.value;
+  return contact.value;
 }
 
 /** A label compared whole: lowercase, no "(optional)", no required marker, single spaces. */

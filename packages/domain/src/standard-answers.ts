@@ -138,12 +138,29 @@ export function standardAnswerOption(key: string, value: boolean | string, optio
     const option = booleanOption(value, options);
     if (option) return option;
     if (key === "us_citizen" && value) return usCitizenOption(options);
+    if (key === "holds_security_clearance" && !value) return clearanceNoneOption(options);
   }
   return null;
 }
 
-// (Track 79) A question that requires or asks U.S.-person status ("applicant must be a U.S. citizen, lawful permanent resident …", "are you a U.S. person?", "comply with ITAR").
-const US_PERSON_ASKED = /\bmust (?:either )?be (?:a )?["“]?u\.?s\.? (?:person|citizen)|\bare you a ["“]?u\.?s\.? person\b|\b(?:applicant|candidate|you) must be a u\.?s\.? citizen\b|\bus person\b.{0,80}\b(?:includes?|defined)\b|\bcomply with itar\b/;
+const CLEARANCE_LEVEL = /\b(?:secret|top secret|ts\/sci|ts|sci|public trust|confidential|doe|"?[lq]"?|yankee white)\b/i;
+const CLEARANCE_NONE = /^(?:none(?: of the above)?|n\/?a|not applicable|no(?: active)? (?:security )?clearance|none\s*\/\s*not required)\b/i;
+const CLEARANCE_NONE_QUALIFIED = /\b(?:never|expired|previous\w*|inactive|lapsed|former|disclose|prefer)\b/i;
+
+/**
+ * (Track 83) For a saved No to holding a clearance, on a list naming clearance levels ("Secret", "TS/SCI", "Public
+ * Trust"): the one plain none option ("None of the Above", "None/Not Required"). Options saying more than "none"
+ * (never held, expired, inactive, prefer not to disclose) never count. Null when the list names no level, or when
+ * there is not exactly one plain none option.
+ */
+function clearanceNoneOption(options: readonly string[]): string | null {
+  if (!options.some((option) => CLEARANCE_LEVEL.test(optionKey(option)))) return null;
+  const hits = options.filter((option) => CLEARANCE_NONE.test(optionKey(option)) && !CLEARANCE_NONE_QUALIFIED.test(optionKey(option)));
+  return hits.length === 1 ? hits[0]! : null;
+}
+
+// (Track 79) A question that requires or asks U.S.-person status ("applicant must be a U.S. citizen, lawful permanent resident …", "are you a U.S. person?", "comply with ITAR"; Track 83: "U.S. person status (including …").
+const US_PERSON_ASKED = /\bmust (?:either )?be (?:a )?["“]?u\.?s\.? (?:person|citizen)|\bare you a ["“]?u\.?s\.? person\b|\b(?:applicant|candidate|you) must be a u\.?s\.? citizen\b|\bu\.?s\.? person\b.{0,80}\b(?:includ\w*|defined)\b|\bcomply with itar\b/;
 // Words that ask something the saved status does not settle: a non-U.S. person, sanctioned countries, a needed license, dual citizenship.
 const US_PERSON_NOT_SETTLED = /\b(?:not a|non-?u\.?s\.?|foreign (?:person|national)|cuba|iran|north korea|syria|sudan|crimea|sanction\w*|license (?:is )?required|require (?:an )?(?:export )?license|dual citizen\w*)\b/;
 const QUALIFIED = /\b(?:but|however|although|though|until|unless|except|not)\b/;

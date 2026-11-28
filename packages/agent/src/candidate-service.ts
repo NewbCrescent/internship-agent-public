@@ -13,6 +13,7 @@ import {
   saveCandidatePreferences
 } from "@internship-agent/db";
 import {
+  availabilityWindowHold,
   candidatePreferenceInputSchema,
   candidateProfileInputSchema,
   COURSEWORK_FACT_KEY,
@@ -104,11 +105,21 @@ export async function resolveCandidateQuestion(
     }
   }
 
+  // (Track 83) An ACT score question with no saved score: a saved "did not take the ACT" answers it (the planner picks
+  // the list's one "did not take" option, never a score). A saved act_score always wins; a score is never derived.
+  if (mapping.key === "act_score" && !getCurrentFact(database, LOCAL_CANDIDATE_ID, "act_score", { kind: "global" })) {
+    const taken = getCurrentFact(database, LOCAL_CANDIDATE_ID, "act_taken", { kind: "global" });
+    if (taken && taken.value === false && taken.source === "user" && taken.reusePolicy === "auto") {
+      return { status: "RESOLVED", question, mapping, fact: taken, displayAnswer: formatFactValue(taken.value) };
+    }
+  }
+
   // A channel- or company-scoped question may use the global answer when the
   // channel or company has none of its own. The reverse never happens: a
   // channel or company answer is not visible to global questions, other
   // channels, or other companies. A relocation question naming a U.S. place
-  // may use the saved U.S.-wide relocation Yes (usWideRelocationFact).
+  // may use the saved U.S.-wide relocation Yes of the same key, plain or at
+  // own expense (usWideRelocationFact, Track 83).
   const fact = getCurrentFact(database, LOCAL_CANDIDATE_ID, mapping.key, mapping.scope)
     ?? (mapping.scope.kind === "application_channel" || mapping.scope.kind === "company"
       ? getCurrentFact(database, LOCAL_CANDIDATE_ID, mapping.key, { kind: "global" })
@@ -122,9 +133,15 @@ export async function resolveCandidateQuestion(
       reason: `No remembered ${factDefinitions[mapping.key].label.toLocaleLowerCase("en-US")} fact exists for this scope.`
     };
   }
-  // A relocation question that also asks something the saved relocation answer does not settle stays with the candidate (Track 62).
-  if (mapping.key === "willing_to_relocate") {
-    const held = relocationPartsHold(database, question);
+  // A relocation question that also asks something the saved relocation answer does not settle stays with the candidate
+  // (Track 62); the own-expense question gets the same check, without the who-pays part its answer settles (Track 83).
+  if (mapping.key === "willing_to_relocate" || mapping.key === "willing_to_relocate_at_own_expense") {
+    const held = relocationPartsHold(database, question, mapping.key === "willing_to_relocate_at_own_expense");
+    if (held) return { status: "NEEDS_INPUT", question, mapping, reason: held };
+  }
+  // (Track 83) A full-time availability question stating dates or a length is answered only inside the saved window.
+  if (mapping.key === "available_full_time" && typeof fact.value === "boolean") {
+    const held = availabilityWindowHold(question, savedAvailabilityWindow(database), fact.value);
     if (held) return { status: "NEEDS_INPUT", question, mapping, reason: held };
   }
   // A No never answers a previous-employment question that names a company the candidate has a saved Yes for.
@@ -153,22 +170,34 @@ export async function resolveCandidateQuestion(
  * The saved U.S.-wide relocation Yes for a relocation question naming a place inside the United States (Track 62;
  * the candidate's words, 2026-11-27: "Yes I would relocate anywhere in the US"). One way only: the place's own
  * answer is read first, a city answer never answers the country, a saved No never widens, and a place in another or
- * an unknown country gets nothing.
+ * an unknown country gets nothing. The own-expense question reads the saved U.S. own-expense answer, never the plain
+ * one (Track 83).
  */
 function usWideRelocationFact(database: DatabaseSync, mapping: MappedQuestion, context: QuestionContext) {
-  if (mapping.key !== "willing_to_relocate" || mapping.scope.kind !== "location") return null;
+  if (mapping.key !== "willing_to_relocate" && mapping.key !== "willing_to_relocate_at_own_expense") return null;
+  if (mapping.scope.kind !== "location") return null;
   if (!placeInUnitedStates(mapping.scope.name, context)) return null;
-  const fact = getCurrentFact(database, LOCAL_CANDIDATE_ID, "willing_to_relocate", { kind: "country", code: "US" });
+  const fact = getCurrentFact(database, LOCAL_CANDIDATE_ID, mapping.key, { kind: "country", code: "US" });
   return fact && fact.value === true && fact.source === "user" ? fact : null;
+}
+
+/** (Track 83) The saved internship availability window (global, user-sourced), as ISO dates; null where not saved. */
+function savedAvailabilityWindow(database: DatabaseSync): { start: string | null; end: string | null } {
+  const read = (key: "available_start_date" | "available_end_date") => {
+    const fact = getCurrentFact(database, LOCAL_CANDIDATE_ID, key, { kind: "global" });
+    return fact && fact.source === "user" && typeof fact.value === "string" ? fact.value : null;
+  };
+  return { start: read("available_start_date"), end: read("available_end_date") };
 }
 
 /**
  * Why a relocation question's other parts keep it paused (Track 62): a temporary or permanent move, who pays,
  * stated dates, remote work, or living nearby not joined by "or" (relocationQuestionParts), or an on-site part
- * without a saved Yes to on-site work. Null when only the relocation part is left.
+ * without a saved Yes to on-site work. Null when only the relocation part is left. `ownExpense` drops the who-pays
+ * part, which the own-expense answer settles (Track 83).
  */
-function relocationPartsHold(database: DatabaseSync, question: string): string | null {
-  const parts = relocationQuestionParts(question);
+function relocationPartsHold(database: DatabaseSync, question: string, ownExpense: boolean): string | null {
+  const parts = relocationQuestionParts(question, { ownExpense });
   if (parts.held) return parts.held;
   if (parts.onSite) {
     const onSite = getCurrentFact(database, LOCAL_CANDIDATE_ID, "work_arrangement", { kind: "global" });

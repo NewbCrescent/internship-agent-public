@@ -25,7 +25,9 @@ const CITIZENSHIP = /\bcitizen(?:s|ship)?\b|\bpermanent resident\b|\bgreen card\
 // "You must be a U.S. Person because … Are you a US Person?": a Yes/No question asked after a statement.
 const ASKS_US_PERSON = /(?:^|[.?!:;)]\s+)(?:are|is) you (?:a |an )?(?:u\.?\s?s\.?|us) person\b[^?]*\?/;
 const CLEARANCE = /\bclearances?\b/;
-const CLEARANCE_CONTEXT = /\bsecurity\b|\bsecret\b|\bts\b|\bsci\b|\bgovernment\b|\bfederal\b|\bdod\b|\bdepartment of defense\b|\bpublic trust\b|\b[ql] clearance\b/;
+const CLEARANCE_CONTEXT = /\bsecurity\b|\bsecret\b|\bts\b|\bsci\b|\bgovernment\b|\bfederal\b|\bdod\b|\bdepartment of defense\b|\bpublic trust\b|\b[ql] clearance\b|\b(?:type|level|kind) of (?:security )?clearance\b|\bclearance (?:type|level|status)\b/;
+// (Track 83) "(Requires U.S Citizenship)" after a clearance question is a requirement note, not a citizenship question.
+const CITIZENSHIP_NOTE = /\(\s*(?:requires?|required:?)\s+(?:u\.?\s?s\.?|united states)\s+citizenship\s*\)/;
 const CRIMINAL = /\bconvict\w*|\bfelon(?:y|ies)\b|\bmisdemeanou?rs?\b|\bcriminal\b|\bpled (?:guilty|no contest)\b|\bpleaded (?:guilty|no contest)\b|\barrest\w*|\bpending charges\b|\bcharged with\b/;
 const DEBARMENT = /\bdebar\w*|\bexclu(?:ded|sion)\b[^.?]{0,80}\b(?:federal|government|health ?care|medicare|medicaid|programs?|lists?|contract\w*|procurement|oig|fda)\b|\bsuspended\b[^.?]{0,60}\b(?:federal|government|contract\w*|procurement)\b|\boig\b|\bsam\.gov\b|\bsanctioned\b/;
 const NON_COMPETE = /\bnon[- ]?compet(?:e|es|ition)\b/;
@@ -106,7 +108,7 @@ export function mapStandardQuestion(question: string, context: QuestionContext):
   const clearance = CLEARANCE.test(n) && CLEARANCE_CONTEXT.test(n);
   const groups = {
     salary: SALARY.test(n),
-    citizenship: CITIZENSHIP.test(n),
+    citizenship: CITIZENSHIP.test(clearance ? n.replace(CITIZENSHIP_NOTE, " ") : n),
     clearance,
     criminal: CRIMINAL.test(n),
     debarment: DEBARMENT.test(n),
@@ -199,10 +201,13 @@ function clearanceQuestion(question: Prepared): QuestionMapping {
   const eligible = /\beligib\w*|\bable to (?:obtain|get|acquire|receive)\b|\bobtain\b|\bqualify\b|\bqualified to (?:obtain|receive)\b/.test(n);
   const holds = /\b(?:hold|holds|have|has|possess|possesses)\b|\bactive\b|\bcurrent(?:ly)?\b|\bexisting\b/.test(n);
   const strongHolds = /\bcurrently (?:hold|have|possess)\b|\b(?:hold|possess)(?:es)? (?:an?|any)\b|\bactive (?:\w+ )?clearance\b|\bcurrent (?:\w+ )?clearance\b|\bexisting (?:\w+ )?clearance\b/.test(n);
-  if (/\b(?:ever|previously|past|expired|inactive|lapsed)\b/.test(n) || (/\b(?:willing|interested)\b/.test(n) && !eligible) || (eligible && strongHolds)) {
+  if (/\b(?:ever|previously|past|expired|inactive|lapsed|most recent|recent(?:ly)?|former|prior)\b/.test(n) || (/\b(?:willing|interested)\b/.test(n) && !eligible) || (eligible && strongHolds)) {
     return ambiguous("The clearance question asks about more than an active clearance or eligibility; answer it directly.");
   }
   if (eligible) return yesNo(question, "security_clearance_eligible", "Security-clearance eligibility question.");
+  if (holds && question.wh && question.choiceField && /\b(?:type|level|kind)\b/.test(n)) {
+    return mapped("holds_security_clearance", "(Track 83) Which clearance you hold, as a list; only its one none option is chosen for a saved No.");
+  }
   if (holds) return yesNo(question, "holds_security_clearance", "Active security-clearance question.");
   return ambiguous("The clearance question does not ask whether a clearance is held or obtainable; answer it directly.");
 }

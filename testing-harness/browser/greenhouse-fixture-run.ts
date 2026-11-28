@@ -197,6 +197,8 @@ const ASHBY = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-
 const ASHBY_TEXTING = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a2/application";
 const ASHBY_VALUE_SELECT = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a3/application";
 const ASHBY_SURVEY = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a4/application";
+/** Ashby's Education History entry (fixtures/ashby-education-history.html, modelled, Track 83). */
+const ASHBY_EDUCATION = "https://jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a5/application";
 /** The Visa Support question's field path in fixtures/ashby-value-select.html (its field id; its entry id is "<render id>_<path>"). */
 const ASHBY_VISA_PATH = "9a0b1c2d-0000-4000-8000-0000000000d1";
 const LEVER = "https://jobs.lever.co/fixturerobotics/00000000-0000-4000-8000-0000000000b1/apply";
@@ -270,6 +272,7 @@ async function main(): Promise<void> {
       "jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a2/application": fixture("ashby-texting-consent.html"),
       "jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a3/application": fixture("ashby-value-select.html"),
       "jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a4/application": fixture("ashby-survey-autofill.html"),
+      "jobs.ashbyhq.com/fixturerobotics/00000000-0000-4000-8000-0000000000a5/application": fixture("ashby-education-history.html"),
       // The cross-site reCAPTCHA frame of fixtures/ashby-value-select.html?network=frame-token (Track 27).
       "www.recaptcha.net/recaptcha/enterprise/anchor": RECAPTCHA_ANCHOR_FRAME,
       // Post-submit confirmation pages.
@@ -884,6 +887,19 @@ async function main(): Promise<void> {
         check(tools?.kind === "checkbox" && tools.required && tools.options?.join("|") === "ROS|Git|Docker", `Ashby required multi choice: ${JSON.stringify(tools)}`);
         await tab.close();
       }
+      // Track 83: Ashby names each box by its own option ("ROS", "Git"), so the group is found by its tag (Track 82's id),
+      // never by the first box's name, and an option other than the first is checked.
+      {
+        const { tab, page, form } = await recognizeValueSelect("");
+        const tools = form.fields.find((field) => field.label === TOOLS);
+        check(/^ia-control-\d+$/.test(tools?.id ?? ""), `Ashby multi choice id: ${tools?.id}`);
+        const filled = await applyDecisions(page, form, [{ fieldId: tools?.id ?? "missing", action: "choose", value: "Git", basis: null, reason: "fixture", pause: null }]);
+        check(filled.unfilled.length === 0, `Ashby multi choice Git unfilled: ${JSON.stringify(filled.unfilled)}`);
+        const boxes = await tab.evaluate(() => Object.fromEntries(Array.from(document.querySelectorAll('.ashby-application-form-input-checkbox-group input[type="checkbox"]'))
+          .map((box) => [(box as HTMLInputElement).name, (box as HTMLInputElement).checked])));
+        check(boxes.Git === true && boxes.ROS === false && boxes.Docker === false, `Ashby multi choice boxes: ${JSON.stringify(boxes)}`);
+        await tab.close();
+      }
       const leaked = (network: AshbySubmitNetwork | null | undefined): string[] => {
         const text = JSON.stringify(network ?? null);
         return [PROFILE.fullName, PROFILE.email, "fixture-token", "UNIVERSAL_ENT", "fixture-fingerprint"].filter((secret) => text.includes(secret));
@@ -989,6 +1005,41 @@ async function main(): Promise<void> {
         check(sent.submitClicks === 0 && sent.radios[ASHBY_VISA_PATH] === undefined, `Ashby stuck radio state: ${JSON.stringify(sent)}`);
         await tab.close();
       }
+    }
+
+    // Track 83: Ashby's Education History (fixtures/ashby-education-history.html, modelled): the month and year lists
+    // with no label of their own read "Education Start Date month" and so on, the start date is chosen from the
+    // profile, and with the graduation still ahead and the End Date year list stopping before it, the end date stays
+    // empty and "Still Student?" is ticked.
+    {
+      const tab = await open(ASHBY_EDUCATION);
+      const page = createPlaywrightPage(tab);
+      const form = await recognizeCurrentForm(page);
+      const labels = form.fields.map((field) => field.label);
+      const DATES = ["Education Start Date month", "Education Start Date year", "Education End Date month", "Education End Date year"];
+      check(DATES.every((label) => labels.includes(label)) && !labels.some((label) => /unlabeled/i.test(label)), `Ashby education labels: ${labels.join("|")}`);
+      const plan = planAutofill(form, {
+        profile: PROFILE,
+        resolutions: new Map(),
+        packageAnswers: [],
+        variantId: VARIANT_ID,
+        education: {
+          school: "Example State University", degree: "B.A. Computer Science", startMonth: "2025-08",
+          graduation: { date: "2030-05-15", basis: { kind: "fact", key: "graduation_date", scope: "global" } }
+        },
+        standing: { acceptDataConsent: false, signAttestations: false, today: "2026-11-28" }
+      });
+      const decided = (label: string) => plan.decisions[form.fields.findIndex((field) => field.label === label)];
+      check(decided("Still Student?")?.action === "check" && decided("Education End Date month")?.action === "skip" && decided("Education End Date year")?.action === "skip",
+        `Ashby education plan: ${JSON.stringify(plan.decisions)}`);
+      const filled = await applyDecisions(page, form, plan.decisions);
+      check(filled.unfilled.length === 0, `Ashby education unfilled: ${JSON.stringify(filled.unfilled)}`);
+      const shown = await tab.evaluate(() => ({
+        selects: Array.from(document.querySelectorAll("._dateRange select")).map((select) => (select as HTMLSelectElement).selectedOptions[0]?.textContent ?? ""),
+        stillStudent: (document.getElementById("_systemfield_education_history-isCurrent") as HTMLInputElement).checked
+      }));
+      check(shown.selects.join("|") === "August|2025|Month...|Year..." && shown.stillStudent, `Ashby education shown: ${JSON.stringify(shown)}`);
+      await tab.close();
     }
 
     // Dover (jobs.dover.com, where app.dover.io links redirect): labels come from the sibling FormLabel div, never the

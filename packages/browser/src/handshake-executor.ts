@@ -919,6 +919,17 @@ export function createPlaywrightPage(page: Page): BrowserPage {
           ? within().locator(`input[type="radio"][name="${cssValue(field.id)}"], input[type="radio"][data-ia-radio-group="${cssValue(field.id)}"]`)
           : within().locator(`input[type="checkbox"][name="${cssValue(field.id)}"]`);
         const byId = field.kind === "checkbox" ? await within().locator(idSelector(field.id)).count().catch(() => 0) : 0;
+        // (Track 83) A checkbox group with neither an element id nor a shared name (Ashby's, each box named by its option):
+        // found by its tag, else (Ashby redrew the form and dropped every tag) by its label (redrawnTagged), and the one named option checked.
+        if (field.kind === "checkbox" && byId === 0 && (await named.count().catch(() => 0)) === 0) {
+          const tagged = within().locator(`[data-ia-checkbox-group="${cssValue(field.id)}"]`);
+          const groups = (await tagged.count().catch(() => 0)) > 0 ? tagged
+            : TAGGED_CONTROL.test(field.id) ? await redrawnTagged(field) : null;
+          if (groups && (await groups.count().catch(() => 0)) === 1) {
+            await checkGroupOption(page, groups, option);
+            return;
+          }
+        }
         if (byId === 0 && (await named.count().catch(() => 0)) > 0) {
           if (field.kind === "radio") {
             // Match the label read from this group, including when ARIA gives it a different name.
@@ -1418,6 +1429,32 @@ function collectApplyEntriesIn(root: Element): Array<Omit<ApplyEntryCandidate, "
     entries.push({ tag: anchor ? "a" : "button", href, texts, className, index, id });
   }
   return entries;
+}
+
+/**
+ * (Track 83) Checks one option of a checkbox group: the box tagged with that option, else the checkbox named exactly
+ * so. Clicks its own label (Ashby draws the choice from its own state), else checks the box, then waits up to 2 s for
+ * the box or Ashby's option wrapper to show it chosen. An option already chosen is left as it is.
+ */
+async function checkGroupOption(page: Page, group: Locator, option: string): Promise<void> {
+  const tagged = group.locator(`input[type="checkbox"][data-ia-checkbox-option="${cssValue(option)}"]`);
+  const target = (await tagged.count()) > 0 ? tagged : group.getByRole("checkbox", { name: option, exact: true });
+  const count = await target.count();
+  if (count === 0) throw new FieldUnfillable("the option was not found");
+  if (count > 1) throw new FieldUnfillable("more than one option matched");
+  const wrapper = target.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' ashby-application-form-input-checkbox-group-option ')][1]");
+  const chosen = async (): Promise<boolean> => (await target.isChecked().catch(() => false))
+    || ((await wrapper.count().catch(() => 0)) === 1 && (await wrapper.getAttribute("data-checked").catch(() => null)) !== null);
+  if (await chosen()) return;
+  const boxId = await target.getAttribute("id");
+  const label = boxId ? group.locator(`label[for="${cssValue(boxId)}"]`) : null;
+  if (label && (await label.count()) === 1) await label.click({ timeout: 10_000 });
+  else await target.check({ timeout: 10_000 });
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (await chosen()) return;
+    await page.waitForTimeout(200);
+  }
+  throw new FieldUnfillable("the site did not keep the choice");
 }
 
 /** A tag collectControlsIn gives a control with neither id nor name (refOf). */
@@ -2193,6 +2230,59 @@ export function collectControlsIn(root: Element): RawControl[] {
     }
     return "";
   };
+  const DATE_PART = /^(month|year)\s*(?:\.\.\.|…)?$/i;
+  /** "month" or "year" for a list whose first option is "Month..." or "Year..." (Ashby's date lists); else null. */
+  const datePartOf = (element: Element): string | null => {
+    if (!(element instanceof HTMLSelectElement)) return null;
+    const match = DATE_PART.exec(collapse(element.options[0]?.textContent));
+    return match ? match[1]!.toLowerCase() : null;
+  };
+  /**
+   * (Track 83) A month or year list with no label of its own (Ashby's education Start Date / End Date lists): the
+   * date's label in the closest ancestors holding at most its partner list and no other question, plus the part
+   * ("Start Date month"), prefixed "Education " inside Ashby's education history entry. Empty otherwise.
+   */
+  const datePartLabel = (element: Element): string => {
+    const part = datePartOf(element);
+    if (!part) return "";
+    let child: Element = element;
+    let node: Element | null = element.parentElement;
+    for (let depth = 0; node && depth < 5 && node !== document.body; depth += 1, child = node, node = node.parentElement) {
+      const others = Array.from(node.querySelectorAll(CONTROL)).filter((other) => other !== element && isQuestion(other));
+      if (others.some((other) => !datePartOf(other)) || others.length > 1) return "";
+      let text = "";
+      for (const candidate of Array.from(node.querySelectorAll('legend, label, [role="heading"], [class*="label"], [class*="title"]'))) {
+        if (candidate.matches(CONTROL) || candidate.querySelector(CONTROL) || candidate.closest(ACTION) || notQuestionText(candidate)) continue;
+        const target = candidate.getAttribute("for");
+        const owner = target ? document.getElementById(target) : null;
+        if (owner && owner !== element && owner.matches(CONTROL)) continue;
+        const read = textOf(candidate);
+        if (read && !DATE_PART.test(read)) { text = read; break; }
+      }
+      if (!text) {
+        const before: string[] = [];
+        for (const sibling of Array.from(node.children)) {
+          if (sibling === child) break;
+          if (sibling.matches(CONTROL) || sibling.querySelector(CONTROL) || sibling.closest(ACTION) || notQuestionText(sibling)) continue;
+          const read = textOf(sibling);
+          if (read && !DATE_PART.test(read)) before.push(read);
+        }
+        text = collapse(before.join(" "));
+      }
+      if (!text) continue;
+      const SYSTEM = /^_systemfield_/;
+      let scope: Element | null = element.parentElement;
+      let prefix = "";
+      for (; scope && scope !== document.body; scope = scope.parentElement) {
+        const system = Array.from(scope.querySelectorAll(CONTROL)).filter((other) => SYSTEM.test(other.id) || SYSTEM.test(other.getAttribute("name") ?? ""));
+        if (system.length === 0) continue;
+        if (system.some((other) => /^_systemfield_education_history/.test(other.id) || /^_systemfield_education_history/.test(other.getAttribute("name") ?? ""))) prefix = "Education ";
+        break;
+      }
+      return `${prefix}${text.slice(0, 200)} ${part}`;
+    }
+    return "";
+  };
   /** The label and where it came from; placeholder, the question text before the control, and name are the last resort, after the question text near the control. */
   const labelFor = (element: Element): string | undefined => {
     const labelled = byIds(element.getAttribute("aria-labelledby"));
@@ -2218,6 +2308,8 @@ export function collectControlsIn(root: Element): RawControl[] {
     }
     const near = questionLabelNear(element);
     if (near) return near;
+    const datePart = datePartLabel(element);
+    if (datePart) return datePart;
     return collapse(element.getAttribute("placeholder")) || questionTextBefore(element)
       || nameLabel((element as HTMLInputElement).name) || undefined;
   };
@@ -2475,11 +2567,13 @@ export function collectControlsIn(root: Element): RawControl[] {
         const legend = group.querySelector("legend");
         const rawLabel = textOf(legend) || byIds(group.getAttribute("aria-labelledby")) || collapse(group.getAttribute("aria-label")) || textOf(titleLabel) || "";
         const checked = boxes.filter((box) => box.checked).map(optionLabel).filter(Boolean);
-        // Ashby names each box of a checkbox group after its own option ("She/her", "He/him"), so no box name is the
-        // question's: the group carries a data-ia-control tag instead (Track 82, stop evidence of run <run id>, 2026-11-28).
+        // Ashby names each box after its own option, so no box name is the group's id: the group's data-ia-control tag is (Track 82);
+        // the group and its boxes are tagged so the chosen option is found by its own text (Track 83).
         const names = new Set(boxes.map((box) => box.name));
         const groupId = group.id
           || (names.size === 1 && boxes[0]!.name ? boxes[0]!.name : names.size > 1 ? refOf(group) : `checkbox-group-${groupsDone.size}`);
+        group.setAttribute("data-ia-checkbox-group", groupId);
+        for (const box of boxes) box.setAttribute("data-ia-checkbox-option", optionLabel(box));
         controls.push({
           tag: "input",
           type: "checkbox",

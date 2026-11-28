@@ -1,5 +1,5 @@
 import { isHearAboutQuestion } from "@internship-agent/browser";
-import { isStandardizedTestTypeQuestion, mentionsCompany, mentionsCompanyLead, mentionsSiteTenant, normalizeCompanyName, relocationQuestionParts, type CandidateFactKey, type FactScope, type QuestionContext, type QuestionMapping } from "@internship-agent/domain";
+import { isStandardizedTestTypeQuestion, mentionsCompany, statedDateRange, statedLengthDays, mentionsCompanyLead, mentionsSiteTenant, normalizeCompanyName, relocationQuestionParts, type CandidateFactKey, type FactScope, type QuestionContext, type QuestionMapping } from "@internship-agent/domain";
 import { readPlace, readWellKnownCity } from "@internship-agent/jobs";
 
 import { mapStandardQuestion } from "./standard-question-mapper";
@@ -32,9 +32,12 @@ const SPONSORSHIP = /\b(?:require|need).{0,30}(?:sponsor|sponsorship|sponsored)\
 // a yes/no question ("Are you able to start …?") are not the internship start date.
 const START_WORDING = /\b(?:earliest|soonest)\b.{0,40}\b(?:start|begin)\w*|\bwhen (?:can|could|would|will) you (?:be (?:able|available) to )?(?:start|begin)\b|\btimeline for (?:starting|beginning)\b|\bwhen (?:can|could|would|will) you be available\b(?:\s+(?:to (?:join|commence)\b|(?:if|after|once|upon) (?:an |the |you )?(?:accept\w* )?(?:an |the |our |this )?offer\b|for (?:employment|this (?:role|position|internship|job))\b)|\s*\?\s*\*?$)|\bwhen are you (?:able|available) to (?:start|begin|join)\b|\bon what date (?:would|could|can|will) you (?:be available|start|begin)\b/i;
 const NOT_INTERNSHIP_START = /\bfull[- ]?time\b|\bafter (?:you )?graduat\w*|\bpost[- ]?graduat\w*/i;
+// Availability for a full-time role after graduation is not the internship start date (Track 83).
+const NOT_FULL_TIME_START = /\bfull[- ]?time (?:offer|role|position|job|employment|opportunit\w*)\b|\bafter (?:you )?graduat\w*|\bupon graduation\b|\bpost[- ]?graduat\w*/i;
 const YES_NO_LEAD = /^(?:are|is|do|does|did|have|has|had|can|could|will|would|should)\b/i;
 // Relocation the candidate pays for is its own answer (willing_to_relocate_at_own_expense).
-const OWN_EXPENSE = /\b(?:at )?(?:my|your) own (?:expense|cost)\b|\bown expense\b|\bwithout (?:relocation )?(?:assistance|support|reimbursement)\b|\bself[- ]funded\b/i;
+// A note that the employer pays nothing for the move makes it the own-expense question (Track 83).
+const OWN_EXPENSE = /\b(?:at )?(?:my|your) own (?:expense|cost)\b|\bown expense\b|\bwithout (?:relocation )?(?:assistance|support|reimbursement)\b|\bself[- ]funded\b|\b(?:do|does|will|can) not (?:offer|provide|cover|include|pay for|reimburse)\b[^.?!]{0,40}?\b(?:relocation|relocating|housing|moving)\b|\b(?:no|without) (?:relocation|housing|moving) (?:assistance|support|stipends?|packages?|reimbursement|benefits?)\b|\b(?:relocation|housing) (?:assistance|support|stipends?|packages?|reimbursements?) (?:is|are|will) not\b|\brelocate on (?:my|your) own\b/i;
 // Willingness to undergo a background check: never a criminal-history answer or a consent or authorization.
 const BACKGROUND_CHECK = /\bbackground (?:check|screening|investigation)s?\b/i;
 const WILLING_TO_UNDERGO = /\b(?:willing|prepared|open)\b[^?]{0,40}\b(?:undergo|submit to|complete|go through|participate in|take)\b|\bwould you (?:undergo|submit to|complete)\b/i;
@@ -80,6 +83,13 @@ const SAT_WORD = /\bsat\b/i;
 const ACT_WORD = /\bact\b/i;
 const SAT_SCORE = /\bsat (?:total |composite )?(?:score|scores|result|results)\b|\b(?:score|result)s? (?:on|for|from) (?:the )?sat\b/i;
 const ACT_SCORE = /\bact (?:total |composite )?(?:score|scores|result|results)\b|\b(?:score|result)s? (?:on|for|from) (?:the )?act\b/i;
+// (Track 83) Full-time WORK availability for the internship ("able to commit to a full-time internship (40 hours per
+// week) from <dates>", "available to work full-time"), never a full-time role, offer, or later start, a student status,
+// or a question that also asks where the work is done (on site, in the office, hybrid, remote).
+const FULL_TIME_WORK = /\b(?:work|working|commit|committing|available|availability|able)\b[^?]{0,40}\bfull[- ]?time\b|\bfull[- ]?time\b[^?]{0,30}\b(?:internship|basis|schedule|hours)\b/i;
+const NOT_FULL_TIME_WORK = /\bfull[- ]?time (?:offer|role|position|job|employment|opportunit\w*|student)\b|\b(?:after|following|upon|once)\b[^?]{0,30}\b(?:internship|graduat\w*|degree)\b|\bimmediately after\b|\bpost[- ]?graduat\w*|\bpart[- ]?time\b|\b(?:fall|spring|winter|autumn|semester|school year|academic year)\b|\bsenior\b|\bstudent\b|\benroll\w*|\b(?:on[- ]?site|in[- ]office|in[- ]person|hybrid|remote(?:ly)?|office)\b/i;
+// (Track 83) The county of the current address ("County", "County of residence", "What county do you live in?").
+const COUNTY = /^(?:(?:current|home|residential|your) )?county(?: of residence)?$|^(?:what|which) county do you (?:currently )?(?:live|reside) in\??$|^county \/ parish$/i;
 const TEST_SECTION = /\b(?:math\w*|verbal|reading|writing|ebrw|evidence|english|science|section|sections|subject|essay)\b/i;
 
 export class DeterministicQuestionMapper implements SemanticQuestionMapper {
@@ -120,12 +130,14 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
     // requirement") or an unnamed site ("the site location"); a stored pause's
     // `context.location` is cleaned the same way (Track 62). A plain relocation
     // question that also asks about on-site work, living nearby, or another part
-    // (relocationQuestionParts) is broader: only a saved Yes answers it.
+    // (relocationQuestionParts) is broader: only a saved Yes answers it. An
+    // own-expense question gets the same part check, without the who-pays part
+    // its answer settles (Track 83).
     if (/\b(relocat(?:e|ion|ing)|move)\b/i.test(normalized)) {
       const ownExpense = OWN_EXPENSE.test(normalized);
       const relocationKey: CandidateFactKey = ownExpense ? "willing_to_relocate_at_own_expense" : "willing_to_relocate";
       const suffix = ownExpense ? " (at own expense)" : "";
-      const parts = relocationKey === "willing_to_relocate" ? relocationQuestionParts(trimmed) : null;
+      const parts = relocationQuestionParts(trimmed, { ownExpense });
       const broader = parts !== null && (parts.onSite || parts.local || parts.held !== null);
       const broaderFields = broader ? { broader: true } : {};
       const broaderNote = broader ? " Asks more than relocation; only a saved Yes answers it." : "";
@@ -247,7 +259,7 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
     // A single year/month/day box ("Start date year") belongs to a date on
     // the form itself, such as education history, not to internship availability.
     if (!/\b(?:year|month|day)\b/i.test(normalized) && (
-      /\b(?:available|availability).{0,24}(?:start|begin)|\bstart date\b/i.test(normalized) ||
+      (/\b(?:available|availability).{0,24}(?:start|begin)|\bstart date\b/i.test(normalized) && !NOT_FULL_TIME_START.test(normalized)) ||
       (START_WORDING.test(normalized) && !NOT_INTERNSHIP_START.test(normalized) && !YES_NO_LEAD.test(normalized)))) {
       return {
         status: "MAPPED",
@@ -295,6 +307,21 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
         method: "deterministic",
         explanation: "Current-student question; only a saved Yes to full-time enrollment answers it.",
         broader: true
+      };
+    }
+
+    // (Track 83) After the enrollment branches, so "full-time student" stays enrollment. A question stating dates or a
+    // length is broader: only a saved Yes inside the saved availability window answers it (candidate-service.ts).
+    if (FULL_TIME_WORK.test(normalized) && !NOT_FULL_TIME_WORK.test(normalized)) {
+      const dated = statedDateRange(normalized) !== null || statedLengthDays(normalized) !== null || /\b20\d\d\b/.test(normalized);
+      return {
+        status: "MAPPED",
+        key: "available_full_time",
+        scope: { kind: "global" },
+        confidence: 0.9,
+        method: "deterministic",
+        explanation: "(Track 83) Full-time work availability for the internship window.",
+        ...(dated ? { broader: true } : {})
       };
     }
 
@@ -391,6 +418,17 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
         confidence: 0.96,
         method: "deterministic",
         explanation: "Age 18 or older question."
+      };
+    }
+
+    if (COUNTY.test(normalized.replace(/[\s*:?]+$/, "").trim())) {
+      return {
+        status: "MAPPED",
+        key: "county",
+        scope: { kind: "global" },
+        confidence: 0.93,
+        method: "deterministic",
+        explanation: "(Track 83) County of the current address."
       };
     }
 
@@ -493,7 +531,10 @@ function countryOfPlace(place: string): string | null {
   return codes.size === 1 ? [...codes][0]! : null;
 }
 
-const PLACE_TAIL = /\s*\(.*$|\s+(?:for|during|starting|beginning|from|by|within|until|through)\b.*$/i;
+const PLACE_TAIL = /\s*\(.*$|\s+(?:for|during|starting|beginning|from|by|within|until|through)\b.*$|\s+if\b.*$|\s+(?:following|after|upon|once)\b.*$/i;
+// What a relocation question names in the place slot without naming a place ("do so", "for this position",
+// "any of the locations below", "state/cities where there is an office") (Track 83).
+const NOT_A_PLACE = /^(?:do so|for\b|any\b|all\b|wherever\b|where\b|(?:state|states|city|cities)(?:\s*\/\s*(?:state|states|city|cities))?\s+where\b|one of\b|either\b)/i;
 // A destination that is a purpose ("meet this requirement"), not a place.
 const PLACE_PURPOSE = /^(?:meet|fulfil+|satisfy|comply|accommodate|work|join|start|begin|attend|support|complete|perform|participate|be)\b/i;
 // An unnamed site ("the site location", "the role's primary site location", "our office").
@@ -502,13 +543,14 @@ const GENERIC_PLACE = /^(?:the|our|your|this|that|a|an)\s+(?:(?:role|job|positio
 /**
  * A relocation destination without what follows it ("Fixture Bay for the Summer internship (June-August)" is
  * "Fixture Bay"); null when nothing usable is left, it is a purpose ("meet this requirement"), or an unnamed site
- * ("the site location") (Track 62).
+ * ("the site location") (Track 62). A conditional or "following …" tail is cut too, and "do so", "for this position",
+ * "any of …" and "state/cities where …" are not places (Track 83).
  */
 function relocationPlace(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const place = raw.replace(PLACE_TAIL, "").trim().replace(/[,;:]+$/, "").trim();
   if (place.length < 2 || place.length > 120) return null;
-  if (PLACE_PURPOSE.test(place) || GENERIC_PLACE.test(place)) return null;
+  if (PLACE_PURPOSE.test(place) || GENERIC_PLACE.test(place) || NOT_A_PLACE.test(place)) return null;
   return place;
 }
 

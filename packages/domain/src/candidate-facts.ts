@@ -183,6 +183,16 @@ export const factDefinitions = {
     reusePolicy: "auto",
     explicitUserSourceRequired: true
   },
+  // (Track 83) Full-time (40 h/week) work availability; answers a dated question only inside the saved start..end window.
+  available_full_time: {
+    label: "Available to work full-time (40 h/week) for the saved internship window",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "standard",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
   work_arrangement: {
     label: "Open to on-site and hybrid work",
     valueType: "boolean",
@@ -422,6 +432,16 @@ export const factDefinitions = {
     reusePolicy: "auto",
     explicitUserSourceRequired: true
   },
+  // (Track 83) The county of the current address; county lists match it exactly once (with the profile's state when listed).
+  county: {
+    label: "County of the current address",
+    valueType: "text",
+    valueSchema: z.string().trim().min(1).max(80),
+    allowedScopes: ["global"],
+    sensitivity: "standard",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
   // A rule, not a value: the posting's stated pay as an hourly figure (standard-answers.ts).
   salary_expectation_rule: {
     label: "Salary expectation rule",
@@ -506,6 +526,16 @@ export const factDefinitions = {
     reusePolicy: "auto",
     explicitUserSourceRequired: true
   },
+  // (Track 83) Whether the candidate took the ACT; a saved No picks a list's one "did not take" option, never a score.
+  act_taken: {
+    label: "Took the ACT",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "standard",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
   salary_expectation: {
     label: "Salary expectation",
     valueType: "text",
@@ -531,6 +561,7 @@ export const candidateFactKeySchema = z.enum([
   "pronouns",
   "relatives_at_company",
   "available_end_date",
+  "available_full_time",
   "work_arrangement",
   "willing_background_check",
   "willing_to_relocate_at_own_expense",
@@ -557,6 +588,7 @@ export const candidateFactKeySchema = z.enum([
   "relative_government_official",
   "immediate_family_health_care_professional",
   "lives_within_50_miles",
+  "county",
   "salary_expectation_rule",
   "concerns_working_on_dod_projects",
   "us_person",
@@ -566,7 +598,8 @@ export const candidateFactKeySchema = z.enum([
   "unrestricted_us_work_authorization",
   "salary_expectation",
   "sat_score",
-  "act_score"
+  "act_score",
+  "act_taken"
 ]);
 
 export type CandidateFactKey = z.infer<typeof candidateFactKeySchema>;

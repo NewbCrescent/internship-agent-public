@@ -80,13 +80,31 @@ const NOT_NOW = /\bnot\b|\bnon[- ]?us\b|\bwill\b|\bsoon\b|\bbecom\w*|\bfuture\b|
  * The one option saying the candidate is a U.S. person now ("I am currently a "U.S. Person""), for a saved status
  * that names a U.S.-person category (citizen or national, permanent resident, refugee, asylee, protected individual).
  * Null for a saved "none" status, or when no option or several say so; "will soon become" and "not … but eligible" never count.
+ * An option that names "U.S. person" first and then defines it ("U.S. person. This status includes U.S. citizens, …")
+ * counts when its definition names the saved category and no foreign or non-U.S. status (Track 83).
  */
 export function usPersonOption(saved: string, options: readonly string[]): string | null {
   const category = exportControlCategory(saved);
   if (!category || category === "none") return null;
   const matches = options.filter((option) => {
     const key = normalize(option).replace(/["'“”‘’()]/g, "").replace(/[,;]$/, "").replace(/\s+/g, " ").trim();
-    return US_PERSON_NOW.test(key) && !NOT_NOW.test(key);
+    if (US_PERSON_NOW.test(key) && !NOT_NOW.test(key)) return true;
+    return definesUsPerson(key, category);
   });
   return matches.length === 1 ? matches[0]! : null;
+}
+
+const US_PERSON_DEFINED = /^(?:yes,? )?(?:i am (?:a )?)?us person\b\s*[.:;,-]?\s*(?:this status |which |status )?(?:includes?|including|means|covers|is defined as)\b(.*)$/;
+const DEFINITION_EXCLUDES = /\bforeign\b|\bnon[- ]?us\b|\bnot (?:a |an )?us\b/;
+
+/**
+ * (Track 83) Whether a normalized option names "U.S. person" and then defines it with a list naming the saved
+ * category. Plural category words ("U.S. citizens", "refugees") are read as singular.
+ */
+function definesUsPerson(key: string, category: ExportControlCategory): boolean {
+  const defined = US_PERSON_DEFINED.exec(key);
+  if (!defined) return false;
+  const rest = defined[1]!.replace(/\b(citizen|national|resident|refugee|asylee|asylum|individual)s\b/g, "$1");
+  if (DEFINITION_EXCLUDES.test(rest)) return false;
+  return exportControlCategoriesOf(rest).has(category);
 }
