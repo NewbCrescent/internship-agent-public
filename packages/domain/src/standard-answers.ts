@@ -159,8 +159,9 @@ function clearanceNoneOption(options: readonly string[]): string | null {
   return hits.length === 1 ? hits[0]! : null;
 }
 
+// (Track 89) "Are you one of the following: a U.S. citizen, a U.S. national, …?"
 // (Track 79) A question that requires or asks U.S.-person status ("applicant must be a U.S. citizen, lawful permanent resident …", "are you a U.S. person?", "comply with ITAR"; Track 83: "U.S. person status (including …").
-const US_PERSON_ASKED = /\bmust (?:either )?be (?:a )?["“]?u\.?s\.? (?:person|citizen)|\bare you a ["“]?u\.?s\.? person\b|\b(?:applicant|candidate|you) must be a u\.?s\.? citizen\b|\bu\.?s\.? person\b.{0,80}\b(?:includ\w*|defined)\b|\bcomply with itar\b/;
+const US_PERSON_ASKED = /\bmust (?:either )?be (?:a )?["“]?u\.?s\.? (?:person|citizen)|\bare you a ["“]?u\.?s\.? person\b|\b(?:applicant|candidate|you) must be a u\.?s\.? citizen\b|\bu\.?s\.? person\b.{0,80}\b(?:includ\w*|defined)\b|\bcomply with itar\b|\bare you (?:one|any) of the following\s*:?\s*(?:an? )?u\.?s\.? citizen\b/;
 // Words that ask something the saved status does not settle: a non-U.S. person, sanctioned countries, a needed license, dual citizenship.
 const US_PERSON_NOT_SETTLED = /\b(?:not a|non-?u\.?s\.?|foreign (?:person|national)|cuba|iran|north korea|syria|sudan|crimea|sanction\w*|license (?:is )?required|require (?:an )?(?:export )?license|dual citizen\w*)\b/;
 const QUALIFIED = /\b(?:but|however|although|though|until|unless|except|not)\b/;

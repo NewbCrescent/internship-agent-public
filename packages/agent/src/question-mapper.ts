@@ -25,7 +25,8 @@ const EXPORT_CONTROL = /\bexport[- ]?control\w*|\bitar\b|\bu\.?\s?s\.? persons?\
 // Ashby's short-titled form: "Visa Support: Do you require any visa support to work in the U.S.?" (Track 22).
 // Workday's "… require our company to file a petition or application for employment-based immigration status on your behalf"
 // and "Will you need to be sponsored for a work visa …?" (Track 79).
-const SPONSORSHIP = /\b(?:require|need).{0,30}(?:sponsor|sponsorship|sponsored)\b|\bvisa sponsorship\b|\b(?:require|need)\b.{0,30}\bvisa support\b|\b(?:require|need)\b.{0,60}\b(?:file|submit)\b.{0,30}\bpetition\b/i;
+// (Track 89) PTC: "… require, or will you in the future require, employment-based immigration sponsorship?"
+const SPONSORSHIP = /\b(?:require|need).{0,30}(?:sponsor|sponsorship|sponsored)\b|\bvisa sponsorship\b|\b(?:require|need)\b.{0,30}\bvisa support\b|\b(?:require|need)\b.{0,60}\b(?:file|submit)\b.{0,30}\bpetition\b|\b(?:require|need)\b.{0,60}\bimmigration sponsorship\b/i;
 // Start-date questions in other words ("earliest date you can start", "when can you start", "timeline for starting",
 // "When would you be available if an offer was accepted?" (micron.wd1, 2026-11-25), "When would you be available?");
 // availability for an interview or to work a schedule ("to work weekends"), a full-time or after-graduation start, and
@@ -56,7 +57,8 @@ const AGE_16 = /\bat\s+least\s+(?:the\s+age\s+of\s+)?(?:16|sixteen)\b|\b(?:16|si
 const EMPLOYER_REFERENCE = /\b(?:here|for us|with us|(?:this|our|the)\s+(?:company|organization|organisation|firm|employer))\b/i;
 // (Track 79) Graduation wordings the date rule below misses: "When are you graduating?", "What semester are you on track
 // to graduate?", "What is your anticipated graduation year?", "What year do you graduate?", "What is your expected date
-// of graduation?", "Will you be graduating before September 2027?".
+// of graduation?", "Will you be graduating before September 2027?". (Track 89) "When do you graduate?", "What year are you
+// expected to graduate?", "the year you anticipate graduating", "When do you expect to complete your current degree program?".
 const GRADUATION_WORDING = new RegExp([
   String.raw`\bwhen (?:are|will) you (?:be )?graduat(?:e|ing)\b`,
   String.raw`\bwhen (?:do|will) you (?:expect|plan|anticipate|intend) to graduate\b`,
@@ -67,7 +69,11 @@ const GRADUATION_WORDING = new RegExp([
   String.raw`\bgraduation (?:year|season|semester|term|month and year|month\/year)\b`,
   String.raw`\b(?:date|month and year|month\/year) of graduation\b`,
   String.raw`\bgraduat(?:e|ing) (?:before|after|by|prior to|no later than|no earlier than) (?:the )?(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.? |spring |summer |fall |autumn |winter )?20\d\d\b`,
-  String.raw`\bgraduation date (?:is )?in 20\d\d or (?:later|after|earlier|before)\b`
+  String.raw`\bgraduation date (?:is )?in 20\d\d or (?:later|after|earlier|before)\b`,
+  String.raw`\bwhen do you graduate\b`,
+  String.raw`\b(?:what|which) (?:semester|term|season|year|month) are you (?:expected|expecting|scheduled|projected|anticipated|planning) to graduate\b`,
+  String.raw`\b(?:year|semester|term|month|date) (?:that )?you (?:anticipate|expect|plan on|plan to) (?:graduating|graduate)\b`,
+  String.raw`\bwhen do you (?:expect|plan|anticipate|intend) to (?:complete|finish) your (?:current )?(?:degree|degree program|program|studies)\b`
 ].join("|"), "i");
 // Only for labels that match through GRADUATION_WORDING: high school is the planner's, and a full-time, relocation, or
 // offer question after graduating, or whether the candidate already graduated, is not the graduation date.
@@ -488,7 +494,7 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
     }
 
     if ((/\b(?:on[- ]?site|in[- ]office|in[- ]person|in\s+the\s+office|in\s+(?:the|our)\s+(?:[a-z][\w.'-]*\s+){0,3}office|hybrid)\b/i.test(normalized) || OFFICE_WORK.test(normalized)) &&
-      /\b(?:open|willing|able|comfortable|ok(?:ay)?|agree|available)\b|\bcan\s+you\b|\bwould\s+you\b/i.test(normalized) &&
+      /\b(?:open|willing|able|comfortable|ok(?:ay)?|agree|available|excited)\b|\bcan\s+you\b|\bwould\s+you\b/i.test(normalized) &&
       !/\b(?:prefer\w*|unable|not\s+able|cannot|can't|remote\s+only|fully\s+remote)\b/i.test(normalized) &&
       // Whether the candidate can work "from this location" depends on where they live or would
       // relocate, which the on-site answer does not say; it pauses.

@@ -94,7 +94,8 @@ export function usPersonOption(saved: string, options: readonly string[]): strin
   return matches.length === 1 ? matches[0]! : null;
 }
 
-const US_PERSON_DEFINED = /^(?:yes,? )?(?:i am (?:a )?)?us person\b\s*[.:;,-]?\s*(?:this status |which |status )?(?:includes?|including|means|covers|is defined as)\b(.*)$/;
+// (Track 89) "U.S. person. This ITAR/EAR status includes …" (Hadrian).
+const US_PERSON_DEFINED = /^(?:yes,? )?(?:i am (?:a )?)?us person\b\s*[.:;,-]?\s*(?:this (?:[a-z/]+ )?status |which |status )?(?:includes?|including|means|covers|is defined as)\b(.*)$/;
 const DEFINITION_EXCLUDES = /\bforeign\b|\bnon[- ]?us\b|\bnot (?:a |an )?us\b/;
 
 /**

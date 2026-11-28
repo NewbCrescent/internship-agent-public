@@ -29,7 +29,9 @@ import {
   type MappedQuestion,
   type QuestionContext,
   type QuestionResolution,
-  type RememberAnswerInput
+  type RememberAnswerInput,
+  withoutCoveredTerm,
+  type AvailabilityWindow
 } from "@internship-agent/domain";
 
 import { courseworkAnswerFact } from "./coursework";
@@ -191,13 +193,26 @@ function savedAvailabilityWindow(database: DatabaseSync): { start: string | null
 }
 
 /**
+ * (Track 89) The saved availability window for answering questions: like savedAvailabilityWindow, but a date whose
+ * fact the candidate did not save for automatic reuse reads as null, so nothing is answered from it.
+ */
+export function reusableAvailabilityWindow(database: DatabaseSync): AvailabilityWindow {
+  const read = (key: "available_start_date" | "available_end_date") => {
+    const fact = getCurrentFact(database, LOCAL_CANDIDATE_ID, key, { kind: "global" });
+    return fact && fact.source === "user" && fact.reusePolicy === "auto" && typeof fact.value === "string" ? fact.value : null;
+  };
+  return { start: read("available_start_date"), end: read("available_end_date") };
+}
+
+/**
  * Why a relocation question's other parts keep it paused (Track 62): a temporary or permanent move, who pays,
  * stated dates, remote work, or living nearby not joined by "or" (relocationQuestionParts), or an on-site part
  * without a saved Yes to on-site work. Null when only the relocation part is left. `ownExpense` drops the who-pays
  * part, which the own-expense answer settles (Track 83).
  */
 function relocationPartsHold(database: DatabaseSync, question: string, ownExpense: boolean): string | null {
-  const parts = relocationQuestionParts(question, { ownExpense });
+  // (Track 89) The summer term and spans the saved window covers ("(June-August)", "(Summer 2027)") are not other parts.
+  const parts = relocationQuestionParts(withoutCoveredTerm(question, reusableAvailabilityWindow(database)), { ownExpense });
   if (parts.held) return parts.held;
   if (parts.onSite) {
     const onSite = getCurrentFact(database, LOCAL_CANDIDATE_ID, "work_arrangement", { kind: "global" });

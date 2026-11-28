@@ -1,4 +1,5 @@
 import type {
+  AvailabilityWindow,
   BrowserField,
   FillDecision,
   PauseRecord,
@@ -6,7 +7,7 @@ import type {
 } from "@internship-agent/domain";
 import { citizenAuthorizationOption, factOption, FACT_OPTION_KEYS, isStandardizedTestTypeQuestion, priorInternshipThreshold, samePlace, savedYesNoOption, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
 import { asksForAllSchools, asksForHighSchool, schoolsAttendedLines, type EducationRow, type HighSchoolPlace } from "@internship-agent/domain";
-import { clipDecisionText } from "@internship-agent/domain";
+import { clipDecisionText, internshipTermAnswer, onSiteRelocationOption } from "@internship-agent/domain";
 import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, fieldOfStudyCategoryOption, isStandardAnswerKey, matchOfferedOption, namedSchoolRelation, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption, usPersonYesNoOption } from "@internship-agent/domain";
 
 import { classifyFieldRole, classifyUploadRole, isSensitiveRole } from "./ats/field-roles";
@@ -25,6 +26,8 @@ export type FieldResolution =
       value: boolean | string;
       /** (Track 62) the candidate saved U.S. citizenship as Yes and this is a Yes to U.S. work authorization; it may pick the one option citizenship makes true. */
       usCitizen?: true;
+      /** (Track 89) a saved on-site Yes on a U.S. posting with a saved U.S.-wide relocation Yes; it may pick the one "Yes, I will relocate …" option. */
+      usRelocation?: true;
     }
   | { status: "NEEDS_INPUT"; key: string | null; scope: string | null }
   | {
@@ -77,6 +80,8 @@ export type PlannerInputs = {
   schools?: SchoolInputs;
   /** (Track 83, set by planAutofill) Another field on the form asks the city or ZIP/postal code. */
   addressSplit?: boolean;
+  /** (Track 89) The saved internship availability window (user-saved start and end dates), for term and availability questions. */
+  availability?: AvailabilityWindow;
 };
 
 export type SchoolInputs = { rows: EducationRow[]; highSchoolPlace?: HighSchoolPlace };
@@ -350,10 +355,19 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
   if (education) return education;
   const gpa = gpaDecision(field, inputs.profile.gpa);
   if (gpa) return gpa;
+  const scale = gpaScaleDecision(field, inputs.profile.gpa);
+  if (scale) return scale;
   const csMajor = csMajorDecision(field, inputs);
   if (csMajor) return csMajor;
   const namedSchool = namedSchoolDecision(field, inputs, resolution);
   if (namedSchool) return namedSchool;
+  // (Track 89) A term or availability question answered from the saved availability window.
+  const term = internshipTermAnswer(field, inputs.availability);
+  if (term) {
+    return term.action === "fill"
+      ? fill(field, term.value, AVAILABILITY_BASIS, term.reason)
+      : { fieldId: field.id, action: term.action, value: term.value, basis: AVAILABILITY_BASIS, reason: term.reason, pause: null };
+  }
 
   if (field.kind === "email") {
     if (inputs.profile.email) {
@@ -586,6 +600,12 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
       if (!match) {
         const citizen = citizenOption(field, resolution);
         if (citizen) return { fieldId: field.id, action: "choose", value: citizen, basis: CITIZEN_BASIS, reason: CITIZEN_OPTION_REASON, pause: null };
+      }
+      if (!match && resolution.usRelocation && resolution.value === true) {
+        const moving = onSiteRelocationOption(field.options, inputs.availability);
+        if (moving) {
+          return { fieldId: field.id, action: "choose", value: moving, basis: { kind: "fact", key: resolution.key, scope: resolution.scope }, reason: "You are open to on-site work and willing to relocate anywhere in the U.S. (your saved answers).", pause: null };
+        }
       }
       if (!match && isStandardAnswerKey(resolution.key)) {
         // A legal or background answer is never echoed in the pause.
@@ -952,6 +972,7 @@ const CHOICE_KINDS: ReadonlySet<BrowserField["kind"]> = new Set(["radio", "check
 
 /** A type-ahead: the value is typed and the matching suggestion picked by the executor (matchSuggestion). */
 const CITIZEN_BASIS = { kind: "fact", key: "us_citizen", scope: "global" } as const;
+const AVAILABILITY_BASIS = { kind: "fact", key: "available_start_date", scope: "global" } as const;
 const CITIZEN_OPTION_REASON = "Your saved U.S. citizenship answer makes this the one true work-authorization option.";
 
 /** (Track 62) The one work-authorization option the saved U.S. citizenship makes true, for a U.S. authorization Yes marked `usCitizen`; null otherwise. */
@@ -1086,10 +1107,15 @@ export function matchCountryOption(value: string, options: string[]): string | n
   return matches.length === 1 ? matches[0]! : null;
 }
 
-const SCHOOL_LABEL = /^(?:school|school name|university|college|school or university|college or university|(?:school|college|university) ?\/ ?(?:school|college|university)|(?:which|what) (?:university|college|school) (?:are you (?:currently )?attending|do you (?:currently )?attend|did you attend)\??)$/;
+// (Track 89) Also "Current school or university:", "What college/university do you attend?", "What is the name of your university?", "Start typing your school's name…".
+const SCHOOL_LABEL = /^(?:school|school name|university|college|school or university|college or university|(?:school|college|university) ?\/ ?(?:school|college|university)|(?:which|what) (?:university|college|school) (?:are you (?:currently )?attending|do you (?:currently )?attend|did you attend)\??|current (?:school|university|college)(?: or (?:university|college))?|(?:what|which) (?:college|university|school) ?\/ ?(?:college|university|school) do you (?:currently )?attend\??|what is the name of your (?:university|college|school)\??|please select your current (?:school|university|college)(?: from the list below)?|(?:which|what) (?:university|college|school) are you currently attending(?: or did you last attend)?\??|start typing your school'?s name(?:…|\.\.\.)?)$/;
+// (Track 89) "… Select "Other" if not listed", "Please select "Other (School Not Listed)" if your school is not listed."
+const OTHER_IF_UNLISTED = /\s*(?:please )?select ["“]?other(?: \([^)]*\))?["”]? if (?:your school is |it is |it's )?not listed\.?$/;
+// (Track 89) Words too common in school names to tell two schools apart.
+const SCHOOL_COMMON_WORDS = new Set(["university", "univ", "college", "school", "institute", "institution", "technology", "state", "the", "and", "for", "of", "at", "campus", "main", "community"]);
 const DEGREE_LABEL = /^(?:degree|degree type)$/;
 /** "What degree level are you currently pursuing, or have you most recently completed?": answered like a Degree list. */
-const DEGREE_PURSUING_LABEL = /^(?:what|which) (?:degree|degree level|level of degree|type of degree|degree type) are you (?:currently )?pursuing(?:,? or (?:have you )?(?:most )?recently completed)?\??$/;
+const DEGREE_PURSUING_LABEL = /^(?:what|which) (?:degree|degree level|level of degree|type of degree|degree type) are you (?:currently )?pursuing(?:,? or (?:have (?:you )?)?(?:most )?recently completed)?\??$/;
 /**
  * (Track 79) The degree level being studied ("What degree program are you actively enrolled in?", "Current Program
  * Type") or held at graduation ("Level of education completed once you've graduated?").
@@ -1147,6 +1173,21 @@ function monthOption(month: number, options: string[]): string | null {
   return matches.length === 1 ? matches[0]! : null;
 }
 
+/**
+ * (Track 89) For a list that asks for "Other" when the school is not listed: its one "Other" option, only when the list
+ * has fewer than 500 options (a 500-option list may be cut short) and no other option shares a distinctive word with
+ * the profile's school (it might be the school under another name). Null otherwise.
+ */
+function unlistedSchoolOption(school: string, options: readonly string[]): string | null {
+  if (options.length >= 500) return null;
+  const words = (text: string) => new Set((text.toLocaleLowerCase("en-US").match(/[a-z0-9]+/g) ?? []).filter((word) => word.length >= 3 && !SCHOOL_COMMON_WORDS.has(word)));
+  const own = words(school);
+  const others = options.filter((option) => /^other\b/i.test(option.trim()));
+  if (others.length !== 1) return null;
+  const shared = options.some((option) => !/^other\b/i.test(option.trim()) && [...words(option)].some((word) => own.has(word)));
+  return shared ? null : others[0]!;
+}
+
 /** The one option naming the school with a trailing US state code ("University of Example--Springfield (IL)"); null for none or several. */
 function stateSuffixedOption(school: string, options: string[]): string | null {
   const wanted = sameNameKey(school);
@@ -1179,7 +1220,8 @@ function educationDecision(field: BrowserField, education: EducationInputs | und
   const options = (field.kind === "select" || field.kind === "radio") ? field.options ?? [] : [];
   // (Track 79) A degree-level question may also be a checkbox group of two or more options.
   const levelOptions = field.kind === "checkbox" && (field.options?.length ?? 0) >= 2 ? field.options! : options;
-  if (SCHOOL_LABEL.test(label)) {
+  const schoolLabel = label.replace(OTHER_IF_UNLISTED, "").replace(/[\s:]+$/, "").trim();
+  if (SCHOOL_LABEL.test(schoolLabel)) {
     const school = education.school?.trim();
     if (!school) return null;
     const basis = { kind: "profile" as const, field: "school" };
@@ -1190,6 +1232,8 @@ function educationDecision(field: BrowserField, education: EducationInputs | und
       // Also the one option naming it with a trailing US state code ("University of Example--Springfield (IL)").
       const option = sameNamedOption(school, options) ?? campusOption(school, options) ?? stateSuffixedOption(school, options);
       if (option) return { fieldId: field.id, action: "choose", value: option, basis, reason: "The school on your profile.", pause: null };
+      const other = OTHER_IF_UNLISTED.test(label) ? unlistedSchoolOption(school, options) : null;
+      if (other) return { fieldId: field.id, action: "choose", value: other, basis, reason: "The school on your profile is not on this list, and the question asks for Other then.", pause: null };
       return pauseDecision(field, {
         question: `Your profile says "${school}" for "${field.label}", which is not one of its options. Which option should be chosen?`.slice(0, 500),
         key: null,
@@ -1402,9 +1446,9 @@ function schoolQuestionDecision(field: BrowserField, schools: SchoolInputs | und
  * (GPA_SENTENCE_LABEL). A major, departmental, high-school, weighted, term, or
  * other-scale GPA never matches, so it is never answered with the profile GPA.
  */
-const GPA_LABEL = /^(?:(?:what is|what's|whats) your )?(?:(?:undergraduate|cumulative|current|overall|college|university|most current|most recent)\s+)*(?:gpa|grade point average)(?:\s*\(?(?:out of|on a)\s+4(?:\.0+)?(?:\s+scale)?\)?)?(?:\s*\((?:undergraduate|undergrad)\))?(?:\s*\(?(?:if applicable)\)?)?\??$/;
+const GPA_LABEL = /^(?:(?:what is|what's|whats|what was|what is\/was) your )?(?:(?:undergraduate|cumulative|current|overall|college|university|most current|most recent|college\/university|university\/college|current or final|current or most recent|final)\s+)*(?:gpa|grade point average)(?:\s*\(?(?:out of|on a|normalized to a)\s+4(?:\.0+)?(?:\s+scale)?\)?)?(?:\s*\((?:undergraduate|undergrad)\))?(?:\s*\(?(?:if applicable)\)?)?\??$/;
 /** "Please specify the overall average grade (GPA) for your last/current degree:" (Veeva on Lever, 2026-11-26), "Please enter your GPA". */
-const GPA_SENTENCE_LABEL = /^(?:please )?(?:specify|enter|select|provide|indicate|state)(?: your| the)?(?: overall| cumulative| current)?(?: average)?(?: grade(?: point average)?)? \(?gpa\)?(?: for your (?:last\/current|current\/last|current|most recent|last or current|current or most recent) degree)?[:?]?$/;
+const GPA_SENTENCE_LABEL = /^(?:please )?(?:specify|enter|select|provide|indicate|state)(?: your| the)?(?: overall| cumulative| current)?(?: average)?(?: grade(?: point average)?)? \(?gpa\)?(?: for your (?:last\/current|current\/last|current|most recent|last or current|current or most recent) degree)?[:?.]?$/;
 const PROFILE_GPA = /^[0-4]\.\d{1,3}$/;
 const GPA_NUMBER = String.raw`(\d(?:\.\d+)?)`;
 
@@ -1460,8 +1504,10 @@ function gpaDecision(field: BrowserField, gpa: string | undefined): FillDecision
   const label = normalizedLabel(field.label).replace(/[‘’]/g, "'");
   // (Track 79) "What is your most current GPA? (If recently graduated, provide your GPA at graduation)": the trailing "(if …)" note is not part of the label.
   const bare = label.replace(/\s*\(if [^)]*\)\s*$/, "");
+  // (Track 89) "If you are … within the past 24 months, what is your current or final GPA?", "For your most recent degree, what is/was your GPA …?"
+  const core = bare.replace(/^(?:if you (?:are|were|have)\b[^,?]{0,120}|for your (?:most recent|current|last) degree),\s*/, "");
   const isGpa = (text: string) => GPA_LABEL.test(text) || GPA_SENTENCE_LABEL.test(text);
-  if (!(isGpa(label) || isGpa(bare)) || field.widget === "autocomplete") return null;
+  if (!(isGpa(label) || isGpa(bare) || isGpa(core)) || field.widget === "autocomplete") return null;
   const saved = gpa?.trim();
   if (!saved || !PROFILE_GPA.test(saved)) return null;
   const basis = { kind: "profile" as const, field: "gpa" };
@@ -1505,6 +1551,25 @@ function gpaDecision(field: BrowserField, gpa: string | undefined): FillDecision
     });
   }
   return null;
+}
+
+// (Track 89) "Please specify the grading scale used by your current school.", "Please select the corresponding GPA scale:".
+const GPA_SCALE_LABEL = /^(?:please )?(?:select|specify|indicate|choose)(?: the| your)?(?: corresponding)? (?:gpa|grading|grade) scale(?: used by your (?:current )?(?:school|university|college))?[:?.]?$|^(?:gpa|grading) scale[:?]?$/;
+const FOUR_POINT = /^(?:0(?:\.0+)?\s*-\s*)?4(?:\.0+)?(?:\s*(?:point|pt))?(?:\s+scale)?$|^(?:out of|on a)\s+4(?:\.0+)?(?:\s+scale)?$/;
+
+/**
+ * (Track 89) A GPA scale list answered with its one 4.0-scale option, for a valid profile GPA of at most 4.0 (a
+ * profile GPA above 4.0 is not on a 4.0 scale). Null otherwise, so the usual rules apply.
+ */
+function gpaScaleDecision(field: BrowserField, gpa: string | undefined): FillDecision | null {
+  if ((field.kind !== "select" && field.kind !== "radio") || field.widget === "autocomplete" || !field.options?.length) return null;
+  if (!GPA_SCALE_LABEL.test(normalizedLabel(field.label))) return null;
+  const saved = gpa?.trim();
+  if (!saved || !PROFILE_GPA.test(saved) || Number(saved) > 4.0) return null;
+  const hits = field.options.filter((option) => FOUR_POINT.test(option.toLocaleLowerCase("en-US").replace(/\s+/g, " ").trim()));
+  return hits.length === 1
+    ? { fieldId: field.id, action: "choose", value: hits[0]!, basis: { kind: "profile", field: "gpa" }, reason: "The GPA on your profile is on a 4.0 scale.", pause: null }
+    : null;
 }
 
 /** "Are you a current college student majoring in computer science (or a related field)?" */
@@ -1730,7 +1795,7 @@ const CONTACT_LABELS: Array<{ key: ContactKey; pattern: RegExp }> = [
   { key: "addressPostalCode", pattern: /^(postal|zip)( code)?$|^zip\/postal code$|^postal\/zip code$/ },
   { key: "addressCountry", pattern: /^country$|^country \/ territory$|^country\/territory$|^(?:phone )?country(?: phone| dialing)? code(?: picker)?$/ },
   { key: "phoneType", pattern: /^phone (device )?type$|^type of phone$|^phone number type$/ },
-  { key: "fieldOfStudy", pattern: /^(field|area) of study$|^major$|^major\(s\)$|^discipline$|^major or field of study$|^field of study or major$|^major ?\/ ?field of study$|^field of study ?\/ ?major$|^what is your major\??$|^(?:please )?(?:select|choose|enter|indicate|specify|provide) your (?:field|area) of study:?$|^what is your (?:field|area) of study\??$/ }
+  { key: "fieldOfStudy", pattern: /^(field|area) of study$|^major$|^major\(s\)$|^discipline$|^major or field of study$|^field of study or major$|^major ?\/ ?field of study$|^field of study ?\/ ?major$|^what is your major\??$|^(?:please )?(?:select|choose|enter|indicate|specify|provide) your (?:field|area) of study:?$|^what is your (?:field|area) of study\??$|^what is your (?:field|area) of study ?\/ ?(?:degree program|program|major)\??$|^start typing your discipline'?s name(?:…|\.\.\.)?$/ }
 ];
 
 // (Track 90) Lever's demographic survey opens with "What is your location?" over a list of every country, and shows its

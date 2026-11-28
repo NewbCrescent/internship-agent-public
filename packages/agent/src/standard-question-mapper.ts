@@ -21,7 +21,7 @@ const NEGATION = /\bnever\b|\bnot\b|n't\b|\bno longer\b/;
 const EXPLAIN = /\bexplain\b|\bdescribe\b|\bdetails?\b|\belaborate\b|\bprovide (?:more )?information\b|\bif (?:yes|so)\b/;
 
 const SALARY = /\bsalary\b|\bcompensation\b|\bpay\s+(?:expectations?|requirements?|range|rate)\b|\b(?:desired|expected|target|requested)\s+(?:pay|rate|wage|hourly rate|compensation|salary)\b|\bhourly\s+(?:rate|wage|pay)\b|\brate of pay\b|\bwage expectations?\b/;
-const CITIZENSHIP = /\bcitizen(?:s|ship)?\b|\bpermanent resident\b|\bgreen card\b|\bu\.?\s?s\.? (?:person|national)\b|\bitar\b|\bear\b|\bexport[- ]control\w*|\bexport administration regulations\b|\binternational traffic in arms\b|\bdeemed exports?\b/;
+const CITIZENSHIP = /\bcitizen(?:s|ship)?\b|\bpermanent resident\b|\bgreen card\b|\bu\.?\s?s\.? (?:person|national)\b|\bitar\b|\bear\b|\bexport[- ]control\w*|\bexport administration regulations\b|\binternational traffic in arms\b|\bdeemed exports?\b|\bexport regulations?\b|\b(?:visa|immigration) status\b/;
 // "You must be a U.S. Person because … Are you a US Person?": a Yes/No question asked after a statement.
 const ASKS_US_PERSON = /(?:^|[.?!:;)]\s+)(?:are|is) you (?:a |an )?(?:u\.?\s?s\.?|us) person\b[^?]*\?/;
 const CLEARANCE = /\bclearances?\b/;
@@ -45,6 +45,9 @@ const EMPLOYER_REFERENCE = /\b(?:here|for us|with us|(?:this|our|the)\s+(?:compa
 const OPT_WORDS = /\boptional practical training\b/;
 const OPT_ACRONYM = /\b(?:STEM[- ])?OPT\b(?![- ]?(?:in|out|IN|OUT)\b)/;
 const OPT_CURRENT = /\b(?:currently|presently|now)\b[^?]{0,40}\b(?:on|in|using)\b[^?]{0,30}\b(?:optional practical training|(?:stem )?opt)\b|^(?:are|is) you (?:currently |presently )?(?:on|in) (?:a period of )?(?:optional practical training|(?:stem )?opt)\b/;
+// (Track 89) "Are you on EAD, OPT or CPT? Or need a H-1B visas transfer?": a saved U.S. citizenship or permanent residence answers No (the f1 rule).
+const VISA_CLASS_ITEM = String.raw`(?:stem opt|opt|cpt|ead|f-?1|j-?1|h-?1b|tn)(?: (?:visa|visas|status))?`;
+const VISA_CLASS_NOW = new RegExp(String.raw`^(?:are|is) you (?:currently |presently |now )?(?:on|in|holding|using) (?:an? )?${VISA_CLASS_ITEM}(?:(?:\s*,\s*or\s+|\s*,\s*|\s*\/\s*|\s+or\s+)${VISA_CLASS_ITEM}){1,5}\s*\??(?:\s*(?:or )?(?:do you )?(?:need|require) (?:an? )?h-?1b (?:visas? )?transfer\s*\??)?$`);
 const OPT_EXTENSION = /\beligib\w*\b[^?]{0,40}\b(?:(?:stem )?opt|optional practical training)\b[^?]{0,30}\bextension\b|\beligib\w*\b[^?]{0,20}\bstem opt\b/;
 
 type Prepared = {
@@ -166,7 +169,8 @@ function citizenship(question: Prepared): QuestionMapping {
     return ambiguous("The question asks about a citizenship other than U.S. citizenship; answer it directly.");
   }
   const exportWords = /\bu\.?\s?s\.? person\b|\bitar\b|\bear\b|\bexport\b|\binternational traffic in arms\b|\bdeemed exports?\b/.test(n);
-  const listWords = /\b(?:which|what|select|indicate|choose|identify)\b[^?]{0,80}\b(?:describes|applies|apply|status|category|categories|following)\b/.test(n);
+  // (Track 89) "Please select appropriate response:" also asks for one option of a status list.
+  const listWords = /\b(?:which|what|select|indicate|choose|identify)\b[^?]{0,80}\b(?:describes|applies|apply|status|category|categories|following)\b|\bselect (?:the |an? )?(?:appropriate|applicable|correct) (?:response|answer|option)\b/.test(n);
   if (exportWords) {
     if (listWords) return mapped("us_person_export_controls", "Export-control status list (U.S. person under ITAR/EAR).");
     if (question.yesNo || ASKS_US_PERSON.test(n) || /^(?:i am|i'm)\b/.test(n)) return yesNo(question, "us_person", "U.S. person (ITAR/EAR) question.");
@@ -174,6 +178,11 @@ function citizenship(question: Prepared): QuestionMapping {
     return ambiguous("The export-control statement does not ask a question the saved status answers; answer it directly.");
   }
   if (!question.usWords) return ambiguous("Citizenship questions are answered only for the United States, and the question names no country.");
+  if (/\b(?:visa|immigration) status\b/.test(n)) {
+    return question.choiceField && !question.yesNo
+      ? mapped("us_person_export_controls", "(Track 89) Visa or immigration status list; only the one option naming your saved export-control status is chosen.")
+      : ambiguous("A visa or immigration status question that is not a list is answered directly.");
+  }
   const lpr = /\bpermanent resident\b|\bgreen card\b/.test(n);
   const refugeeEtc = /\brefugee\b|\basyl(?:ee|um)\b|\bprotected individual\b/.test(n);
   const national = /\bnational\b/.test(n);
@@ -310,10 +319,13 @@ function dod(question: Prepared): QuestionMapping {
   return yesNo(question, "concerns_working_on_dod_projects", "Concerns about working on Department of Defense projects question.");
 }
 
-/** Only "currently on OPT?" and "eligible for the (STEM) OPT extension?" Yes/No questions; a date, a future need, or a negation holds. */
+/**
+ * Only "currently on OPT?" and "eligible for the (STEM) OPT extension?" Yes/No questions, and (Track 89) "Are you on
+ * EAD, OPT or CPT? Or need a H-1B visas transfer?"; a date, a future need, or a negation holds.
+ */
 function optQuestion(question: Prepared): QuestionMapping {
   const { n } = question;
-  if (!question.yesNo || NEGATION.test(n) || !(OPT_CURRENT.test(n) || OPT_EXTENSION.test(n))) {
+  if (!question.yesNo || NEGATION.test(n) || !(OPT_CURRENT.test(n) || OPT_EXTENSION.test(n) || VISA_CLASS_NOW.test(n))) {
     return ambiguous("Only Yes/No questions about being on F-1 OPT now or eligible for its STEM extension are answered; answer this one directly.");
   }
   return yesNo(question, "f1_optional_practical_training", "F-1 Optional Practical Training (OPT) question.");

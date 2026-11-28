@@ -107,3 +107,11 @@ export function usCitizenSettles(database: DatabaseSync, candidateId: string, fa
   const citizen = getCurrentFact(database, candidateId, "us_citizen", { kind: "global" });
   return citizen !== null && citizen.value === true && citizen.source === "user" && citizen.reusePolicy === "auto";
 }
+
+/** (Track 89) Whether a saved on-site Yes may pick a "Yes, I will relocate …" option: the posting's one stated country is the U.S. and the candidate saved a U.S.-wide relocation Yes for automatic reuse. */
+export function usRelocationSettles(database: DatabaseSync, candidateId: string, fact: CandidateFact, context: QuestionContext): boolean {
+  if (fact.key !== "work_arrangement" || fact.value !== true) return false;
+  if (context.postingCountryCode?.toUpperCase() !== "US") return false;
+  const relocation = getCurrentFact(database, candidateId, "willing_to_relocate", { kind: "country", code: "US" });
+  return relocation !== null && relocation.value === true && relocation.source === "user" && relocation.reusePolicy === "auto";
+}

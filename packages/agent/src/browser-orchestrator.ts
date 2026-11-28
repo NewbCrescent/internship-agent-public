@@ -155,7 +155,7 @@ import {
   verifiedCandidateDocumentPath
 } from "./base-resume-service";
 import { saveApplicationRecordQuietly, type ApplicationRecordWriter } from "./application-record";
-import { answerCandidateQuestion, resolveCandidateQuestion } from "./candidate-service";
+import { answerCandidateQuestion, resolveCandidateQuestion, reusableAvailabilityWindow } from "./candidate-service";
 import { companyStanding, profileLabel, yearHoldMessage } from "./company-policy";
 import { gmailMailboxFactory } from "./gmail-mailbox";
 import { greenhouseSecurityCodeLookup } from "./greenhouse-security-code";
@@ -165,7 +165,7 @@ import { applyVoiceDrafts, createDefaultVoiceDrafter, draftSourcesFor, type Voic
 import { createDefaultPauseReviewer, type PauseReviewer } from "./pause-review";
 import { employerGreenhouseJobId, findGreenhouseEmbed, type GreenhouseEmbedLookup } from "./greenhouse-embed-board";
 import { AutomaticRunStopped, IcimsAccountHeld, PostingClosed, WorkdayAccountHeld, WorkdayEntryStopped } from "./run-errors";
-import { postingLocationNames, postingQuestionContext, savedSelfIdentification, usCitizenSettles } from "./saved-answers";
+import { postingLocationNames, postingQuestionContext, savedSelfIdentification, usCitizenSettles, usRelocationSettles } from "./saved-answers";
 import {
   failureStop,
   fillStops,
@@ -790,7 +790,8 @@ async function resolveFields(
         scope: scopeKey(resolution.fact.scope),
         display: resolution.displayAnswer,
         value: resolution.fact.value as boolean | string,
-        ...(usCitizenSettles(database, LOCAL_CANDIDATE_ID, resolution.fact) ? { usCitizen: true as const } : {})
+        ...(usCitizenSettles(database, LOCAL_CANDIDATE_ID, resolution.fact) ? { usCitizen: true as const } : {}),
+        ...(usRelocationSettles(database, LOCAL_CANDIDATE_ID, resolution.fact, context) ? { usRelocation: true as const } : {})
       });
     } else if (resolution.status === "NEEDS_INPUT" && resolution.mapping) {
       resolutions.set(field.id, {
@@ -859,6 +860,7 @@ function plannerInputsFor(database: DatabaseSync, candidateId: string, candidate
     },
     standing: standingPlannerInputs(candidate, input.standing),
     postingLocations: input.postingLocations,
+    availability: reusableAvailabilityWindow(database),
     // The candidate's rule (2026-11-26): high-school and every-school questions; a college end year comes only from the run's graduation answer.
     schools: {
       rows: planApplicationHistory({ entries: [], candidate, graduationDate: graduation?.date ?? null }).education

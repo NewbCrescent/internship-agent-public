@@ -24,7 +24,9 @@ import { booleanOption } from "./standard-answers";
  * the test-type pick for a saved SAT or ACT score, and sentence Yes/No options for age, sponsorship ("None" of a
  * visa-class list), previous employment, relatives, full-time enrollment, and on-site work. (Track 87) The saved
  * number of previous internships picks the one count option holding it, or answers an "at least one previous
- * internship" Yes/No. Each rule returns null rather than guess, so the field pauses.
+ * internship" Yes/No. (Track 89) A bare-year graduation list, own-relocation wording, a "Not applicable" visa kind, the
+ * role's own location in a relocation question, and the saved test's own score scale. Each rule returns null rather
+ * than guess, so the field pauses.
  */
 
 /** Keys whose saved value picks an offered option by a rule (planner: factOptionDecision). */
@@ -190,7 +192,8 @@ const SENTENCE_VETOES: Record<string, RegExp | null> = {
 };
 const NEGATION = /\b(?:not|never|no)\b/;
 const VISA_CLASS = /\b(?:opt|cpt|h-?1b|h1b|tn|j-?1|f-?1|e-?3|l-?1|o-?1)\b/;
-const NO_VISA = new Set(["none", "none needed", "none required", "no sponsorship", "no sponsorship needed", "no sponsorship required"]);
+// (Track 89) "Not applicable", "N/A": Waymo's visa-kind list.
+const NO_VISA = new Set(["none", "none needed", "none required", "no sponsorship", "no sponsorship needed", "no sponsorship required", "not applicable", "n/a", "na"]);
 
 /**
  * (Track 79) A saved Yes/No for age, sponsorship, previous employment, relatives, full-time enrollment, or on-site
@@ -272,6 +275,8 @@ export function citizenAuthorizationOption(options: readonly string[]): string |
 
 const RELOCATION_ON_SITE = /\b(?:in[- ]office|on[- ]?site|in[- ]person|office|hybrid)\b|\b(?:\d+|one|two|three|four|five)\s+days?\s+(?:a|per|each|every)\s+week\b/;
 const RELOCATION_LOCAL_WORDS = /\b(?:commut\w*|located|live|living|lives|reside|residing|resident|based|nearby|near|local(?:ly)?)\b/;
+// (Track 89) "This role is located in …" says where the job is, not where you live.
+const ROLE_LOCATED = /\b(?:this|the|our) (?:role|position|job|internship|program|programme|team|office|opportunity)(?: is| will be)? (?:located|based)\b/g;
 const RELOCATION_DISJUNCTION = [
   /\b(?:commut\w*|located|live|living|reside|residing|based|nearby|near|local)\b.{0,80}?\b(?:or|if not)\b.{0,40}?\brelocat/,
   /\brelocat\w*.{0,40}?\bor\b.{0,80}?\b(?:commut\w*|located|live|living|reside|residing|based|nearby|near|local)\b/
@@ -305,7 +310,7 @@ const RELOCATION_REMOTE = /\bremote(?:ly)?\b/;
  * answer settles it (Track 83). Only the relocation part is answered from the saved relocation answer.
  */
 export function relocationQuestionParts(question: string, options: { ownExpense?: boolean } = {}): { onSite: boolean; local: boolean; held: string | null } {
-  const text = optionKey(question);
+  const text = optionKey(question).replace(ROLE_LOCATED, " ");
   const onSite = RELOCATION_ON_SITE.test(text);
   const localWords = RELOCATION_LOCAL_WORDS.test(text);
   const disjunction = RELOCATION_DISJUNCTION.some((pattern) => pattern.test(text)) || RELOCATION_CONDITIONAL_LOCAL.some((pattern) => pattern.test(text));
@@ -321,7 +326,8 @@ export function relocationQuestionParts(question: string, options: { ownExpense?
 }
 
 const LOCAL = /\b(?:located|live|living|reside|residing|based)\b.{0,40}\b(?:in|near|within|close to|around)\b/;
-const OWN = /\brelocat\w*\b.{0,60}\b(?:(?:my |your )?own (?:expense|cost)s?|without (?:relocation )?(?:assistance|support|reimbursement)|self[- ]funded)\b/;
+// (Track 89) "Yes, I will arrange my own relocation to …".
+const OWN = /\brelocat\w*\b.{0,60}\b(?:(?:my |your )?own (?:expense|cost)s?|without (?:relocation )?(?:assistance|support|reimbursement)|self[- ]funded)\b|\b(?:arrange|handle|pay for|cover|fund|manage) (?:my|your) own (?:relocation|move)\b/;
 const NEGATED = /\b(?:not|unwilling|unable|cannot|can't|won't|will not)\b/;
 // A willingness statement option ("I am willing to temporarily relocate") (Track 83).
 const WILLING_TO_RELOCATE = /^(?:yes\b[\s,:;.–—-]*)?(?:i am|i'm|im|i would be|i'd be) (?:willing|able|open) to (?:temporarily )?relocat\w*\b/;
@@ -489,7 +495,8 @@ export function graduationTermOption(options: readonly string[], date: string): 
   const month = Number(match[2]);
   if (month < 1 || month > 12) return null;
   const value = Number(match[1]) * 12 + month - 1;
-  const parsed = options.map((option) => ({ option, months: graduationTermMonths(option) }))
+  // (Track 89) "When will you be graduating?" with "2026" … "2030": a bare year option is its twelve months here only.
+  const parsed = options.map((option) => ({ option, months: graduationTermMonths(option) ?? yearMonths(optionKey(option)) }))
     .filter((entry): entry is { option: string; months: { from: number; to: number } } => entry.months !== null);
   if (parsed.length < 2) return null;
   const hits = parsed.filter(({ months }) => months.from <= value && value <= months.to);
@@ -580,7 +587,7 @@ export function factOption(key: string, value: boolean | string, options: readon
       return option ? { option, reason: `You saved ${key === "sat_score" ? "an SAT" : "an ACT"} score.` } : null;
     }
     const score = Number(value);
-    const option = Number.isFinite(score) ? numericRangeOption(score, options) : null;
+    const option = Number.isFinite(score) ? numericRangeOption(score, onTestScale(options, key === "sat_score" ? 1600 : 36)) : null;
     return option ? { option, reason: `Your saved ${key === "sat_score" ? "SAT" : "ACT"} score falls in "${option}".` } : null;
   }
   if (key === "act_taken") {
@@ -810,6 +817,16 @@ export function numericRange(option: string): { min: number; max: number; minOpe
   match = NUMERIC_EXACT.exec(key);
   if (match) return { min: toNumber(match[1]!), max: toNumber(match[1]!) };
   return null;
+}
+
+/** (Track 89) A list with both the 1600 and the 2400 SAT scale: only the options on the saved test's own scale ("out of 1600"), when some option states it. */
+function onTestScale(options: readonly string[], max: number): readonly string[] {
+  const scaled = (option: string) => /\bout of (\d[\d,]*)$/.exec(optionKey(option));
+  if (!options.some((option) => scaled(option)?.[1]?.replace(/,/g, "") === String(max))) return options;
+  return options.filter((option) => {
+    const stated = scaled(option);
+    return !stated || stated[1]!.replace(/,/g, "") === String(max);
+  });
 }
 
 /** (Track 79) The one bucket option holding a number; null when fewer than two options name a range, or none or several hold it. */

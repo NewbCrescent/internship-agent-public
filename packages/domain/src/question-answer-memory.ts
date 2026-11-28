@@ -3,6 +3,7 @@ import { z } from "zod";
 import { browserFieldKindSchema, type BrowserFieldKind } from "./browser";
 import { scopeKey } from "./candidate-facts";
 import { mentionsCompany } from "./company-name";
+import { isInternshipTermQuestion } from "./term-availability";
 import { isDraftableQuestion } from "./voice";
 
 /**
@@ -164,7 +165,8 @@ export function questionSaveBlocker(input: QuestionRuleInput): QuestionAnswerNot
   if (COURSEWORK_TOPIC.test(label)) return "coursework";
   if (input.fieldKind === "email" || input.fieldKind === "tel" || CONTACT.test(label)) return "contact";
   if (input.companyName && mentionsCompany(label, input.companyName)) return "company_named";
-  if (WHY_INTEREST.test(label)) return "why_interest";
+  // (Track 89) A term question ("Which term are you interested in?") is not a why-interest question; its answer may be remembered for the same wording.
+  if (WHY_INTEREST.test(label) && !isInternshipTermQuestion(label)) return "why_interest";
   if (EMPLOYER_REFERENCE.test(label) || COMPANY_SPECIFIC.test(label)) return "company_specific";
   if (CONSENT.test(label)) return "consent";
   if (input.fieldKind === "textarea" || isDraftableQuestion({ label, kind: input.fieldKind ?? "text" })) return "essay";

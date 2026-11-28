@@ -26,6 +26,7 @@ import {
   type RecognizedForm
 } from "@internship-agent/domain";
 
+import { reusableAvailabilityWindow } from "./candidate-service";
 import { yearHoldMessage } from "./company-policy";
 import { logAliasHits, settleAliasHits, type AliasHit } from "./pause-recheck";
 import { answeredPauseDecision } from "./question-answers";
@@ -174,6 +175,7 @@ async function planWorkdayStep(
     variantId: context.variantId,
     transcriptDocumentId,
     standing: context.standing,
+    availability: reusableAvailabilityWindow(context.database),
     // The candidate's rule (2026-11-26): a question step's high-school and every-school questions.
     schools: {
       rows: ((transcript && context.history?.transcript) ? context.history.transcript : context.history?.standard)?.education ?? [],
