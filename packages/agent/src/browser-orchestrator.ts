@@ -59,6 +59,7 @@ import {
   hasSteppedWalk,
   icimsHostOf,
   hasTranscriptField,
+  hispanicCheckboxChoice,
   invalidFieldPauses,
   isHandshakeHost,
   isSensitiveRole,
@@ -773,7 +774,11 @@ async function resolveFields(
         // (Track 82) A saved "not a veteran" or "veteran, not protected" answer leaves a veteran classification empty.
         resolutions.set(field.id, { status: "SELF_IDENTIFIED", key: "eeo_veteran_status", option: "", rule: "veteran_classification_empty" });
       } else {
-        resolutions.set(field.id, { status: "UNAVAILABLE" });
+        // (Track 90) Oracle's single "I am Hispanic or Latino." box: checked, or left empty, from the saved race or ethnicity answer.
+        const box = hispanicCheckboxChoice(field, selfIdentification);
+        resolutions.set(field.id, box === null
+          ? { status: "UNAVAILABLE" }
+          : { status: "SELF_IDENTIFIED", key: "eeo_race_ethnicity", option: box === "check" ? "true" : "", rule: box === "check" ? "hispanic_checkbox_checked" : "hispanic_checkbox_empty" });
       }
       continue;
     }

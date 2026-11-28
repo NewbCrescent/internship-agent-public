@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   classifyFieldRole,
+  HISPANIC_CHECKBOX_REASON,
+  hispanicCheckboxChoice,
   isIdentityQuestion,
   matchSelfIdentificationOption,
   planAutofill,
@@ -669,5 +671,171 @@ describe("protected answers answer only identity questions (Track 82, rounds 2â€
     ]) {
       expect(isIdentityQuestion(label), label).toBe(true);
     }
+  });
+});
+
+describe("self-identification questions still held after Track 82 (Track 90, fictional answers)", () => {
+  const optional = (label: string, kind: BrowserField["kind"], options?: string[]): BrowserField =>
+    ({ ...field(label, options, kind), required: false });
+  // Built exactly as resolveFields in packages/agent/src/browser-orchestrator.ts builds it.
+  const resolve = (target: BrowserField, answers: SelfIdentificationAnswers): FieldResolution => {
+    const saved = matchSelfIdentificationOption(target, answers);
+    if (saved) return { status: "SELF_IDENTIFIED", ...saved };
+    if (veteranClassificationLeftEmpty(target, answers)) return { status: "SELF_IDENTIFIED", key: "eeo_veteran_status", option: "", rule: "veteran_classification_empty" };
+    const box = hispanicCheckboxChoice(target, answers);
+    if (box) {
+      return { status: "SELF_IDENTIFIED", key: "eeo_race_ethnicity", option: box === "check" ? "true" : "", rule: box === "check" ? "hispanic_checkbox_checked" : "hispanic_checkbox_empty" };
+    }
+    return { status: "UNAVAILABLE" };
+  };
+  const FICTIONAL_VALUES = /hispanic_or_latino|white|asian|not_veteran|veteran_not_protected|protected_veteran|no_disability|has_disability/i;
+  // Oracle (INL 2026-11-28) and Greenhouse (EQT, ParetoHealth, SharkNinja, Veeam) wordings, read from the held runs' pauses.
+  const ORACLE_VETERAN = field("Veteran Self-Identification Status", ["Declines to Self-Identify", "Not a Protected Veteran", "Protected Veteran (Must select one or more boxes below)"]);
+  const GREENHOUSE_DISABILITY_LABEL = "Do you have a disability or chronic condition (physical, visual, auditory, cognitive, mental, emotional, or other) that substantially limits one or more of your major life activities, including mobility, communication (seeing, hearing, speaking), and learning?";
+  const GREENHOUSE_DISABILITY = field(GREENHOUSE_DISABILITY_LABEL, ["Yes", "No", "I prefer to self-describe", "I don't wish to answer"]);
+  const ARMED_FORCES = field("Are you a veteran or active member of the United States Armed Forces?", [
+    "Yes, I am a veteran or active member", "No, I am not a veteran or active member", "I prefer to self-describe", "I don't wish to answer"
+  ]);
+  const HISPANIC_BOX = optional("I am Hispanic or Latino.", "checkbox");
+  const ACTIVE_DUTY = optional("Active Duty Wartime or Campaign Badge Veterans", "checkbox");
+
+  it("answers Oracle's \"Veteran Self-Identification Status\" list from the saved veteran answer", () => {
+    expect(isIdentityQuestion(ORACLE_VETERAN.label)).toBe(true);
+    expect(classifyFieldRole(ORACLE_VETERAN)).toBe("eeo");
+    expect(pick(ORACLE_VETERAN, { eeo_veteran_status: "not_veteran" })).toBe("Not a Protected Veteran");
+    expect(pick(ORACLE_VETERAN, { eeo_veteran_status: "veteran_not_protected" })).toBe("Not a Protected Veteran");
+    // A protected veteran must also tick the classification boxes below, which no saved answer settles.
+    expect(pick(ORACLE_VETERAN, { eeo_veteran_status: "protected_veteran" })).toBeNull();
+    expect(pick(ORACLE_VETERAN, {})).toBeNull();
+  });
+
+  it("leaves Oracle's plural \"Active Duty Wartime or Campaign Badge Veterans\" box empty like the other classifications", () => {
+    for (const value of ["not_veteran", "veteran_not_protected"]) {
+      expect(veteranClassificationLeftEmpty(ACTIVE_DUTY, { eeo_veteran_status: value }), value).toBe(true);
+      const result = plan([ACTIVE_DUTY], [[ACTIVE_DUTY.id, resolve(ACTIVE_DUTY, { eeo_veteran_status: value })]]);
+      expect(result.pauses).toEqual([]);
+      expect(result.decisions[0]).toMatchObject({ action: "skip", value: null, reason: VETERAN_CLASSIFICATION_EMPTY_REASON });
+    }
+    expect(veteranClassificationLeftEmpty(ACTIVE_DUTY, { eeo_veteran_status: "protected_veteran" })).toBe(false);
+    expect(veteranClassificationLeftEmpty({ ...ACTIVE_DUTY, required: true }, { eeo_veteran_status: "not_veteran" })).toBe(false);
+  });
+
+  it("answers Greenhouse's long disability question word for word", () => {
+    expect(isIdentityQuestion(GREENHOUSE_DISABILITY_LABEL)).toBe(true);
+    expect(pick(GREENHOUSE_DISABILITY, { eeo_disability_status: "no_disability" })).toBe("No");
+    expect(pick(GREENHOUSE_DISABILITY, { eeo_disability_status: "has_disability" })).toBe("Yes");
+    expect(pick(GREENHOUSE_DISABILITY, {})).toBeNull();
+    const result = plan([GREENHOUSE_DISABILITY], [[GREENHOUSE_DISABILITY.id, resolve(GREENHOUSE_DISABILITY, { eeo_disability_status: "no_disability" })]]);
+    expect(result.decisions[0]).toMatchObject({ action: "choose", value: "No", basis: { kind: "fact", key: "eeo_disability_status", scope: "global" } });
+    expect(result.decisions[0]!.reason).not.toMatch(FICTIONAL_VALUES);
+  });
+
+  it("checks Oracle's \"I am Hispanic or Latino.\" box for a saved Hispanic or Latino answer and leaves it empty for another", () => {
+    expect(hispanicCheckboxChoice(HISPANIC_BOX, { eeo_race_ethnicity: "hispanic_or_latino" })).toBe("check");
+    for (const value of ["white", "asian", "two_or_more_races"]) expect(hispanicCheckboxChoice(HISPANIC_BOX, { eeo_race_ethnicity: value }), value).toBe("empty");
+    const checked = plan([HISPANIC_BOX], [[HISPANIC_BOX.id, resolve(HISPANIC_BOX, { eeo_race_ethnicity: "hispanic_or_latino" })]]);
+    expect(checked.pauses).toEqual([]);
+    expect(checked.decisions[0]).toMatchObject({ action: "check", value: "true", basis: { kind: "fact", key: "eeo_race_ethnicity", scope: "global" }, reason: HISPANIC_CHECKBOX_REASON });
+    const empty = plan([HISPANIC_BOX], [[HISPANIC_BOX.id, resolve(HISPANIC_BOX, { eeo_race_ethnicity: "white" })]]);
+    expect(empty.pauses).toEqual([]);
+    expect(empty.decisions[0]).toMatchObject({ action: "skip", value: null, reason: HISPANIC_CHECKBOX_REASON });
+    for (const entry of [...checked.decisions, ...empty.decisions]) expect(entry.reason).not.toMatch(FICTIONAL_VALUES);
+  });
+
+  it("pauses the Hispanic box with nothing saved, an unknown value, or a required box the answer leaves empty", () => {
+    const cases: Array<[BrowserField, SelfIdentificationAnswers]> = [
+      [HISPANIC_BOX, {}],
+      [HISPANIC_BOX, { eeo_race_ethnicity: "something_else" }],
+      [HISPANIC_BOX, { eeo_gender: "female" }],
+      [{ ...HISPANIC_BOX, required: true }, { eeo_race_ethnicity: "white" }]
+    ];
+    for (const [target, answers] of cases) {
+      expect(hispanicCheckboxChoice(target, answers), JSON.stringify(answers)).toBeNull();
+      const result = plan([target], [[target.id, resolve(target, answers)]]);
+      expect(result.decisions[0]).toMatchObject({ action: "pause" });
+      expect(result.pauses[0]).toMatchObject({ sensitive: true });
+    }
+    // A required box is still checked for a saved Hispanic or Latino answer.
+    expect(hispanicCheckboxChoice({ ...HISPANIC_BOX, required: true }, { eeo_race_ethnicity: "hispanic_or_latino" })).toBe("check");
+  });
+
+  it("keeps the closest non-identity wordings paused", () => {
+    const hispanic: SelfIdentificationAnswers = { eeo_race_ethnicity: "hispanic_or_latino" };
+    const white: SelfIdentificationAnswers = { eeo_race_ethnicity: "white" };
+    const notVeteran: SelfIdentificationAnswers = { eeo_veteran_status: "not_veteran" };
+    const noDisability: SelfIdentificationAnswers = { eeo_disability_status: "no_disability" };
+    const boxes = [
+      "I am interested in Hispanic or Latino outreach programs",
+      "I am a member of the Hispanic or Latino employee network",
+      "I am Hispanic or Latino (spouse)",
+      "I am Hispanic or Latino and bilingual",
+      "My manager is Hispanic or Latino",
+      "I support Hispanic or Latino communities"
+    ];
+    for (const label of boxes) {
+      const target = optional(label, "checkbox");
+      for (const answers of [hispanic, white]) {
+        expect(hispanicCheckboxChoice(target, answers), label).toBeNull();
+        const result = plan([target], [[target.id, resolve(target, answers)]]);
+        expect(result.decisions[0]?.action, label).not.toBe("check");
+      }
+    }
+    // A checkbox group under the same label is not the single box.
+    expect(hispanicCheckboxChoice(optional("I am Hispanic or Latino.", "checkbox", ["Yes", "No"]), hispanic)).toBeNull();
+    // A select or radio worded as the box is not the box.
+    expect(hispanicCheckboxChoice(optional("I am Hispanic or Latino.", "select", ["Yes", "No"]), hispanic)).toBeNull();
+    for (const label of [
+      "Veteran Self-Identification Status of your spouse",
+      "Veteran self-identification program interest",
+      "Is your spouse's Veteran Self-Identification Status on file?"
+    ]) {
+      const target = field(label, ORACLE_VETERAN.options);
+      expect(isIdentityQuestion(label), label).toBe(false);
+      expect(matchSelfIdentificationOption(target, notVeteran), label).toBeNull();
+    }
+    for (const label of [
+      "Do you have a disability or chronic condition that requires accommodation?",
+      "Does your child have a disability or chronic condition (physical, visual, auditory, cognitive, mental, emotional, or other) that substantially limits one or more of your major life activities, including mobility, communication (seeing, hearing, speaking), and learning?",
+      `${GREENHOUSE_DISABILITY_LABEL} (for our accessibility customers)`,
+      "Do you have experience supporting people with a disability or chronic condition (physical, visual, auditory, cognitive, mental, emotional, or other) that substantially limits one or more of your major life activities, including mobility, communication (seeing, hearing, speaking), and learning?"
+    ]) {
+      const target = field(label, GREENHOUSE_DISABILITY.options);
+      expect(matchSelfIdentificationOption(target, noDisability), label).toBeNull();
+      const result = plan([target], [[target.id, resolve(target, noDisability)]]);
+      expect(result.decisions[0], label).toMatchObject({ action: "pause" });
+    }
+    for (const label of ["Active Duty Wartime or Campaign Badge Veterans Outreach", "Active Duty Wartime or Campaign Badge Veterans in your family"]) {
+      expect(veteranClassificationLeftEmpty(optional(label, "checkbox"), notVeteran), label).toBe(false);
+    }
+  });
+
+  it("keeps a veteran-or-active-member question held, since current service is not saved", () => {
+    for (const value of ["not_veteran", "veteran_not_protected", "protected_veteran"]) {
+      const answers: SelfIdentificationAnswers = { eeo_veteran_status: value };
+      expect(matchSelfIdentificationOption(ARMED_FORCES, answers), value).toBeNull();
+      const result = plan([ARMED_FORCES], [[ARMED_FORCES.id, resolve(ARMED_FORCES, answers)]]);
+      expect(result.decisions[0], value).toMatchObject({ action: "pause" });
+      expect(result.pauses[0], value).toMatchObject({ sensitive: true });
+    }
+  });
+
+  it("answers Lever's demographic-survey \"What is your location?\" country list from the profile address's country only", () => {
+    const countries = ["Afghanistan", "Albania", ...Array.from({ length: 60 }, (_, index) => `Fixture Country ${index}`), "Mexico", "United States", "Zimbabwe"];
+    const location = optional("What is your location?", "select", countries);
+    const planWith = (target: BrowserField, profile: Record<string, string>) => planAutofill({ url: "https://example.test/apply", title: "Apply", fields: [target] }, {
+      profile, resolutions: new Map(), packageAnswers: [], variantId: null
+    });
+    const chosen = planWith(location, { addressCountry: "US", addressCity: "Springfield", addressRegion: "IL" });
+    expect(chosen.decisions[0]).toMatchObject({ action: "choose", value: "United States", basis: { kind: "profile", field: "addressCountry" } });
+    expect(planWith(location, { addressCountry: "Mexico" }).decisions[0]).toMatchObject({ action: "choose", value: "Mexico" });
+    // No profile country, a country the list lacks, an office list, a text box, or another label: planned as before.
+    const notCountry = (target: BrowserField, profile: Record<string, string>) =>
+      expect(planWith(target, profile).decisions[0], target.label).not.toMatchObject({ basis: { kind: "profile", field: "addressCountry" } });
+    notCountry(location, {});
+    notCountry(location, { addressCountry: "Canada" });
+    notCountry(optional("What is your location?", "select", ["New York", "Austin", "United States - Remote"]), { addressCountry: "US" });
+    notCountry(optional("What is your location?", "text"), { addressCountry: "US" });
+    notCountry(optional("What is your location preference?", "select", countries), { addressCountry: "US" });
+    notCountry(optional("What is your preferred office location?", "select", countries), { addressCountry: "US" });
   });
 });

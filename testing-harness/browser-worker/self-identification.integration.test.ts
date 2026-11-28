@@ -17,7 +17,7 @@ import {
   startBrowserRun,
   type VoiceDrafter
 } from "@internship-agent/agent";
-import { RACE_ONLY_DECLINE_REASON, VETERAN_CLASSIFICATION_EMPTY_REASON, type BrowserPage, type RawControl } from "@internship-agent/browser";
+import { HISPANIC_CHECKBOX_REASON, RACE_ONLY_DECLINE_REASON, VETERAN_CLASSIFICATION_EMPTY_REASON, type BrowserPage, type RawControl } from "@internship-agent/browser";
 import {
   createDatabase,
   getBrowserRun,
@@ -311,6 +311,49 @@ describe("saved voluntary self-identification answers in browser runs", () => {
       .map((row) => row.detail ?? "");
     for (const text of [...events, JSON.stringify(run.decisions)]) expect(text).not.toContain("not_veteran");
     database.close();
+  });
+
+  it("answers Oracle's Hispanic box, veteran status list, and plural classification box from the saved answers (Track 90)", async () => {
+    // Fictional answers: one run with a saved Hispanic or Latino answer, one with another race; both not veterans.
+    const oracleControls: RawControl[] = [
+      { tag: "input", type: "checkbox", id: "dq-option-4", label: "I am Hispanic or Latino.", required: false },
+      {
+        tag: "select", id: "veteran-self-id", label: "Veteran Self-Identification Status", required: false,
+        options: ["Declines to Self-Identify", "Not a Protected Veteran", "Protected Veteran (Must select one or more boxes below)"]
+      },
+      { tag: "input", type: "checkbox", id: "active-duty", label: "Active Duty Wartime or Campaign Badge Veterans", required: false },
+      START,
+      SUBMIT
+    ];
+    for (const race of ["hispanic_or_latino", "white"]) {
+      const database = disposableDatabase();
+      const jobId = approvedJobId(database, (db) => {
+        saveFact(db, "eeo_race_ethnicity", { kind: "global" }, race);
+        saveFact(db, "eeo_veteran_status", { kind: "global" }, "not_veteran");
+      });
+      const { run, page } = await runWith(database, jobId, oracleControls);
+
+      expect(run.pauses, race).toEqual([]);
+      expect(run.status, race).toBe("awaiting-approval");
+      if (race === "hispanic_or_latino") {
+        expect(decision(run, "dq-option-4")).toMatchObject({ action: "check", value: "true", basis: { kind: "fact", key: "eeo_race_ethnicity" }, reason: HISPANIC_CHECKBOX_REASON });
+        expect(page.filled.get("dq-option-4")).toBe("true");
+      } else {
+        expect(decision(run, "dq-option-4")).toMatchObject({ action: "skip", value: null, reason: HISPANIC_CHECKBOX_REASON });
+        expect(page.filled.has("dq-option-4")).toBe(false);
+      }
+      expect(page.filled.get("veteran-self-id"), race).toBe("Not a Protected Veteran");
+      expect(decision(run, "active-duty"), race).toMatchObject({ action: "skip", value: null, reason: VETERAN_CLASSIFICATION_EMPTY_REASON });
+      expect(page.filled.has("active-duty"), race).toBe(false);
+      expect(autoSubmitBlockers(run), race).toEqual([]);
+      const events = (database.prepare("SELECT detail FROM application_events WHERE job_id = ?").all(jobId) as Array<{ detail: string | null }>)
+        .map((row) => row.detail ?? "");
+      for (const text of [...events, ...run.decisions.map((entry) => entry.reason)]) {
+        expect(text).not.toContain(race);
+        expect(text).not.toContain("not_veteran");
+      }
+      database.close();
+    }
   });
 
   it("never sends the saved answers to the voice drafter, the AI fit model, logs, events, or the package", async () => {

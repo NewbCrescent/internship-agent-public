@@ -26,7 +26,9 @@ import type { BrowserField, SelfIdentificationAnswers, SelfIdentificationKey } f
  *    standard EEO wordings). Any other wording (a group, an advocate, an
  *    affiliation, customers, skills, a noun after the category, a parenthetical
  *    that is not a list hint) is not, so the field pauses. Round 2's word list
- *    is gone.
+ *    is gone. (Track 90) Oracle's "Veteran Self-Identification Status" is a bare
+ *    category, and Greenhouse's long "Do you have a disability or chronic
+ *    condition (…) that substantially limits …" question is a shape word for word.
  * 3. Exactly one offered option matches the saved answer; two matches are
  *    ambiguous and none is no answer.
  * 4. The candidate's race-only rule (2026-11-26): on a race-only question (the
@@ -67,8 +69,11 @@ const LGBTQ = /\blgbt\w*|\blesbian,? gay,? (?:and\/or |and |or )?bisexual\b/;
 const RACE_ONLY = /\b(?:race|racial)\b/;
 const ETHNICITY_WORDING = /\b(?:ethnic\w*|hispanic|latin\w*)/;
 
-/** Why an option other than the saved answer's own was chosen: the candidate's race-only rule (2026-11-26), or a veteran classification left empty (Track 82). */
-export type SelfIdentificationRule = "race_only_decline" | "veteran_classification_empty";
+/**
+ * Why an option other than the saved answer's own was chosen: the candidate's race-only rule (2026-11-26), a veteran
+ * classification left empty (Track 82), or Oracle's single "I am Hispanic or Latino." box checked or left empty (Track 90).
+ */
+export type SelfIdentificationRule = "race_only_decline" | "veteran_classification_empty" | "hispanic_checkbox_checked" | "hispanic_checkbox_empty";
 
 /** The decision reason for the race-only rule; it never names the saved answer. */
 export const RACE_ONLY_DECLINE_REASON = "Answered a race-only self-identification question with its decline option (the candidate's rule, 2026-11-26).";
@@ -109,7 +114,7 @@ function identityQuestionText(label: string): string {
 }
 
 // A category as an EEO question names it.
-const CAT = String.raw`(?:gender(?: identity)?|sex|race|racial (?:background|category|identity)|race(?: or |\/)ethnicity|racial\/ethnic (?:background|identity|category)|ethnicity(?:\(ies\))?|ethnic (?:background|identity|origin)|hispanic(?:\/latino| or latino(?:\/a)?| or latinx)?|latino\/a|(?:protected )?veteran status|veteran|disability(?: status)?|sexual orientation|sexuality|transgender(?: identity| status)?|lgbt[a-z]*\+?(?: identity| status)?)`;
+const CAT = String.raw`(?:gender(?: identity)?|sex|race|racial (?:background|category|identity)|race(?: or |\/)ethnicity|racial\/ethnic (?:background|identity|category)|ethnicity(?:\(ies\))?|ethnic (?:background|identity|origin)|hispanic(?:\/latino| or latino(?:\/a)?| or latinx)?|latino\/a|(?:protected )?veteran status|veteran self-identification(?: status)?|veteran|disability(?: status)?|sexual orientation|sexuality|transgender(?: identity| status)?|lgbt[a-z]*\+?(?: identity| status)?)`;
 // A member of a category, as "are you …", "do you identify as …", "please indicate if you are …" name it.
 const MEMBER = String.raw`(?:(?:a |an )?(?:protected )?veteran|transgender|lgbt[a-z]*\+?|hispanic(?:\/latino| or latino(?:\/a)?| or latinx)?|latino|latina|latinx|latine|non-?binary|(?:a )?person with a disability|disabled|of hispanic(?:,| or)? (?:latino|latinx|latine)(?:,? or spanish)? origin|of hispanic(?: or latino)? origin)`;
 const IDENTITY_SHAPES: readonly RegExp[] = [
@@ -123,6 +128,8 @@ const IDENTITY_SHAPES: readonly RegExp[] = [
   new RegExp(`^(?:are you|do you identify as|do you consider yourself(?: to be)?) ${MEMBER}$`), // "Are you Hispanic/Latino?", "Are you a protected veteran?", "Do you identify as transgender?"
   new RegExp(`^please indicate (?:if|whether) you are ${MEMBER}$`), // "Please indicate if you are Hispanic or Latino"
   /^do you have a disability(?: \(or (?:have )?(?:previously )?had one\))?$/, // "Do you have a disability?"
+  // (Track 90) Greenhouse's long disability question (EQT, ParetoHealth, SharkNinja, Veeam), word for word
+  /^do you have a disability or chronic condition \(physical, visual, auditory, cognitive, mental, emotional, or other\) that substantially limits one or more of your major life activities, including mobility, communication \(seeing, hearing, speaking\), and learning$/,
   // Workday veteran and ethnicity lists
   new RegExp(`^(?:please )?(?:select|choose) the ${CAT} (?:which|that) (?:most accurately |best )?describes? (?:your status|you|yourself|how you identify(?: yourself)?)$`),
   // Toyota Research
@@ -361,7 +368,8 @@ export function matchSelfIdentificationOption(
 }
 
 // (Track 82, round 3) The exact labels of the OFCCP veteran classifications and the newly separated veteran's discharge date.
-const VETERAN_CLASSIFICATION_LABEL = /^(?:disabled|recently separated|newly separated|armed forces service medal|active duty wartime(?: or campaign badge)?|campaign badge|protected) veteran$/;
+// (Track 90) INL's and Corvane's Oracle forms say "Active Duty Wartime or Campaign Badge Veterans", plural.
+const VETERAN_CLASSIFICATION_LABEL = /^(?:disabled|recently separated|newly separated|armed forces service medal|active duty wartime(?: or campaign badge)?|campaign badge|protected) veterans?$/;
 const DISCHARGE_DATE_LABEL = /^(?:newly|recently) separated veteran discharge date(?: (?:month|day|year))?$/;
 
 /** The decision reason for a veteran classification left empty; it never names the saved answer. */
@@ -381,4 +389,25 @@ export function veteranClassificationLeftEmpty(field: BrowserField, answers: Sel
   if (value !== "not_veteran" && value !== "veteran_not_protected") return false;
   if (field.kind === "checkbox" && (field.options?.length ?? 0) < 2) return VETERAN_CLASSIFICATION_LABEL.test(label);
   return DISCHARGE_DATE_LABEL.test(label) && (field.kind === "text" || field.kind === "select" || field.kind === "date");
+}
+
+// (Track 90) Oracle's Ethnicity box under its "Diversity Information" heading (INL, Corvane), exactly.
+const HISPANIC_CHECKBOX_LABEL = /^i am hispanic or latino$/;
+
+/** The decision reason for Oracle's Hispanic or Latino box, checked or left empty; it never names the saved answer. */
+export const HISPANIC_CHECKBOX_REASON = "Your saved voluntary self-identification answer settles this checkbox.";
+
+/**
+ * (Track 90) Oracle's single "I am Hispanic or Latino." checkbox: checked for a saved Hispanic or Latino answer, and,
+ * when optional, left empty for any other saved race or ethnicity answer (EEO-1 records Hispanic or Latino ahead of race,
+ * as the Hispanic yes-no list does). The label must be exactly that sentence; a checkbox group, any other label, no
+ * saved answer, or a required box the answer leaves empty: null (it pauses).
+ */
+export function hispanicCheckboxChoice(field: BrowserField, answers: SelfIdentificationAnswers): "check" | "empty" | null {
+  if (field.kind !== "checkbox" || (field.options?.length ?? 0) >= 2) return null;
+  if (!HISPANIC_CHECKBOX_LABEL.test(identityQuestionText(field.label))) return null;
+  const value = answers.eeo_race_ethnicity;
+  if (value === "hispanic_or_latino") return "check";
+  if (value && RACE_VALUES.has(value) && !field.required) return "empty";
+  return null;
 }

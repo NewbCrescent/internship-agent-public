@@ -10,7 +10,7 @@ import { clipDecisionText } from "@internship-agent/domain";
 import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, fieldOfStudyCategoryOption, isStandardAnswerKey, matchOfferedOption, namedSchoolRelation, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption, usPersonYesNoOption } from "@internship-agent/domain";
 
 import { classifyFieldRole, classifyUploadRole, isSensitiveRole } from "./ats/field-roles";
-import { RACE_ONLY_DECLINE_REASON, VETERAN_CLASSIFICATION_EMPTY_REASON, type SelfIdentificationRule } from "./ats/self-identification";
+import { HISPANIC_CHECKBOX_REASON, RACE_ONLY_DECLINE_REASON, VETERAN_CLASSIFICATION_EMPTY_REASON, type SelfIdentificationRule } from "./ats/self-identification";
 import { isHearAboutQuestion, pickHearAboutOption } from "./ats/hear-about";
 import { US_STATE_NAMES_BY_CODE, usStateAlternate } from "./ats/us-states";
 import { isListSearchBox, isSafeguardField, isSignupField, stripRequiredMarker } from "./form-recognition";
@@ -165,6 +165,15 @@ export function planAutofill(form: RecognizedForm, planned: PlannerInputs): Auto
         decisions.push(skip(field, VETERAN_CLASSIFICATION_EMPTY_REASON));
         continue;
       }
+      // (Track 90) Oracle's single "I am Hispanic or Latino." box, checked or left empty, with one reason for both.
+      if (saved?.status === "SELF_IDENTIFIED" && field.kind === "checkbox" && saved.rule === "hispanic_checkbox_empty") {
+        decisions.push(skip(field, HISPANIC_CHECKBOX_REASON));
+        continue;
+      }
+      if (saved?.status === "SELF_IDENTIFIED" && field.kind === "checkbox" && saved.rule === "hispanic_checkbox_checked") {
+        decisions.push({ fieldId: field.id, action: "check", value: "true", basis: { kind: "fact", key: saved.key, scope: "global" }, reason: HISPANIC_CHECKBOX_REASON, pause: null });
+        continue;
+      }
       if (saved?.status === "SELF_IDENTIFIED" && (field.kind === "select" || field.kind === "radio" || (field.kind === "checkbox" && (field.options?.length ?? 0) >= 2)) &&
         field.options?.includes(saved.option)) {
         decisions.push({
@@ -292,6 +301,8 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
 
   const address = addressDecision(field, inputs);
   if (address) return address;
+  const surveyCountry = surveyCountryDecision(field, inputs.profile);
+  if (surveyCountry) return surveyCountry;
 
   const contact = contactValue(field.label, inputs.profile);
   // A phone question asked as a number box (an Ashby Number question labelled "Phone", Track 67) takes the profile
@@ -1721,6 +1732,26 @@ const CONTACT_LABELS: Array<{ key: ContactKey; pattern: RegExp }> = [
   { key: "phoneType", pattern: /^phone (device )?type$|^type of phone$|^phone number type$/ },
   { key: "fieldOfStudy", pattern: /^(field|area) of study$|^major$|^major\(s\)$|^discipline$|^major or field of study$|^field of study or major$|^major ?\/ ?field of study$|^field of study ?\/ ?major$|^what is your major\??$|^(?:please )?(?:select|choose|enter|indicate|specify|provide) your (?:field|area) of study:?$|^what is your (?:field|area) of study\??$/ }
 ];
+
+// (Track 90) Lever's demographic survey opens with "What is your location?" over a list of every country, and shows its
+// questions (the ethnicity boxes among them) only once a country is chosen.
+const SURVEY_LOCATION_LABEL = /^what is your location$/;
+const COUNTRY_LIST_MIN_OPTIONS = 50;
+
+/**
+ * (Track 90) "What is your location?" asked as a list of countries (at least COUNTRY_LIST_MIN_OPTIONS options, Lever's
+ * demographic survey) takes the one option naming the profile address's country. Any other label, a shorter list (an
+ * office list), a text box, or no single matching country: null, so the field is planned as before.
+ */
+function surveyCountryDecision(field: BrowserField, profile: PlannerInputs["profile"]): FillDecision | null {
+  if (field.kind !== "select" || field.widget === "autocomplete" || (field.options?.length ?? 0) < COUNTRY_LIST_MIN_OPTIONS) return null;
+  if (!SURVEY_LOCATION_LABEL.test(normalizedLabel(field.label).replace(/[\s:?*]+$/, ""))) return null;
+  const country = profile.addressCountry?.trim();
+  const option = country ? matchCountryOption(country, field.options ?? []) : null;
+  return option
+    ? { fieldId: field.id, action: "choose", value: option, basis: { kind: "profile", field: "addressCountry" }, reason: "This list asks only for a country: the country of the address on your profile.", pause: null }
+    : null;
+}
 
 /**
  * A profile value on a list whose options name it differently: the category
