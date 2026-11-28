@@ -15,7 +15,8 @@ import {
   openApplicationAuditDatabase,
   resolveProfileDataDirectory,
   revokeQuestionAlias,
-  revokeQuestionAnswer
+  revokeQuestionAnswer,
+  saveCandidateFact
 } from "@internship-agent/db";
 import {
   autoSubmitSettings,
@@ -24,9 +25,12 @@ import {
   formatFactValue,
   manualOnly,
   notSavedReasonText,
+  PROMOTABLE_FACT_KEYS,
+  promotableFactValue,
   scopeKey,
   workspaceProfileSchema,
   type BrowserRun,
+  type CandidateFactKey,
   type PauseRecord,
   type QuestionAlias,
   type QuestionAliasSource,
@@ -70,7 +74,7 @@ export type ProfileAnswersDeps = Pick<RunCommandDeps, "open" | "close" | "log">;
 
 const QUESTIONS_USAGE = "Usage: pnpm run:questions (--run <id or 8-character prefix> | --digest <n>) [--profile real|demo]";
 const ANSWER_USAGE = "Usage: pnpm run:answer (--run <id or 8-character prefix> | --digest <n>) --q <n> (--answer \"<text or option>\" | --use-draft) [--once] [--continue] [--profile real|demo]";
-const PROFILE_ANSWERS_USAGE = "Usage: pnpm profile:answers [--profile real|demo] [--revoke <id or 8-character prefix> | --revoke-alias <id or 8-character prefix>]";
+const PROFILE_ANSWERS_USAGE = "Usage: pnpm profile:answers [--profile real|demo] [--revoke <id or 8-character prefix> | --revoke-alias <id or 8-character prefix> | --promote <id or 8-character prefix> --key <fact key> [--dry-run]]";
 const QUESTIONS_RECHECK_USAGE = "Usage: pnpm questions:recheck [--profile real|demo] [--apply]";
 const FULL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -395,16 +399,26 @@ export async function runProfileAnswersCommand(argv: string[], deps: Partial<Pro
     close: deps.close ?? closeProfileDatabase,
     log: deps.log ?? ((line: string) => console.log(line))
   };
-  const flags = parseFlags(argv, ["--profile", "--revoke", "--revoke-alias"], []);
+  const flags = parseFlags(argv, ["--profile", "--revoke", "--revoke-alias", "--promote", "--key"], ["--dry-run"]);
   const profile = parseProfile(flags?.values.get("--profile"));
   const revoke = flags?.values.get("--revoke")?.trim();
   const revokeAlias = flags?.values.get("--revoke-alias")?.trim();
-  if (!flags || !profile || revoke === "" || revokeAlias === "" || (revoke !== undefined && revokeAlias !== undefined)) {
+  const promote = flags?.values.get("--promote")?.trim();
+  const keyText = flags?.values.get("--key")?.trim();
+  const promoteKey = keyText === undefined ? undefined : candidateFactKeySchema.safeParse(keyText);
+  const dryRun = flags?.set.has("--dry-run") ?? false;
+  const modes = [revoke, revokeAlias, promote].filter((value) => value !== undefined).length;
+  if (!flags || !profile || revoke === "" || revokeAlias === "" || promote === "" || modes > 1 ||
+    (promote === undefined) !== (keyText === undefined) || (dryRun && promote === undefined) ||
+    (promoteKey !== undefined && (!promoteKey.success || !PROMOTABLE_FACT_KEYS.has(promoteKey.data)))) {
     io.log(PROFILE_ANSWERS_USAGE);
     return 2;
   }
   const database = io.open(profile);
   try {
+    if (promote !== undefined && promoteKey?.success) {
+      return promoteSavedAnswer(database, io.log, promote, promoteKey.data, dryRun);
+    }
     if (revokeAlias !== undefined) {
       const ids = findQuestionAliasIds(database, LOCAL_CANDIDATE_ID, revokeAlias);
       if (ids.length === 0) {
@@ -472,6 +486,51 @@ export async function runProfileAnswersCommand(argv: string[], deps: Partial<Pro
   } finally {
     io.close(profile);
   }
+}
+
+/**
+ * (Track 79) `--promote <ref> --key <fact key> [--dry-run]`: saves a current question-memory answer as the canonical
+ * fact (sat_score, act_score) with the candidate's answer as its provenance (remembered_answer, the saved question),
+ * so every wording the mapper reads as that key reuses it. The saved answer stays. `--dry-run` writes nothing. Never
+ * prints the value.
+ */
+function promoteSavedAnswer(database: DatabaseSync, log: (line: string) => void, typed: string, key: CandidateFactKey, dryRun: boolean): number {
+  const ids = findCurrentQuestionAnswerIds(database, LOCAL_CANDIDATE_ID, typed);
+  if (ids.length === 0) {
+    log(`Not found: ${clip(typed, 40)}`);
+    return 1;
+  }
+  if (ids.length > 1) {
+    log(`Several saved answers match "${clip(typed, 40)}"; give more characters.`);
+    return 1;
+  }
+  const saved = listCurrentQuestionAnswers(database, LOCAL_CANDIDATE_ID).find((answer) => answer.id === ids[0]);
+  if (!saved) {
+    log(`Not found: ${clip(typed, 40)}`);
+    return 1;
+  }
+  const promoted = promotableFactValue(key, saved.question, saved.answer);
+  if ("reason" in promoted) {
+    log(`not promotable: ${promoted.reason}`);
+    return 1;
+  }
+  const line = `saved answer ${ref(saved.id)} "${clip(saved.question, 120)}" to ${key} [global]`;
+  if (dryRun) {
+    log(`would promote ${line}`);
+    return 0;
+  }
+  saveCandidateFact(database, {
+    candidateId: LOCAL_CANDIDATE_ID,
+    key,
+    scope: { kind: "global" },
+    value: promoted.value,
+    source: "user",
+    sourceDetail: { kind: "remembered_answer", question: saved.question.slice(0, 1_000) },
+    confidence: 1,
+    rememberedAt: new Date().toISOString()
+  });
+  log(`promoted ${line}`);
+  return 0;
 }
 
 export type QuestionsRecheckDeps = {

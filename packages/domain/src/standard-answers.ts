@@ -2,7 +2,14 @@ import { z } from "zod";
 
 import type { BrowserFieldKind } from "./browser";
 import type { CandidateFactKey } from "./candidate-facts";
-import { exportControlCategory, matchExportControlOption, usCitizenOption, usPersonOption } from "./export-control";
+import {
+  exportControlCategoriesOf,
+  exportControlCategory,
+  matchExportControlOption,
+  usCitizenOption,
+  usPersonOption,
+  type ExportControlCategory
+} from "./export-control";
 import { compensationPeriodSchema } from "./job-posting";
 
 /**
@@ -133,6 +140,61 @@ export function standardAnswerOption(key: string, value: boolean | string, optio
     if (key === "us_citizen" && value) return usCitizenOption(options);
   }
   return null;
+}
+
+// (Track 79) A question that requires or asks U.S.-person status ("applicant must be a U.S. citizen, lawful permanent resident …", "are you a U.S. person?", "comply with ITAR").
+const US_PERSON_ASKED = /\bmust (?:either )?be (?:a )?["“]?u\.?s\.? (?:person|citizen)|\bare you a ["“]?u\.?s\.? person\b|\b(?:applicant|candidate|you) must be a u\.?s\.? citizen\b|\bus person\b.{0,80}\b(?:includes?|defined)\b|\bcomply with itar\b/;
+// Words that ask something the saved status does not settle: a non-U.S. person, sanctioned countries, a needed license, dual citizenship.
+const US_PERSON_NOT_SETTLED = /\b(?:not a|non-?u\.?s\.?|foreign (?:person|national)|cuba|iran|north korea|syria|sudan|crimea|sanction\w*|license (?:is )?required|require (?:an )?(?:export )?license|dual citizen\w*)\b/;
+const QUALIFIED = /\b(?:but|however|although|though|until|unless|except|not)\b/;
+// (Track 79, round 2) A question requiring U.S. citizenship ("applicant must be a U.S. citizen …"), and words that exclude a category it names ("permanent residents are not eligible").
+const US_CITIZEN_REQUIRED = /\bmust (?:either )?be (?:a )?["“]?u\.?s\.? citizen|\b(?:applicant|candidate|you) must be a u\.?s\.? citizen\b/;
+const CATEGORY_EXCLUDED = /\b(?:not eligible|ineligible|exclud\w*|except)\b/;
+const US_PERSON_CATEGORIES: ReadonlySet<ExportControlCategory> = new Set<ExportControlCategory>([
+  "citizen_or_national",
+  "permanent_resident",
+  "refugee",
+  "asylee",
+  "protected_individual"
+]);
+
+/**
+ * (Track 79) The Yes option of a Yes/No question that requires or asks U.S.-person status ("To comply with U.S.
+ * Government space technology export regulations, applicant must be a U.S. citizen, lawful permanent resident …"),
+ * for a saved export-control status naming a U.S.-person category: the one Yes option that is "Yes" alone or a "Yes,"
+ * that says it complies ("Yes, I comply with ITAR requirement."). A question requiring U.S. citizenship takes Yes only
+ * for a saved citizen or national status, or a saved category the question itself names (never when the question says
+ * a category is not eligible or excluded); a U.S.-person or ITAR question takes Yes for any saved U.S.-person category
+ * (round 2). Null for any other key, a saved "none" status, a saved category the question does not accept, a
+ * question naming what the status does not settle (a non-U.S. person, sanctioned countries, a needed license, dual
+ * citizenship), or any other option. Placeholders ("Select One") never count.
+ */
+export function usPersonYesNoOption(question: string, key: string, value: boolean | string, options: readonly string[]): string | null {
+  if (key !== "us_person_export_controls" || typeof value !== "string") return null;
+  const category = exportControlCategory(value);
+  if (!category || category === "none") return null;
+  const asked = question.normalize("NFKC").toLocaleLowerCase("en-US").replace(/[‘’]/g, "'").replace(/\s+/g, " ").trim();
+  if (!US_PERSON_ASKED.test(asked) || US_PERSON_NOT_SETTLED.test(asked)) return null;
+  const accepted = acceptedUsPersonCategories(question, asked);
+  if (!accepted.has(category)) return null;
+  const yes = booleanOption(true, options);
+  if (!yes) return null;
+  const text = optionKey(yes);
+  if (/^yes[.!]?$/.test(text)) return yes;
+  return /^yes,/.test(text) && /\bcomply\b/.test(text) && !QUALIFIED.test(text) ? yes : null;
+}
+
+/**
+ * (Track 79, round 2) The saved categories a U.S.-person Yes/No question accepts: for a citizen requirement, a citizen
+ * or national plus every other category the question names, or a citizen or national alone when the question excludes
+ * a category; for a U.S.-person or ITAR question, every U.S.-person category.
+ */
+function acceptedUsPersonCategories(question: string, asked: string): ReadonlySet<ExportControlCategory> {
+  if (!US_CITIZEN_REQUIRED.test(asked)) return US_PERSON_CATEGORIES;
+  const accepted = new Set<ExportControlCategory>(["citizen_or_national"]);
+  if (CATEGORY_EXCLUDED.test(asked)) return accepted;
+  for (const named of exportControlCategoriesOf(question)) if (named !== "none") accepted.add(named);
+  return accepted;
 }
 
 /** Whether a dated agreement still applies on `today`; the end date itself counts (inclusive). */

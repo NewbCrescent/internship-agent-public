@@ -17,15 +17,19 @@ import { readPlace } from "@internship-agent/jobs";
  * U.S.-wide relocation (Track 62: a named city is inside the United States
  * only when the posting's place of that name is), and the salary rule. A
  * location's country is its stored code, else the one country its region or
- * location text names ("Fixture City, FL" is US). A posting in several
- * countries, or none known, gives no country, so authorization and
- * sponsorship questions without a country keep pausing.
+ * location text names ("Fixture City, FL" is US). When no location gives a
+ * country, the title's one exact country word does (Track 79: "Software
+ * Engineering Intern (US) - Summer 2027"). A posting in several countries, or
+ * none known, gives no country, so authorization and sponsorship questions
+ * without a country keep pausing.
  */
 export function postingQuestionContext(
-  posting: Pick<JobPosting, "companyName" | "locations"> & Partial<Pick<JobPosting, "compensation">> | null | undefined
+  posting: Pick<JobPosting, "companyName" | "locations"> & Partial<Pick<JobPosting, "compensation" | "title">> | null | undefined
 ): QuestionContext {
   if (!posting) return {};
-  const countries = [...new Set(posting.locations.map(locationCountry).filter((code): code is string => Boolean(code)))];
+  const located = [...new Set(posting.locations.map(locationCountry).filter((code): code is string => Boolean(code)))];
+  const titled = located.length === 0 && posting.title ? titleCountry(posting.title) : null;
+  const countries = titled ? [titled] : located;
   const pay = posting.compensation;
   const places = posting.locations.flatMap((location) => {
     const city = location.city?.trim();
@@ -43,6 +47,22 @@ export function postingQuestionContext(
 /** The posting's places as "City, Region" (else the stated text), for "are you located in or near the city" options. */
 export function postingLocationNames(posting: Pick<JobPosting, "locations"> | null | undefined): string[] {
   return (posting?.locations ?? []).map((location) => location.city && location.region ? `${location.city}, ${location.region}` : location.raw);
+}
+
+const TITLE_COUNTRIES: ReadonlyMap<string, string> = new Map([
+  ["us", "US"], ["usa", "US"], ["u.s.", "US"], ["u.s", "US"], ["u.s.a.", "US"], ["u.s.a", "US"], ["united states", "US"],
+  ["canada", "CA"],
+  ["uk", "GB"], ["united kingdom", "GB"]
+]);
+
+/** (Track 79) The one country a posting title names as a whole piece ("Intern (US) - Summer 2027"); null for none or several. */
+function titleCountry(title: string): string | null {
+  const codes = new Set<string>();
+  for (const piece of title.split(/[(),|/]|\s+[-–—]\s+/)) {
+    const code = TITLE_COUNTRIES.get(piece.trim().toLocaleLowerCase("en-US"));
+    if (code) codes.add(code);
+  }
+  return codes.size === 1 ? [...codes][0]! : null;
 }
 
 /** A location's country: the stored code, else the single country its region or text names; null otherwise. */

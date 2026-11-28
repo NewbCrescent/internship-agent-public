@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { agreeOption, citizenAuthorizationOption, factOption, graduationRangeOption, graduationTermMonths, graduationTermOption, relocationOption, relocationQuestionParts, samePlace, savedYesNoOption, startBucketOption, startWindowDays } from "@internship-agent/domain";
+import { agreeOption, citizenAuthorizationOption, closestGraduationOption, exportControlCategory, factOption, graduationComparison, graduationRangeOption, graduationTermMonths, graduationTermOption, isStandardizedTestTypeQuestion, numericRangeOption, promotableFactValue, relocationOption, relocationQuestionParts, samePlace, savedYesNoOption, startBucketOption, startWindowDays, usPersonYesNoOption } from "@internship-agent/domain";
 
 /** Deterministic option rules for saved facts (2026-11-24); fictional option lists and places. */
 const BUCKETS = ["Immediately", "2 weeks", "2–4 weeks", "4–6 weeks", "6+ weeks"];
@@ -307,5 +307,174 @@ describe("what else a relocation question asks (relocationQuestionParts, Track 6
 
   it("reads nothing more in a plain relocation question", () => {
     expect(relocationQuestionParts("Are you willing to relocate?")).toEqual({ onSite: false, local: false, held: null });
+  });
+});
+
+describe("held-question option shapes (Track 79, fictional dates and scores)", () => {
+  const DATE = "2030-05-15";
+  const month = (year: number, m: number) => year * 12 + m - 1;
+
+  it.each<[string, { from: number; to: number } | null]>([
+    ["May/June 2030", { from: month(2030, 5), to: month(2030, 6) }],
+    ["January – June 2030", { from: month(2030, 1), to: month(2030, 6) }],
+    ["Jan. - Jun. 2030", { from: month(2030, 1), to: month(2030, 6) }],
+    ["Spring 2030 (January - May)", { from: month(2030, 1), to: month(2030, 5) }],
+    ["Summer 2030 (June or later)", { from: month(2030, 6), to: month(2030, 8) }],
+    ["2031 or later", { from: month(2031, 1), to: Infinity }],
+    ["2029 or earlier", { from: -Infinity, to: month(2029, 12) }],
+    ["2028 or earlier (already graduated or graduating this year)", { from: -Infinity, to: month(2028, 12) }],
+    ["After Spring 2030", { from: month(2030, 7), to: Infinity }],
+    ["Later than Summer 2030", { from: month(2030, 9), to: Infinity }],
+    ["Before 2028", { from: -Infinity, to: month(2027, 12) }],
+    ["After 2032", { from: month(2033, 1), to: Infinity }],
+    ["Prior to Fall 2030", { from: -Infinity, to: month(2030, 8) }],
+    // Existing shapes keep their results; winter alone and plain years stay unread.
+    ["Spring 2030", { from: month(2030, 4), to: month(2030, 6) }],
+    ["December 2030 or later", { from: month(2030, 12), to: Infinity }],
+    ["Winter 2030", null],
+    ["2030", null],
+    ["June/May 2030", null]
+  ])("reads %s", (option, months) => {
+    expect(graduationTermMonths(option)).toEqual(months);
+  });
+
+  it("picks the one new-shape term holding the date", () => {
+    expect(graduationTermOption(["January – June 2030", "July – December 2030", "January – June 2031"], DATE)).toBe("January – June 2030");
+    expect(graduationTermOption(["Spring 2030 (January - May)", "Summer 2030 (June or later)", "Later than Summer 2030"], DATE)).toBe("Spring 2030 (January - May)");
+    expect(graduationTermOption(["2028 or earlier (already graduated or graduating this year)", "2029", "2030", "2031 or later"], "2032-05-15")).toBe("2031 or later");
+    expect(graduationTermOption(["Before 2029", "2029", "2030", "After 2030"], "2028-05-15")).toBe("Before 2029");
+    expect(graduationTermOption(["Spring 2030", "After Spring 2030"], "2030-07-01")).toBe("After Spring 2030");
+  });
+
+  it.each<[string, string, boolean | null]>([
+    ["Will you be graduating before September 2030?", DATE, true],
+    ["Will you be graduating before May 2030?", DATE, false],
+    ["Will you graduate by Spring 2030?", DATE, true],
+    ["Will you be graduating after December 2029?", DATE, true],
+    ["Is your expected graduation date in 2031 or later?", DATE, false],
+    ["Is your expected graduation date in 2030 or later?", DATE, true],
+    ["Will you graduate no later than 2029?", DATE, false],
+    // Not the graduation date: another degree, a full-time start, two comparisons, or none.
+    ["Will you be graduating with a Master's before September 2030?", DATE, null],
+    ["Will you graduate before 2031 and start full-time after?", DATE, null],
+    ["Will you graduate after 2029 but before 2031?", DATE, null],
+    ["When do you expect to graduate?", DATE, null]
+  ])("compares %s", (question, date, answer) => {
+    expect(graduationComparison(question, date)?.answer ?? null).toBe(answer);
+  });
+
+  it("answers a graduation comparison's Yes/No list from the date", () => {
+    const yesNo = ["Yes", "No"];
+    expect(factOption("graduation_date", DATE, yesNo, { nearPosting: false, question: "Will you be graduating before September 2030?" })?.option).toBe("Yes");
+    expect(factOption("graduation_date", DATE, yesNo, { nearPosting: false, question: "Is your expected graduation date in 2031 or later?" })?.option).toBe("No");
+    expect(factOption("graduation_date", DATE, yesNo, { nearPosting: false, question: "Will you graduate after 2029 but before 2031?" })).toBeNull();
+  });
+
+  it("picks the closest single-month option only when the label asks for the closest date", () => {
+    const months = ["December 2029", "June 2030", "December 2030"];
+    expect(closestGraduationOption(months, DATE)).toBe("June 2030");
+    expect(factOption("graduation_date", DATE, months, { nearPosting: false, closest: true })?.option).toBe("June 2030");
+    expect(factOption("graduation_date", DATE, months, { nearPosting: false })).toBeNull();
+    expect(closestGraduationOption(["April 2030", "June 2030"], DATE)).toBeNull();
+    expect(closestGraduationOption(["December 2029", "December 2030"], DATE)).toBeNull();
+  });
+
+  it.each<[number, string[], string | null]>([
+    [1350, ["<1200", "1200 - 1290", "1300 - 1390", "1400 - 1490", "1500+"], "1300 - 1390"],
+    [1300, ["I don't have SAT score", "<1200", "1201 - 1300", "1301 - 1400", "1401 - 1500", "1501 - 1600"], "1201 - 1300"],
+    [1301, ["<1200", "1201 - 1300", "1301 - 1400"], "1301 - 1400"],
+    [1550, ["Under 1400", "1400 to 1500", "1500 or more"], "1500 or more"],
+    [1200, ["<1200", "1200–1400", "1400–1600"], "1200–1400"],
+    [1400, ["1200-1400", "1400-1600"], null],
+    [1350, ["1350"], null],
+    [29, ["<30", "31", "32", "33"], "<30"],
+    [30, ["<30", "31", "32"], null],
+    // A held run's list (2026-11-27): each bucket names the scale.
+    [1520, ["Did not take/Do not recall", "1600 out of 1600", "1550-1599 out of 1600", "1500-1549 out of 1600", "1450-1499 out of 1600"], "1500-1549 out of 1600"],
+    [34, ["Did not take/Do not recall", "36 out of 36", "35 out of 36", "34 out of 36"], "34 out of 36"]
+  ])("puts %s in its bucket", (value, options, expected) => {
+    expect(numericRangeOption(value, options)).toBe(expected);
+  });
+
+  it("picks the SAT or ACT option of a test-type list for a saved score, never a combined option", () => {
+    expect(isStandardizedTestTypeQuestion("Test Type")).toBe(true);
+    expect(isStandardizedTestTypeQuestion("Which standardized test did you take?")).toBe(true);
+    expect(isStandardizedTestTypeQuestion("Which test automation tools have you used?")).toBe(false);
+    expect(factOption("sat_score", "1350", ["SAT", "ACT"], { nearPosting: false, question: "Test Type" })?.option).toBe("SAT");
+    expect(factOption("act_score", "31", ["SAT", "ACT"], { nearPosting: false, question: "Score type" })?.option).toBe("ACT");
+    expect(factOption("sat_score", "1350", ["SAT", "ACT", "Both"], { nearPosting: false, question: "Test Type" })).toBeNull();
+    expect(factOption("sat_score", "1350", ["SAT", "SAT and ACT"], { nearPosting: false, question: "Test Type" })).toBeNull();
+    expect(factOption("sat_score", "1350", ["<1200", "1200 - 1390", "1400+"], { nearPosting: false, question: "SAT Score" })?.option).toBe("1200 - 1390");
+  });
+
+  it.each<[string, boolean, string[], string | null]>([
+    ["age_18_or_older", true, ["Yes, I am at least 18 years of age.", "No, I am not at least 18 years of age."], "Yes, I am at least 18 years of age."],
+    ["age_16_or_older", true, ["Yes, I am 16 or older", "No"], "Yes, I am 16 or older"],
+    ["requires_sponsorship", false, ["Yes, I will require sponsorship for an employment-based visa status.", "No, I will not require sponsorship for an employment-based visa status."], "No, I will not require sponsorship for an employment-based visa status."],
+    ["requires_sponsorship", false, ["Yes", "No, but I will need an OPT extension"], null],
+    ["requires_sponsorship", false, ["Yes", "No, I am a U.S. citizen"], null],
+    ["requires_sponsorship", false, ["OPT", "H1B", "TN", "None", "Other"], "None"],
+    ["requires_sponsorship", false, ["J1", "F1", "None", "Other"], "None"],
+    ["requires_sponsorship", false, ["None", "Other"], null],
+    ["requires_sponsorship", true, ["OPT", "H1B", "None"], null],
+    ["previously_worked_here", false, ["Yes, I have worked at Fixture Co", "No, I have never worked at Fixture Co"], "No, I have never worked at Fixture Co"],
+    ["previously_worked_here", false, ["I have previously been employed at Fixture Co", "I have not previously been employed at Fixture Co"], "I have not previously been employed at Fixture Co"],
+    ["previously_worked_here", false, ["I have not worked here", "I have not applied here"], null],
+    ["previously_worked_here", false, ["No, but I interviewed here before", "Yes"], null],
+    ["relatives_at_company", false, ["No, I have no relatives at Fixture Co", "Yes"], "No, I have no relatives at Fixture Co"],
+    ["enrolled_full_time", true, ["Yes, I am a full-time undergraduate student", "No"], "Yes, I am a full-time undergraduate student"],
+    ["enrolled_full_time", true, ["Yes, I am a full-time graduate student", "No"], null],
+    ["work_arrangement", true, ["Yes, I can work on-site", "No"], "Yes, I can work on-site"],
+    ["work_arrangement", true, ["Yes, but require relocation", "No"], null],
+    ["work_arrangement", true, ["Yes, I live nearby", "No"], null],
+    ["work_arrangement", true, ["Yes, I am fully remote-ready", "No"], null]
+  ])("a saved %s %s picks its sentence option", (key, value, options, expected) => {
+    expect(savedYesNoOption(key, value, options)).toBe(expected);
+  });
+
+  it("answers a U.S.-person Yes/No question only from a saved U.S.-person status and a question that requires it", () => {
+    const required = "To comply with U.S. Government space technology export regulations, applicant must be a U.S. citizen, lawful permanent resident, or protected individual.";
+    expect(usPersonYesNoOption(required, "us_person_export_controls", "U.S. citizen", ["Select One", "Yes", "No"])).toBe("Yes");
+    expect(usPersonYesNoOption("Fixture Co must comply with ITAR. Are you a U.S. person?", "us_person_export_controls", "U.S. citizen", ["Yes, I comply with ITAR requirement.", "No, I do not comply with ITAR requirement."]))
+      .toBe("Yes, I comply with ITAR requirement.");
+    expect(usPersonYesNoOption(required, "us_person_export_controls", "None of the above", ["Yes", "No"])).toBeNull();
+    expect(usPersonYesNoOption(required, "us_citizen", "U.S. citizen", ["Yes", "No"])).toBeNull();
+    expect(usPersonYesNoOption("Have you lived in Iran? Applicant must be a U.S. citizen.", "us_person_export_controls", "U.S. citizen", ["Yes", "No"])).toBeNull();
+    expect(usPersonYesNoOption("Do you need an export license? Applicant must be a U.S. citizen or require an export license.", "us_person_export_controls", "U.S. citizen", ["Yes", "No"])).toBeNull();
+    expect(usPersonYesNoOption("Are you able to work on-site?", "us_person_export_controls", "U.S. citizen", ["Yes", "No"])).toBeNull();
+    expect(usPersonYesNoOption(required, "us_person_export_controls", "U.S. citizen", ["Yes, but I hold dual citizenship", "No"])).toBeNull();
+  });
+
+  it("answers a U.S.-citizen requirement only from a saved citizen status or a saved category the question itself names", () => {
+    const required = "To comply with U.S. Government space technology export regulations, applicant must be a U.S. citizen, lawful permanent resident, or protected individual.";
+    const citizenOnly = "Applicant must be a U.S. citizen. Do you meet this requirement?";
+    const excluded = "Applicant must be a U.S. citizen; permanent residents are not eligible.";
+    const itar = "Fixture Co must comply with ITAR. Are you a U.S. person?";
+    const resident = "I am a lawful permanent resident of the United States";
+    const asylee = "I am an asylee under 8 U.S.C. 1158";
+    expect(exportControlCategory(resident)).toBe("permanent_resident");
+    expect(exportControlCategory(asylee)).toBe("asylee");
+    expect(usPersonYesNoOption(citizenOnly, "us_person_export_controls", resident, ["Yes", "No"])).toBeNull();
+    expect(usPersonYesNoOption("This role requires that you must be a U.S. citizen.", "us_person_export_controls", resident, ["Yes", "No"])).toBeNull();
+    expect(usPersonYesNoOption(required, "us_person_export_controls", resident, ["Yes", "No"])).toBe("Yes");
+    expect(usPersonYesNoOption(excluded, "us_person_export_controls", resident, ["Yes", "No"])).toBeNull();
+    expect(usPersonYesNoOption(itar, "us_person_export_controls", resident, ["Yes", "No"])).toBe("Yes");
+    expect(usPersonYesNoOption(required, "us_person_export_controls", asylee, ["Yes", "No"])).toBeNull();
+    expect(usPersonYesNoOption(itar, "us_person_export_controls", asylee, ["Yes", "No"])).toBe("Yes");
+    expect(usPersonYesNoOption(citizenOnly, "us_person_export_controls", "U.S. citizen", ["Yes", "No"])).toBe("Yes");
+    expect(usPersonYesNoOption(excluded, "us_person_export_controls", "U.S. citizen", ["Yes", "No"])).toBe("Yes");
+  });
+
+  it("promotes a saved score answer only to its own test's key, with a valid value, never echoing it", () => {
+    expect(promotableFactValue("sat_score", "SAT or ACT Score", "1350 (SAT)")).toEqual({ value: "1350" });
+    expect(promotableFactValue("sat_score", "SAT Score", "1350")).toEqual({ value: "1350" });
+    expect(promotableFactValue("act_score", "SAT or ACT Score", "1350 (SAT)")).toMatchObject({ reason: expect.any(String) });
+    expect(promotableFactValue("sat_score", "SAT or ACT Score", "1350")).toMatchObject({ reason: expect.any(String) });
+    expect(promotableFactValue("sat_score", "SAT Score", "1700")).toMatchObject({ reason: expect.any(String) });
+    expect(promotableFactValue("act_score", "ACT Score", "31")).toEqual({ value: "31" });
+    expect(promotableFactValue("act_score", "ACT Score", "40")).toMatchObject({ reason: expect.any(String) });
+    expect(promotableFactValue("how_heard", "How did you hear?", "LinkedIn")).toMatchObject({ reason: expect.any(String) });
+    const refused = promotableFactValue("sat_score", "SAT Score", "1700");
+    expect("reason" in refused && refused.reason.includes("1700")).toBe(false);
   });
 });

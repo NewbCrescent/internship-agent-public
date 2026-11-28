@@ -487,6 +487,25 @@ export const factDefinitions = {
     reusePolicy: "auto",
     explicitUserSourceRequired: true
   },
+  // (Track 79) Canonical test scores, saved only from the candidate's own answer (pnpm profile:answers --promote).
+  sat_score: {
+    label: "SAT total score",
+    valueType: "text",
+    valueSchema: z.string().trim().regex(/^\d{3,4}$/).refine((value) => Number(value) >= 400 && Number(value) <= 1600, "An SAT total score is 400 to 1600"),
+    allowedScopes: ["global"],
+    sensitivity: "standard",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  act_score: {
+    label: "ACT composite score",
+    valueType: "text",
+    valueSchema: z.string().trim().regex(/^\d{1,2}$/).refine((value) => Number(value) >= 1 && Number(value) <= 36, "An ACT composite score is 1 to 36"),
+    allowedScopes: ["global"],
+    sensitivity: "standard",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
   salary_expectation: {
     label: "Salary expectation",
     valueType: "text",
@@ -545,7 +564,9 @@ export const candidateFactKeySchema = z.enum([
   "us_citizen_or_permanent_resident",
   "f1_optional_practical_training",
   "unrestricted_us_work_authorization",
-  "salary_expectation"
+  "salary_expectation",
+  "sat_score",
+  "act_score"
 ]);
 
 export type CandidateFactKey = z.infer<typeof candidateFactKeySchema>;
@@ -633,4 +654,33 @@ function parseBooleanAnswer(input: string): boolean {
 export function formatFactValue(value: CandidateFactValue): string {
   if (typeof value === "boolean") return value ? "Yes" : "No";
   return value;
+}
+
+/** (Track 79) Keys a saved question-memory answer may be promoted to (pnpm profile:answers --promote). */
+export const PROMOTABLE_FACT_KEYS: ReadonlySet<CandidateFactKey> = new Set<CandidateFactKey>(["sat_score", "act_score"]);
+
+const PROMOTABLE_SCORE = /^\s*(\d{1,4})\s*(?:\((sat|act)\))?\s*$/i;
+
+/**
+ * (Track 79) The canonical fact value a saved question-memory answer gives a promotable key, or why it does not:
+ * "1234" or "1234 (SAT)" for sat_score, "30" or "30 (ACT)" for act_score. A tag must name the key's test; without one
+ * the saved question must name only that test. The value must pass the key's schema. Reasons never contain the value.
+ */
+export function promotableFactValue(key: CandidateFactKey, question: string, answer: string): { value: string } | { reason: string } {
+  if (!PROMOTABLE_FACT_KEYS.has(key)) return { reason: `${key} is not a key a saved answer can be promoted to.` };
+  const test = key === "sat_score" ? "sat" : "act";
+  const other = test === "sat" ? "act" : "sat";
+  const match = PROMOTABLE_SCORE.exec(answer);
+  if (!match) return { reason: "The saved answer is not a single score." };
+  const tag = match[2]?.toLocaleLowerCase("en-US");
+  if (tag && tag !== test) return { reason: `The saved answer is tagged as another test, not ${test.toUpperCase()}.` };
+  if (!tag) {
+    const asked = question.toLocaleLowerCase("en-US");
+    if (!new RegExp(`\\b${test}\\b`).test(asked) || new RegExp(`\\b${other}\\b`).test(asked)) {
+      return { reason: `The saved answer has no test tag, and its question does not name only the ${test.toUpperCase()}.` };
+    }
+  }
+  const parsed = factDefinitions[key].valueSchema.safeParse(match[1]);
+  if (!parsed.success) return { reason: `The saved answer is not a valid ${factDefinitions[key].label}.` };
+  return { value: String(parsed.data) };
 }

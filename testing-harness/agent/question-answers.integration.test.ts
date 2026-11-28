@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   getBrowserRun,
+  getCurrentFact,
   getJobPosting,
   listApplicationEvents,
   listBrowserRuns,
@@ -666,6 +667,56 @@ describe("pnpm profile:answers", () => {
 
     const again = await start(ws, [pythonSelect(), submitButton]);
     expect(again.decisions.find((decision) => decision.fieldId === "python")?.action).toBe("pause");
+    ws.database.close();
+  });
+});
+
+describe("pnpm profile:answers --promote (Track 79, fictional score)", () => {
+  it("promotes a saved score answer to its canonical key with the answer's provenance, never printing the value", async () => {
+    const ws = workspace();
+    const saved = saveQuestionAnswer(ws.database, { candidateId: LOCAL_CANDIDATE_ID, question: "SAT or ACT Score", answerKind: "text", answer: "1350 (SAT)", sourceRunId: null }).answer;
+    const output: string[] = [];
+    const deps = { open: () => ws.database, close: () => {}, log: (line: string) => output.push(line) };
+    const ref = saved.id.slice(0, 8);
+    const facts = () => count(ws.database, "candidate_facts");
+    const before = facts();
+
+    expect(await runProfileAnswersCommand(["--profile", "demo", "--promote", ref, "--key", "sat_score", "--dry-run"], deps)).toBe(0);
+    expect(output).toEqual([`would promote saved answer ${ref} "SAT or ACT Score" to sat_score [global]`]);
+    expect(facts()).toBe(before);
+
+    output.length = 0;
+    expect(await runProfileAnswersCommand(["--profile", "demo", "--promote", ref, "--key", "act_score", "--dry-run"], deps)).toBe(1);
+    expect(output[0]).toMatch(/^not promotable: /);
+    expect(facts()).toBe(before);
+
+    output.length = 0;
+    expect(await runProfileAnswersCommand(["--profile", "demo", "--promote", ref, "--key", "sat_score"], deps)).toBe(0);
+    expect(output).toEqual([`promoted saved answer ${ref} "SAT or ACT Score" to sat_score [global]`]);
+    const fact = getCurrentFact(ws.database, LOCAL_CANDIDATE_ID, "sat_score", { kind: "global" });
+    expect(fact).toMatchObject({ value: "1350", source: "user", sourceDetail: { kind: "remembered_answer", question: "SAT or ACT Score" } });
+    // The saved answer stays for its own wording.
+    expect(answerRows(ws.database).filter((row) => row.id === saved.id)).toHaveLength(1);
+    expect(output.join("\n")).not.toContain("1350");
+    ws.database.close();
+  });
+
+  it("refuses an out-of-range score and rejects mixed or incomplete flags as usage errors", async () => {
+    const ws = workspace();
+    const saved = saveQuestionAnswer(ws.database, { candidateId: LOCAL_CANDIDATE_ID, question: "SAT Score", answerKind: "text", answer: "1700", sourceRunId: null }).answer;
+    const output: string[] = [];
+    const deps = { open: () => ws.database, close: () => {}, log: (line: string) => output.push(line) };
+    const ref = saved.id.slice(0, 8);
+    expect(await runProfileAnswersCommand(["--profile", "demo", "--promote", ref, "--key", "sat_score"], deps)).toBe(1);
+    expect(output.join("\n")).not.toContain("1700");
+    expect(getCurrentFact(ws.database, LOCAL_CANDIDATE_ID, "sat_score", { kind: "global" })).toBeNull();
+    expect(await runProfileAnswersCommand(["--profile", "demo", "--promote", ref, "--key", "sat_score", "--revoke", ref], deps)).toBe(2);
+    expect(await runProfileAnswersCommand(["--profile", "demo", "--promote", ref], deps)).toBe(2);
+    expect(await runProfileAnswersCommand(["--profile", "demo", "--key", "sat_score"], deps)).toBe(2);
+    expect(await runProfileAnswersCommand(["--profile", "demo", "--promote", ref, "--key", "not_a_key"], deps)).toBe(2);
+    expect(await runProfileAnswersCommand(["--profile", "demo", "--promote", ref, "--key", "how_heard"], deps)).toBe(2);
+    expect(await runProfileAnswersCommand(["--profile", "demo", "--dry-run"], deps)).toBe(2);
+    expect(await runProfileAnswersCommand(["--profile", "demo", "--promote", "ffffffff", "--key", "sat_score"], deps)).toBe(1);
     ws.database.close();
   });
 });

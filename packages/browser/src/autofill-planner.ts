@@ -4,10 +4,10 @@ import type {
   PauseRecord,
   RecognizedForm
 } from "@internship-agent/domain";
-import { citizenAuthorizationOption, factOption, FACT_OPTION_KEYS, samePlace, savedYesNoOption, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
+import { citizenAuthorizationOption, factOption, FACT_OPTION_KEYS, isStandardizedTestTypeQuestion, samePlace, savedYesNoOption, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
 import { asksForAllSchools, asksForHighSchool, schoolsAttendedLines, type EducationRow, type HighSchoolPlace } from "@internship-agent/domain";
 import { clipDecisionText } from "@internship-agent/domain";
-import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, fieldOfStudyCategoryOption, isStandardAnswerKey, matchOfferedOption, namedSchoolRelation, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption } from "@internship-agent/domain";
+import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, fieldOfStudyCategoryOption, isStandardAnswerKey, matchOfferedOption, namedSchoolRelation, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption, usPersonYesNoOption } from "@internship-agent/domain";
 
 import { classifyFieldRole, classifyUploadRole, isSensitiveRole } from "./ats/field-roles";
 import { RACE_ONLY_DECLINE_REASON, type SelfIdentificationRule } from "./ats/self-identification";
@@ -231,7 +231,10 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
       return fill(field, digits, { kind: "profile", field: "phone" }, "The phone number on your profile, digits only (this box takes only numbers).");
     }
   }
-  if (contact && (TEXT_KINDS.has(field.kind) || field.kind === "select" || field.kind === "radio")) {
+  // (Track 79) A profile link, name, or address line asked in a text area ("LinkedIn Profile" as a textarea) is typed like a text box.
+  const contactArea = contact !== null && field.kind === "textarea" && field.widget !== "autocomplete" && TEXTAREA_CONTACT_KEYS.has(contact.key) &&
+    !(contact.key === "addressLine1" && contact.label === "address");
+  if (contact && (TEXT_KINDS.has(field.kind) || contactArea || field.kind === "select" || field.kind === "radio")) {
     // A phone-country picker that already shows the profile's country ("🇺🇸 (+1) United States of America") is
     // kept, never retyped: typing into it first clears the country it shows (Track 37). A bare "+1" names no country.
     if (contact.key === "addressCountry" && field.currentValue && matchCountryOption(contact.value, [field.currentValue])) {
@@ -242,7 +245,7 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
       const typed = contact.key === "addressCountry" && US_COUNTRY_KEYS.has(countryKey(contact.value)) ? "United States" : contact.value;
       return suggest(field, typed, { kind: "profile", field: contact.key });
     }
-    if (TEXT_KINDS.has(field.kind)) return fill(field, contact.value, { kind: "profile", field: contact.key }, "Contact details from your profile.");
+    if (TEXT_KINDS.has(field.kind) || contactArea) return fill(field, contact.value, { kind: "profile", field: contact.key }, "Contact details from your profile.");
     const match = field.options?.find((option) => option.toLocaleLowerCase("en-US") === contact.value.toLocaleLowerCase("en-US"))
       ?? dialCodeOption(contact.value, field.options ?? [])
       ?? (contact.key === "addressCountry" ? matchCountryOption(contact.value, field.options ?? []) ?? undefined : undefined)
@@ -261,7 +264,7 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
     });
   }
 
-  const education = educationDecision(field, inputs.education);
+  const education = educationDecision(field, inputs.education, inputs.standing?.today);
   if (education) return education;
   const gpa = gpaDecision(field, inputs.profile.gpa);
   if (gpa) return gpa;
@@ -295,7 +298,7 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
   if (field.widget === "autocomplete" && field.kind !== "select") {
     // A type-ahead takes only a known value typed in and a matching suggestion picked.
     if (resolution?.status === "RESOLVED" && typeof resolution.value === "string") {
-      const year = graduationYearDecision(field, resolution);
+      const year = graduationYearDecision(field, resolution) ?? graduationTextDecision(field, resolution);
       if (year) return year;
       return suggest(field, resolution.display, { kind: "fact", key: resolution.key, scope: resolution.scope });
     }
@@ -362,6 +365,21 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
           fieldId: field.id,
           action: "choose",
           value: matches[0]!,
+          basis: { kind: "fact", key: resolution.key, scope: resolution.scope },
+          reason: "A remembered fact matches one of the offered options.",
+          pause: null
+        };
+      }
+      // (Track 79) A checkbox group gets the same option rules as a list: a term, range, or comparison for the
+      // graduation date, a standard answer's option, and a sentence Yes/No ("Yes, I am at least 18 years of age.").
+      const picked = factOptionDecision(field, resolution, inputs);
+      if (picked) return picked;
+      const option = standardAnswerOption(resolution.key, resolution.value, field.options!) ?? savedYesNoOption(resolution.key, resolution.value, field.options!);
+      if (option) {
+        return {
+          fieldId: field.id,
+          action: "choose",
+          value: option,
           basis: { kind: "fact", key: resolution.key, scope: resolution.scope },
           reason: "A remembered fact matches one of the offered options.",
           pause: null
@@ -444,7 +462,7 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
   }
 
   if (resolution?.status === "RESOLVED") {
-    const year = graduationYearDecision(field, resolution);
+    const year = graduationYearDecision(field, resolution) ?? graduationTextDecision(field, resolution);
     if (year) return year;
     const start = startDateDecision(field, resolution);
     if (start) return start;
@@ -468,6 +486,7 @@ function decideField(field: BrowserField, inputs: PlannerInputs): FillDecision {
         option.toLocaleLowerCase("en-US") === resolution.display.toLocaleLowerCase("en-US")
       ) ?? (resolution.key === "pronouns" ? matchPronounOption(resolution.display, field.options) : undefined)
         ?? (standardAnswerOption(resolution.key, resolution.value, field.options) ?? undefined)
+        ?? (usPersonYesNoOption(field.label, resolution.key, resolution.value, field.options) ?? undefined)
         ?? (savedYesNoOption(resolution.key, resolution.value, field.options) ?? undefined);
       if (!match) {
         const citizen = citizenOption(field, resolution);
@@ -588,7 +607,8 @@ function rememberedSuggestion(
 function factOptionDecision(field: BrowserField, resolution: Extract<FieldResolution, { status: "RESOLVED" }>, inputs: PlannerInputs): FillDecision | null {
   if (!FACT_OPTION_KEYS.has(resolution.key)) return null;
   const basis = { kind: "fact" as const, key: resolution.key, scope: resolution.scope };
-  const listed = (field.kind === "select" || field.kind === "radio") && field.widget !== "autocomplete" && field.options?.length ? field.options : null;
+  const listed = ((field.kind === "select" || field.kind === "radio") && field.widget !== "autocomplete" && field.options?.length) ||
+    (field.kind === "checkbox" && (field.options?.length ?? 0) >= 2) ? field.options! : null;
   // A combined "located near the city, or relocate at your own expense?" list is decided only by its rule:
   // its plain "No" would also deny living near the city, so a saved No never picks it.
   const relocation = resolution.key === "willing_to_relocate_at_own_expense";
@@ -596,9 +616,20 @@ function factOptionDecision(field: BrowserField, resolution: Extract<FieldResolu
   const picked = listed && !exact ? factOption(resolution.key, resolution.value, listed, {
     today: inputs.standing?.today,
     nearPosting: samePlace(contactField("currentLocation", inputs.profile), inputs.postingLocations),
-    degreeLevel: inputs.education?.degree && bachelorKind(inputs.education.degree) ? "bachelor" : null
+    degreeLevel: inputs.education?.degree && bachelorKind(inputs.education.degree) ? "bachelor" : null,
+    question: field.label,
+    closest: /\b(?:closest|nearest)\b/.test(normalizedLabel(field.label))
   }) : null;
   if (picked) return { fieldId: field.id, action: "choose", value: picked.option, basis, reason: picked.reason, pause: null };
+  // (Track 79) Which test a saved score is for: only its own "SAT" / "ACT" option, never the score typed or echoed.
+  if ((resolution.key === "sat_score" || resolution.key === "act_score") && isStandardizedTestTypeQuestion(field.label)) {
+    return pauseDecision(field, {
+      question: `No single option of "${field.label}" names the test your saved score is for. How should it be answered?`,
+      key: resolution.key,
+      scope: resolution.scope,
+      safeguard: false
+    });
+  }
   if ((resolution.key === "salary_expectation_rule" || (relocation && listed)) && !exact) {
     return pauseDecision(field, {
       question: `The saved answer is not among the options for "${field.label}". How should it be answered?`,
@@ -625,6 +656,29 @@ function graduationYearDecision(field: BrowserField, resolution: Extract<FieldRe
     return null; // usual rules: the existing "not among the options" pause
   }
   if (field.kind === "text" || field.kind === "number") return fill(field, year, basis, "The year of your graduation date.");
+  return null;
+}
+
+/**
+ * (Track 79) A graduation date typed as a month and year: "MM/YYYY" when the label says so ("When are you expected to
+ * graduate? (MM/YYYY)"), "<Month> YYYY" when it asks for the month and year ("What is your anticipated graduation month
+ * and year?"). Null otherwise, so the date is typed as saved.
+ */
+function graduationTextDecision(field: BrowserField, resolution: Extract<FieldResolution, { status: "RESOLVED" }>): FillDecision | null {
+  if (resolution.key !== "graduation_date" || typeof resolution.value !== "string" || field.widget === "autocomplete") return null;
+  if (field.kind !== "text" && field.kind !== "textarea") return null;
+  const date = /^(\d{4})-(\d{2})-\d{2}$/.exec(resolution.value);
+  if (!date) return null;
+  const month = Number(date[2]);
+  if (month < 1 || month > 12) return null;
+  const label = normalizedLabel(field.label);
+  const basis = { kind: "fact" as const, key: resolution.key, scope: resolution.scope };
+  if (label.includes("mm/yyyy")) return fill(field, `${date[2]}/${date[1]}`, basis, "Your graduation date as month and year, in the format this field takes.");
+  const monthName = new RegExp(`\\(e\\.?g\\.?,? (?:${MONTH_NAMES.join("|")}) 20\\d\\d\\)`);
+  if (/\bmonth (?:and|&) year\b|\bmonth\/year\b/.test(label) || monthName.test(label)) {
+    const name = MONTH_NAMES[month - 1]!;
+    return fill(field, `${name.charAt(0).toUpperCase()}${name.slice(1)} ${date[1]}`, basis, "Your graduation date as month and year.");
+  }
   return null;
 }
 
@@ -769,6 +823,9 @@ function packageQuestionIntent(label: string): PackageIntent | null {
 /** Kinds that take typed text. */
 const TEXT_KINDS: ReadonlySet<BrowserField["kind"]> = new Set(["text", "email", "tel", "url"]);
 
+/** (Track 79) Profile details also typed into a text area. */
+const TEXTAREA_CONTACT_KEYS: ReadonlySet<ContactKey> = new Set<ContactKey>(["linkedinUrl", "githubUrl", "portfolioUrl", "fullName", "addressLine1"]);
+
 /** Kinds that are choices or uploads: never typed into. */
 const CHOICE_KINDS: ReadonlySet<BrowserField["kind"]> = new Set(["radio", "checkbox", "select", "file"]);
 
@@ -912,6 +969,33 @@ const SCHOOL_LABEL = /^(?:school|school name|university|college|school or univer
 const DEGREE_LABEL = /^(?:degree|degree type)$/;
 /** "What degree level are you currently pursuing, or have you most recently completed?": answered like a Degree list. */
 const DEGREE_PURSUING_LABEL = /^(?:what|which) (?:degree|degree level|level of degree|type of degree|degree type) are you (?:currently )?pursuing(?:,? or (?:have you )?(?:most )?recently completed)?\??$/;
+/**
+ * (Track 79) The degree level being studied ("What degree program are you actively enrolled in?", "Current Program
+ * Type") or held at graduation ("Level of education completed once you've graduated?").
+ */
+const DEGREE_LEVEL_LABEL = /^(?:what|which) (?:degree|degree program|program|level of degree|type of degree) are you (?:actively |currently )?(?:enrolled in|pursuing|taking|working towards)(?: currently)?\??$|^if you are (?:currently )?enrolled in (?:a )?(?:university|college)(?: or college)?,? what degree are you currently pursuing\??$|^what degree are you taking currently\??$|^current program type$|^level of education completed once you(?:'|’)?ve graduated\??$/;
+const AT_GRADUATION_LABEL = /^level of education completed once you/;
+const BACHELOR_LEVEL_OPTION = /\b(?:bachelor'?s?|undergrad\w*)\b|\bb\.?\s?[as]\.?(?![a-z])/i;
+const NOT_BACHELOR_LEVEL_OPTION = /\b(?:master'?s?|m\.?s\.|doctor\w*|ph\.?\s?d|mba|associate'?s?|post-?grad\w*|non-degree|bootcamp|certificate|not (?:currently )?enrolled|jd)\b/i;
+
+/**
+ * (Track 79) The one bachelor's-level option for a degree-level question, for a bachelor's degree on the profile whose
+ * graduation date is still ahead (a question about the degree held at graduation needs only the degree). Null when the
+ * degree is not a bachelor's, the date has passed or is unknown, or no option or several fit.
+ */
+function degreeLevelOption(label: string, education: EducationInputs, options: readonly string[], today: string | undefined): string | null {
+  if (!education.degree || bachelorKind(education.degree) === null) return null;
+  if (!AT_GRADUATION_LABEL.test(label)) {
+    const graduation = education.graduation?.date;
+    if (!graduation || !today || graduation <= today) return null;
+  }
+  const hits = options.filter((option) => {
+    const text = option.replace(/[‘’]/g, "'");
+    return BACHELOR_LEVEL_OPTION.test(text) && !NOT_BACHELOR_LEVEL_OPTION.test(text);
+  });
+  return hits.length === 1 ? hits[0]! : null;
+}
+
 const EDUCATION_DATE_LABEL = /^(start|end) date (month|year)$/;
 /** Greenhouse's education date ids ("start-month--0"); its employment block uses "start-date-month--0" with the same English labels. */
 const EDUCATION_DATE_ID = /^(?:start|end)-(?:month|year)--\d+$/;
@@ -956,10 +1040,12 @@ function stateSuffixedOption(school: string, options: string[]): string | null {
  * employment block repeats the same "Start date month" labels and must never
  * take education dates.
  */
-function educationDecision(field: BrowserField, education: EducationInputs | undefined): FillDecision | null {
+function educationDecision(field: BrowserField, education: EducationInputs | undefined, today?: string): FillDecision | null {
   if (!education) return null;
   const label = normalizedLabel(field.label);
   const options = (field.kind === "select" || field.kind === "radio") ? field.options ?? [] : [];
+  // (Track 79) A degree-level question may also be a checkbox group of two or more options.
+  const levelOptions = field.kind === "checkbox" && (field.options?.length ?? 0) >= 2 ? field.options! : options;
   if (SCHOOL_LABEL.test(label)) {
     const school = education.school?.trim();
     if (!school) return null;
@@ -980,16 +1066,25 @@ function educationDecision(field: BrowserField, education: EducationInputs | und
     }
     return TEXT_KINDS.has(field.kind) ? fill(field, school, basis, "The school on your profile.") : null;
   }
-  if (DEGREE_LABEL.test(label) || DEGREE_PURSUING_LABEL.test(label)) {
+  const levelLabel = DEGREE_LEVEL_LABEL.test(label);
+  if (DEGREE_LABEL.test(label) || DEGREE_PURSUING_LABEL.test(label) || levelLabel) {
     const degree = education.degree?.trim();
     if (!degree) return null;
     const basis = { kind: "profile" as const, field: "degree" };
-    if (options.length) {
+    const listed = levelLabel || label === "degree type" ? levelOptions : options;
+    // A degree-level wording asked as a text box keeps its usual rules (the degree is typed only for "Degree" labels).
+    const levelOnly = levelLabel && !DEGREE_LABEL.test(label) && !DEGREE_PURSUING_LABEL.test(label);
+    if (levelOnly && !listed.length) return null;
+    // A question about the degree being studied now needs the graduation date still ahead.
+    if (levelOnly && !AT_GRADUATION_LABEL.test(label) && !(education.graduation?.date && today && education.graduation.date > today)) return null;
+    if (listed.length) {
       const option = chooseDegreeOption({
         key: "college", school: education.school ?? "", level: bachelorKind(degree) ? "bachelor" : "other",
         degree, fieldOfStudy: null, gpa: null, startYear: null, endYear: null
-      }, options);
+      }, [...listed]);
       if (option) return { fieldId: field.id, action: "choose", value: option, basis, reason: "The degree on your profile.", pause: null };
+      const level = levelLabel || label === "degree type" ? degreeLevelOption(label, education, listed, today) : null;
+      if (level) return { fieldId: field.id, action: "choose", value: level, basis, reason: "The degree level on your profile.", pause: null };
       return pauseDecision(field, {
         question: `Your profile degree "${degree}" matches none of the options for "${field.label}". Which option should be chosen?`.slice(0, 500),
         key: null,
@@ -1158,7 +1253,7 @@ function schoolQuestionDecision(field: BrowserField, schools: SchoolInputs | und
  * (GPA_SENTENCE_LABEL). A major, departmental, high-school, weighted, term, or
  * other-scale GPA never matches, so it is never answered with the profile GPA.
  */
-const GPA_LABEL = /^(?:what is your )?(?:(?:undergraduate|cumulative|current|overall|college|university)\s+)*(?:gpa|grade point average)(?:\s*\(?(?:out of|on a)\s+4(?:\.0+)?(?:\s+scale)?\)?)?(?:\s*\(?(?:if applicable)\)?)?\??$/;
+const GPA_LABEL = /^(?:(?:what is|what's|whats) your )?(?:(?:undergraduate|cumulative|current|overall|college|university|most current|most recent)\s+)*(?:gpa|grade point average)(?:\s*\(?(?:out of|on a)\s+4(?:\.0+)?(?:\s+scale)?\)?)?(?:\s*\((?:undergraduate|undergrad)\))?(?:\s*\(?(?:if applicable)\)?)?\??$/;
 /** "Please specify the overall average grade (GPA) for your last/current degree:" (Veeva on Lever, 2026-11-26), "Please enter your GPA". */
 const GPA_SENTENCE_LABEL = /^(?:please )?(?:specify|enter|select|provide|indicate|state)(?: your| the)?(?: overall| cumulative| current)?(?: average)?(?: grade(?: point average)?)? \(?gpa\)?(?: for your (?:last\/current|current\/last|current|most recent|last or current|current or most recent) degree)?[:?]?$/;
 const PROFILE_GPA = /^[0-4]\.\d{1,3}$/;
@@ -1184,6 +1279,13 @@ function truncatedGpa(gpa: string, decimals: number): number {
 }
 
 /** Whether a GPA list option's range holds the GPA; null when the option names no range it can read. */
+/** (Track 79) "3.5+", "3.5 and above", "at least 3.5": the threshold of an at-least option; null for any other option. */
+function gpaAtLeastThreshold(option: string): number | null {
+  const text = option.toLocaleLowerCase("en-US").replace(/\s+/g, " ").trim();
+  const match = new RegExp(`^${GPA_NUMBER}\\s*(?:\\+|and above|or higher)$|^(?:above|at least)\\s+${GPA_NUMBER}$`).exec(text);
+  return match ? Number(match[1] ?? match[2]) : null;
+}
+
 function gpaOptionContains(option: string, gpa: number, twoDecimals: string): boolean | null {
   const text = option.toLocaleLowerCase("en-US").replace(/\s+/g, " ").trim();
   const between = new RegExp(`${GPA_NUMBER}\\s*(?:-|–|—|to)\\s*${GPA_NUMBER}`).exec(text);
@@ -1192,8 +1294,9 @@ function gpaOptionContains(option: string, gpa: number, twoDecimals: string): bo
   if (below) return gpa < Number(below[1]);
   const atLeast = new RegExp(`${GPA_NUMBER}\\s*\\+|${GPA_NUMBER}\\s+(?:and above|or higher)\\b|\\b(?:above|at least)\\s+${GPA_NUMBER}`).exec(text);
   if (atLeast) return gpa >= Number(atLeast[1] ?? atLeast[2] ?? atLeast[3]) && gpa <= 4;
-  const plain = new RegExp(`^${GPA_NUMBER}$`).exec(text);
-  if (plain) return Number(plain[1]) === Number(twoDecimals);
+  // (Track 79) "3.6 out of 4.0" is the plain "3.6"; a plain option also equals the GPA read to its own decimals (the truncated pass).
+  const plain = new RegExp(`^${GPA_NUMBER}$`).exec(text.replace(/\s*(?:out of|\/)\s*4(?:\.0+)?\.?$/, ""));
+  if (plain) return Number(plain[1]) === Number(twoDecimals) || Number(plain[1]) === gpa;
   return null;
 }
 
@@ -1205,8 +1308,11 @@ function gpaOptionContains(option: string, gpa: number, twoDecimals: string): bo
  * no valid GPA is saved, so the usual rules apply (a required field pauses).
  */
 function gpaDecision(field: BrowserField, gpa: string | undefined): FillDecision | null {
-  const label = normalizedLabel(field.label);
-  if (!(GPA_LABEL.test(label) || GPA_SENTENCE_LABEL.test(label)) || field.widget === "autocomplete") return null;
+  const label = normalizedLabel(field.label).replace(/[‘’]/g, "'");
+  // (Track 79) "What is your most current GPA? (If recently graduated, provide your GPA at graduation)": the trailing "(if …)" note is not part of the label.
+  const bare = label.replace(/\s*\(if [^)]*\)\s*$/, "");
+  const isGpa = (text: string) => GPA_LABEL.test(text) || GPA_SENTENCE_LABEL.test(text);
+  if (!(isGpa(label) || isGpa(bare)) || field.widget === "autocomplete") return null;
   const saved = gpa?.trim();
   if (!saved || !PROFILE_GPA.test(saved)) return null;
   const basis = { kind: "profile" as const, field: "gpa" };
@@ -1219,6 +1325,17 @@ function gpaDecision(field: BrowserField, gpa: string | undefined): FillDecision
     const matches = field.options.filter((option) => gpaOptionContains(option, value, twoDecimals) === true);
     if (matches.length === 1) {
       return { fieldId: field.id, action: "choose", value: matches[0]!, basis, reason: "The GPA on your profile falls in this option's range.", pause: null };
+    }
+    // (Track 79) Several "at least" options hold the GPA (">4.0 | 4.0+ | 3.7+ | 3.5+ | 3.2+"): the highest threshold met, which never overstates.
+    if (matches.length > 1) {
+      const thresholds = matches.map((option) => ({ option, threshold: gpaAtLeastThreshold(option) }));
+      if (thresholds.every((entry) => entry.threshold !== null)) {
+        const highest = Math.max(...thresholds.map((entry) => entry.threshold!));
+        const top = thresholds.filter((entry) => entry.threshold === highest);
+        if (top.length === 1) {
+          return { fieldId: field.id, action: "choose", value: top[0]!.option, basis, reason: "The highest GPA threshold on this list that the GPA on your profile meets.", pause: null };
+        }
+      }
     }
     if (matches.length === 0) {
       // Ranges written to two decimals ("3.0 - 3.29", "3.3 - 3.69") leave a three-decimal GPA between them:
@@ -1439,7 +1556,7 @@ export function matchSuggestion(value: string, options: string[]): string | null
 /** A phone-country option: "+1 (United States)", "+1 United States", or "United States (+1)". */
 const DIALING_CODE_OPTION = [/^\(?\+\d{1,4}\)?\s*\((.+)\)$/, /^\(?\+\d{1,4}\)?\s+(.+)$/, /^(.+?)\s*\(?\+\d{1,4}\)?$/];
 
-type ContactKey = keyof ContactProfile | "email" | "phone" | "currentLocation";
+type ContactKey = keyof ContactProfile | "email" | "phone" | "portfolioUrl" | "currentLocation";
 
 /**
  * Standard contact labels only, matched against the whole label, so a
@@ -1447,23 +1564,24 @@ type ContactKey = keyof ContactProfile | "email" | "phone" | "currentLocation";
  * mailing city.
  */
 const CONTACT_LABELS: Array<{ key: ContactKey; pattern: RegExp }> = [
-  { key: "fullName", pattern: /^(?:full |legal |your )?name$|^full legal name$|^your full name$/ },
+  { key: "fullName", pattern: /^(?:full |legal |your )?name$|^full legal name$|^your full name$|^first (?:&|and) last name$|^what is your (?:full |legal |full legal )?name\??$/ },
   { key: "email", pattern: /^e-?mail(?: address)?$/ },
   { key: "phone", pattern: /^(?:phone|mobile|cell|telephone)(?: phone)?(?: number)?$/ },
-  { key: "linkedinUrl", pattern: /^linked ?in(?: profile)?(?: url| link)?$|^(?:please )?(?:(?:provide|share|enter|include|add|paste) )?(?:a |the |your )?(?:link|url) (?:to|for|of) (?:your )?linked ?in(?: profile| page)?\.?$/ },
-  { key: "githubUrl", pattern: /^git ?hub(?: profile)?(?: url)?$/ },
-  { key: "currentLocation", pattern: /^(?:current )?location$|^location \(city\)$|^where are you (?:currently )?(?:located|based)\??$/ },
+  { key: "linkedinUrl", pattern: /^linked ?in(?: profile)?(?: url| link)?$|^linked ?in (?:profile|profle)(?: url| link)?$|^(?:please )?(?:(?:provide|share|enter|include|add|paste) )?(?:a |the |your )?(?:link|url) (?:to|for|of) (?:your )?linked ?in(?: profile| page)?\.?$/ },
+  { key: "githubUrl", pattern: /^git ?hub(?: profile)?(?: url| link)?$|^(?:please )?(?:link|share|provide|enter) (?:to )?(?:a link to )?your git ?hub(?: profile)?$|^git ?hub or (?:personal )?(?:website|portfolio)$/ },
+  { key: "portfolioUrl", pattern: /^(?:portfolio|personal website|website|personal site)(?: url| link)?$|^portfolio(?: website)?$/ },
+  { key: "currentLocation", pattern: /^(?:current )?location$|^location \(city\)$|^where are you (?:currently )?(?:located|based)\??$|^location ?- ?city and state of residence$|^city and state of residence$|^current city and state$/ },
   { key: "preferredName", pattern: /^preferred(?: first)? name(?: \((?:if )?(?:different|applicable)[^)]*\))?\??$|^what is your preferred (?:first )?name\??$|^(?:what )?name (?:do you|would you like to) (?:prefer to )?(?:go by|be called)\??$/ },
   { key: "legalFirstName", pattern: /^(legal )?(first|given|first\/given) name$/ },
   { key: "legalLastName", pattern: /^(legal )?(last|family|last\/family) name$|^surname$/ },
-  { key: "addressLine1", pattern: /^(street )?address( line)? ?1$|^street address$|^address$/ },
+  { key: "addressLine1", pattern: /^(street )?address( line)? ?1$|^street address$|^address$|^home address(?: line)? ?1$|^(?:home|mailing|permanent) street address$/ },
   { key: "addressLine2", pattern: /^address( line)? ?2$|^(apartment|apt|suite|unit)(,? (suite|unit|etc\.?))*$/ },
   { key: "addressCity", pattern: /^city$|^town\/city$|^city\/town$|^(?:what|which) city do you (?:currently )?(?:reside|live) in\??$|^(?:current )?city of residence$/ },
   { key: "addressRegion", pattern: /^(state|province|region)$|^state\/province$|^state or province$|^(?:what|which) state do you (?:currently )?(?:reside|live) in\??$|^(?:current )?state of residence$|^state abbreviation$/ },
   { key: "addressPostalCode", pattern: /^(postal|zip)( code)?$|^zip\/postal code$|^postal\/zip code$/ },
   { key: "addressCountry", pattern: /^country$|^country \/ territory$|^country\/territory$|^(?:phone )?country(?: phone| dialing)? code(?: picker)?$/ },
   { key: "phoneType", pattern: /^phone (device )?type$|^type of phone$|^phone number type$/ },
-  { key: "fieldOfStudy", pattern: /^(field|area) of study$|^major$|^discipline$|^(?:please )?(?:select|choose|enter|indicate|specify|provide) your (?:field|area) of study:?$|^what is your (?:field|area) of study\??$/ }
+  { key: "fieldOfStudy", pattern: /^(field|area) of study$|^major$|^major\(s\)$|^discipline$|^major or field of study$|^field of study or major$|^major ?\/ ?field of study$|^field of study ?\/ ?major$|^what is your major\??$|^(?:please )?(?:select|choose|enter|indicate|specify|provide) your (?:field|area) of study:?$|^what is your (?:field|area) of study\??$/ }
 ];
 
 /**
@@ -1494,11 +1612,13 @@ function normalizedLabel(label: string): string {
     .replace(/\s+/g, " ").trim();
 }
 
-function contactValue(label: string, profile: PlannerInputs["profile"]): { key: ContactKey; value: string } | null {
+function contactValue(label: string, profile: PlannerInputs["profile"]): { key: ContactKey; value: string; label: string } | null {
   const whole = normalizedLabel(label);
   // Oracle's "First/Given Name (Please enter with letters a-z, …)": the instruction after the label is not part of it.
   const plain = whole.replace(/\s*\(please [^)]*\)\s*$/, "");
-  for (const normalized of plain !== whole ? [whole, plain] : [whole]) {
+  // (Track 79) "LinkedIn Profile URL:": a trailing colon, question mark, or asterisk is not part of the label.
+  const forms = [...new Set([whole, plain, ...[whole, plain].map((form) => form.replace(/[\s:?*]+$/, ""))])].filter(Boolean);
+  for (const normalized of forms) {
     for (const { key, pattern } of CONTACT_LABELS) {
       if (!pattern.test(normalized)) continue;
       const value = contactField(key, profile)?.trim();
@@ -1506,9 +1626,9 @@ function contactValue(label: string, profile: PlannerInputs["profile"]): { key: 
       // "State Abbreviation" takes the two-letter USPS code; a region that is no US state is not this field's answer.
       if (normalized === "state abbreviation") {
         const code = /^[a-z]{2}$/i.test(value) ? value : usStateAlternate(value);
-        return code && /^[a-z]{2}$/i.test(code) && usStateAlternate(code) ? { key, value: code.toUpperCase() } : null;
+        return code && /^[a-z]{2}$/i.test(code) && usStateAlternate(code) ? { key, value: code.toUpperCase(), label: normalized } : null;
       }
-      return { key, value };
+      return { key, value, label: normalized };
     }
   }
   return null;

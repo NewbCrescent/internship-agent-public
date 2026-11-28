@@ -2935,3 +2935,129 @@ describe("known answers on Veeva's Lever and OpenSesame's Greenhouse forms (Trac
     expect(moved.decisions[0]!.basis).toEqual({ kind: "fact", key: "willing_to_relocate", scope: "country:US" });
   });
 });
+
+describe("held-question wordings and option shapes (Track 79, fictional profile and values)", () => {
+  type Inputs = Parameters<typeof planAutofill>[1];
+  const TODAY = "2026-11-27";
+  const plan = (controls: RawControl[], extra: Partial<Inputs> = {}) =>
+    planAutofill(recognizeForm("https://job-boards.greenhouse.io/fixture/jobs/79", "Apply", controls), {
+      profile: {}, resolutions: new Map(), packageAnswers: [], variantId: null,
+      standing: { acceptDataConsent: false, signAttestations: false, today: TODAY }, ...extra
+    });
+  const only = (result: ReturnType<typeof planAutofill>) => result.decisions[0]!;
+  const resolved = (key: string, value: boolean | string, display = typeof value === "boolean" ? (value ? "Yes" : "No") : value) =>
+    ({ status: "RESOLVED", key, scope: "global", display, value }) as const;
+  const text = (id: string, label: string) => control({ tag: "input", type: "text", id, label, required: true });
+  const area = (id: string, label: string) => control({ tag: "textarea", id, label, required: true });
+  const select = (id: string, label: string, options: string[]) => control({ tag: "select", id, label, required: true, options });
+  const group = (id: string, label: string, options: string[]) => control({ tag: "input", type: "checkbox", widget: "checkbox-group", id, label, required: true, options });
+  const profile = {
+    fullName: "Avery Example", linkedinUrl: "https://www.linkedin.com/in/avery-example", githubUrl: "https://github.com/avery-example",
+    portfolioUrl: "https://avery.example", addressLine1: "1 Fixture Way", addressCity: "Springfield", addressRegion: "Illinois", fieldOfStudy: "Computer Science"
+  };
+
+  it.each<[string, RawControl, string]>([
+    ["LinkedIn Profile URL:", text("li", "LinkedIn Profile URL:"), profile.linkedinUrl],
+    ["LinkedIn Profle", text("li", "LinkedIn Profle"), profile.linkedinUrl],
+    ["LinkedIn Profile (textarea)", area("li", "LinkedIn Profile"), profile.linkedinUrl],
+    ["Github Link", text("gh", "Github Link"), profile.githubUrl],
+    ["Please link your Github profile", text("gh", "Please link your Github profile"), profile.githubUrl],
+    ["GitHub or personal website", area("gh", "GitHub or personal website"), profile.githubUrl],
+    ["Portfolio", text("pf", "Portfolio"), profile.portfolioUrl],
+    ["First & Last Name", text("nm", "First & Last Name"), profile.fullName],
+    ["What is your Legal Name?", text("nm", "What is your Legal Name?"), profile.fullName],
+    ["Home Address Line 1", text("ad", "Home Address Line 1"), profile.addressLine1],
+    ["Major or Field of Study", text("fs", "Major or Field of Study"), profile.fieldOfStudy],
+    ["Major(s)", text("fs", "Major(s)"), profile.fieldOfStudy],
+    ["Location - City and State of Residence", text("lc", "Location - City and State of Residence"), "Springfield, Illinois"]
+  ])("fills %s from the profile", (_label, field, value) => {
+    expect(only(plan([field], { profile }))).toMatchObject({ action: "fill", value });
+  });
+
+  it("never fills an Address text area with the first address line", () => {
+    expect(only(plan([area("ad", "Address")], { profile })).action).toBe("pause");
+  });
+
+  it("reads new GPA labels and option shapes from the profile GPA, never rounding up", () => {
+    const gpa = { gpa: "3.684" };
+    for (const label of ["Whats your current GPA?", "GPA (undergraduate)", "What is your most current GPA? (If recently graduated, provide your GPA at graduation)", "What’s your cumulative GPA?"]) {
+      expect(only(plan([text("g", label)], { profile: gpa }))).toMatchObject({ action: "fill", value: "3.68", basis: { kind: "profile", field: "gpa" } });
+    }
+    const decimals = select("g", "GPA", ["4.0", "3.9", "3.8", "3.7", "3.6", "3.5", "3.4"]);
+    expect(only(plan([decimals], { profile: gpa }))).toMatchObject({ action: "choose", value: "3.6" });
+    const outOf = select("g", "GPA", ["3.8 out of 4.0", "3.7 out of 4.0", "3.6 out of 4.0", "3.5 out of 4.0"]);
+    expect(only(plan([outOf], { profile: gpa }))).toMatchObject({ action: "choose", value: "3.6 out of 4.0" });
+    const thresholds = select("g", "GPA", [">4.0", "4.0+", "3.7+", "3.5+", "3.2+", "3.0+", "<3.0"]);
+    expect(only(plan([thresholds], { profile: gpa }))).toMatchObject({ action: "choose", value: "3.5+" });
+    const mixed = select("g", "GPA", ["3.5+", "3.0 - 4.0"]);
+    expect(only(plan([mixed], { profile: gpa })).action).toBe("pause");
+    expect(only(plan([text("g", "Major GPA")], { profile: gpa })).action).not.toBe("fill");
+  });
+
+  it("answers a graduation term checkbox group and a graduation comparison", () => {
+    const date = resolved("graduation_date", "2030-05-15");
+    const terms = group("t", "What is your expected graduation date for your current degree program?", ["Spring 2029", "Winter 2029", "Spring 2030", "Fall 2030"]);
+    expect(only(plan([terms], { resolutions: new Map([["t", date]]) }))).toMatchObject({ action: "choose", value: "Spring 2030", basis: { kind: "fact", key: "graduation_date" } });
+    const before = select("b", "Will you be graduating before September 2030?", ["Yes", "No"]);
+    expect(only(plan([before], { resolutions: new Map([["b", date]]) }))).toMatchObject({ action: "choose", value: "Yes" });
+    const closest = select("c", "When do you expect to graduate? (Select the closest date.)", ["December 2029", "June 2030", "December 2030"]);
+    expect(only(plan([closest], { resolutions: new Map([["c", date]]) }))).toMatchObject({ action: "choose", value: "June 2030" });
+    const spans = select("s", "What is your ancitipated graduation season?", ["Spring 2030 (January - May)", "Summer 2030 (June or later)", "Later than Summer 2030"]);
+    expect(only(plan([spans], { resolutions: new Map([["s", date]]) }))).toMatchObject({ action: "choose", value: "Spring 2030 (January - May)" });
+  });
+
+  it("types the graduation date as month and year when the label asks for it", () => {
+    const date = resolved("graduation_date", "2030-05-15");
+    expect(only(plan([text("m", "When are you expected to graduate? (MM/YYYY)")], { resolutions: new Map([["m", date]]) }))).toMatchObject({ action: "fill", value: "05/2030" });
+    expect(only(plan([text("m", "What is your anticipated graduation month and year?")], { resolutions: new Map([["m", date]]) }))).toMatchObject({ action: "fill", value: "May 2030" });
+    expect(only(plan([text("m", "Expected graduation date")], { resolutions: new Map([["m", date]]) }))).toMatchObject({ action: "fill", value: "2030-05-15" });
+  });
+
+  it("picks sentence Yes/No options in lists and checkbox groups", () => {
+    const age = select("a", "Are you at least 18 years old?", ["Yes, I am at least 18 years of age.", "No, I am not at least 18 years of age."]);
+    expect(only(plan([age], { resolutions: new Map([["a", resolved("age_18_or_older", true)]]) }))).toMatchObject({ action: "choose", value: "Yes, I am at least 18 years of age." });
+    const sponsor = group("s", "Will you require sponsorship?", ["Yes, I will require sponsorship.", "No, I will not require sponsorship for an employment-based visa status."]);
+    expect(only(plan([sponsor], { resolutions: new Map([["s", resolved("requires_sponsorship", false)]]) })))
+      .toMatchObject({ action: "choose", value: "No, I will not require sponsorship for an employment-based visa status." });
+    const office = group("o", "Are you open to working out of our Fixture Town Office 5 Days a Week?", ["Yes, but require relocation", "No"]);
+    expect(only(plan([office], { resolutions: new Map([["o", resolved("work_arrangement", true)]]) })).action).toBe("pause");
+    const visa = select("v", "Which visa will you need sponsorship for?", ["OPT", "H1B", "TN", "None", "Other"]);
+    expect(only(plan([visa], { resolutions: new Map([["v", resolved("requires_sponsorship", false)]]) }))).toMatchObject({ action: "choose", value: "None" });
+  });
+
+  it("answers a U.S.-person Yes/No question from the saved export-control status", () => {
+    const question = select("u", "To comply with U.S. Government space technology export regulations, applicant must be a U.S. citizen, lawful permanent resident, or protected individual.", ["Select One", "Yes", "No"]);
+    const status = resolved("us_person_export_controls", "U.S. citizen");
+    expect(only(plan([question], { resolutions: new Map([["u", status]]) }))).toMatchObject({ action: "choose", value: "Yes", basis: { kind: "fact", key: "us_person_export_controls" } });
+  });
+
+  it("picks the bachelor's level for a degree-level question while graduation is ahead", () => {
+    const education = { school: "Example State University", degree: "B.A. Computer Science", graduation: { date: "2030-05-15", basis: { kind: "fact", key: "graduation_date", scope: "global" } as const } };
+    const cases: Array<[RawControl, string]> = [
+      [control({ tag: "input", type: "radio", id: "d", label: "What degree program are you actively enrolled in?", required: true, options: ["Undergraduate (B.S./B.A)", "Master's (M.S./M.A.)", "Ph.D.", "Non-Degree/Bootcamp/Certificate", "Not Currently Enrolled"] }), "Undergraduate (B.S./B.A)"],
+      [select("d", "What degree are you taking currently?", ["Select One", "Undergraduate/Bachelor's Degree", "Postgraduate/Masters", "PhD"]), "Undergraduate/Bachelor's Degree"],
+      [select("d", "Current Program Type", ["PhD", "Master's Degree", "JD", "MBA", "Bachelor's Degree", "High School", "Other"]), "Bachelor's Degree"],
+      [group("d", "Degree Type", ["Undergraduate/Bachelors", "Master's", "PhD", "MBA"]), "Undergraduate/Bachelors"],
+      [select("d", "If you are enrolled in university, what degree are you currently pursuing?", ["Bachelor's", "Master's", "MBA", "PhD", "Other (Associate’s, Bootcamp, etc)", "N/A"]), "Bachelor's"]
+    ];
+    for (const [field, value] of cases) {
+      expect(only(plan([field], { education }))).toMatchObject({ action: "choose", value, basis: { kind: "profile", field: "degree" } });
+    }
+    const graduated = { ...education, graduation: { ...education.graduation, date: "2026-05-15" } };
+    expect(only(plan([cases[0]![0]], { education: graduated })).action).toBe("pause");
+    // Two undergraduate-level options (and no single bachelor's degree option): it pauses.
+    const twoBachelors = select("d", "Current Program Type", ["Undergraduate", "Undergraduate (4-year)", "Master's Degree"]);
+    expect(only(plan([twoBachelors], { education })).action).toBe("pause");
+  });
+
+  it("puts a saved SAT score in its bucket and picks the SAT test type, never typing the score into a test-type box", () => {
+    const sat = resolved("sat_score", "1350");
+    const buckets = select("s", "Provide your best result on SAT:", ["I don't have SAT score", "<1200", "1201 - 1300", "1301 - 1400", "1401 - 1500", "1501 - 1600"]);
+    expect(only(plan([buckets], { resolutions: new Map([["s", sat]]) }))).toMatchObject({ action: "choose", value: "1301 - 1400", basis: { kind: "fact", key: "sat_score" } });
+    expect(only(plan([select("t", "Test Type", ["SAT", "ACT"])], { resolutions: new Map([["t", sat]]) }))).toMatchObject({ action: "choose", value: "SAT" });
+    const typed = only(plan([text("t", "Test Type")], { resolutions: new Map([["t", sat]]) }));
+    expect(typed.action).toBe("pause");
+    expect(typed.pause?.question).not.toContain("1350");
+    expect(only(plan([text("s", "SAT Score")], { resolutions: new Map([["s", sat]]) }))).toMatchObject({ action: "fill", value: "1350" });
+  });
+});

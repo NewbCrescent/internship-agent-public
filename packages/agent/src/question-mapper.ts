@@ -1,5 +1,5 @@
 import { isHearAboutQuestion } from "@internship-agent/browser";
-import { mentionsCompany, mentionsCompanyLead, mentionsSiteTenant, normalizeCompanyName, relocationQuestionParts, type CandidateFactKey, type FactScope, type QuestionContext, type QuestionMapping } from "@internship-agent/domain";
+import { isStandardizedTestTypeQuestion, mentionsCompany, mentionsCompanyLead, mentionsSiteTenant, normalizeCompanyName, relocationQuestionParts, type CandidateFactKey, type FactScope, type QuestionContext, type QuestionMapping } from "@internship-agent/domain";
 import { readPlace, readWellKnownCity } from "@internship-agent/jobs";
 
 import { mapStandardQuestion } from "./standard-question-mapper";
@@ -10,7 +10,7 @@ export interface SemanticQuestionMapper {
 
 const protectedPattern = /\b(race|ethnicity|ethnic|gender|sex|sexual orientation|transgender|disability|disabled|veteran|religion|marital status)\b/i;
 const attestationPattern = /\b(certify|attest|under penalty|declare that|signature confirms|information (?:is|provided is) true)\b/i;
-const END_DATE = /\blatest\s+(?:possible\s+)?(?:end|finish|available)\b|\bavailable\s+until\b|\bavailability\s+end\b|\blast\s+day\s+of\s+(?:availability|the internship)\b|\b(?:end|finish)\s+date\b.{0,40}\b(?:internship|availability|available)\b|\b(?:internship|availability|available)\b.{0,40}\b(?:end|finish)\s+date\b|\bwhen\s+(?:can|could|would)\s+you\s+(?:end|finish)\b/i;
+const END_DATE = /\blatest\s+(?:possible\s+)?(?:end|finish|available)\b|\bavailable\s+until\b|\bavailability\s+end\b|\blast\s+day\s+of\s+(?:availability|the internship)\b|\b(?:end|finish)\s+date\b.{0,40}\b(?:internship|availability|available)\b|\b(?:internship|availability|available)\b.{0,40}\b(?:end|finish)\s+date\b|\bwhen\s+(?:can|could|would)\s+you\s+(?:end|finish)\b|\bwhen do you (?:plan|intend|expect) (?:on|to) (?:end|finish)(?:ing)?\b/i;
 const PREVIOUS_EMPLOYMENT = /\b(?:(?:have|had)\s+you\s+(?:ever\s+)?(?:previously\s+|formerly\s+)?(?:been\s+)?(?:work(?:ed)?|employed|intern(?:ed)?)|(?:previously|formerly|ever|before)\s+(?:been\s+)?(?:work(?:ed)?|employed|intern(?:ed)?)|(?:current\s+or\s+)?former\s+(?:employee|intern|worker|contractor)|previous(?:ly)?\s+(?:employee|worker|intern)|did\s+you\s+(?:ever\s+|previously\s+)?(?:work(?:ed)?|intern(?:ed)?))\b/i;
 const COURSEWORK = /\b(?:relevant|related|completed|applicable)\s+(?:course\s*work|courses|classes)\b|\bcourse\s*work\b|\b(?:courses|classes)\s+(?:that\s+)?(?:you(?:'ve|\s+have)?\s+)?(?:taken|completed)\b|\b(?:which|what|list(?:\s+any)?)\s+(?:relevant\s+)?(?:courses|classes)\b/i;
 // Grades, GPA, transcripts, credit counts, and non-academic courses are never answered with the course list.
@@ -23,12 +23,14 @@ const AUTHORIZED_TO_WORK = /\b(?:legally )?authori[sz]ed to work\b|\bwork author
 // An export-control list that also asks for "work authorization" status (Muon Space, 2026-11-26) is the export-control question: the candidate's saved export-control status decides it, never work authorization.
 const EXPORT_CONTROL = /\bexport[- ]?control\w*|\bitar\b|\bu\.?\s?s\.? persons?\b/i;
 // Ashby's short-titled form: "Visa Support: Do you require any visa support to work in the U.S.?" (Track 22).
-const SPONSORSHIP = /\b(?:require|need).{0,30}(?:sponsor|sponsorship)\b|\bvisa sponsorship\b|\b(?:require|need)\b.{0,30}\bvisa support\b/i;
+// Workday's "… require our company to file a petition or application for employment-based immigration status on your behalf"
+// and "Will you need to be sponsored for a work visa …?" (Track 79).
+const SPONSORSHIP = /\b(?:require|need).{0,30}(?:sponsor|sponsorship|sponsored)\b|\bvisa sponsorship\b|\b(?:require|need)\b.{0,30}\bvisa support\b|\b(?:require|need)\b.{0,60}\b(?:file|submit)\b.{0,30}\bpetition\b/i;
 // Start-date questions in other words ("earliest date you can start", "when can you start", "timeline for starting",
 // "When would you be available if an offer was accepted?" (micron.wd1, 2026-11-25), "When would you be available?");
 // availability for an interview or to work a schedule ("to work weekends"), a full-time or after-graduation start, and
 // a yes/no question ("Are you able to start …?") are not the internship start date.
-const START_WORDING = /\b(?:earliest|soonest)\b.{0,40}\b(?:start|begin)\w*|\bwhen (?:can|could|would|will) you (?:be (?:able|available) to )?(?:start|begin)\b|\btimeline for (?:starting|beginning)\b|\bwhen (?:can|could|would|will) you be available\b(?:\s+(?:to (?:join|commence)\b|(?:if|after|once|upon) (?:an |the |you )?(?:accept\w* )?(?:an |the |our |this )?offer\b|for (?:employment|this (?:role|position|internship|job))\b)|\s*\?\s*\*?$)/i;
+const START_WORDING = /\b(?:earliest|soonest)\b.{0,40}\b(?:start|begin)\w*|\bwhen (?:can|could|would|will) you (?:be (?:able|available) to )?(?:start|begin)\b|\btimeline for (?:starting|beginning)\b|\bwhen (?:can|could|would|will) you be available\b(?:\s+(?:to (?:join|commence)\b|(?:if|after|once|upon) (?:an |the |you )?(?:accept\w* )?(?:an |the |our |this )?offer\b|for (?:employment|this (?:role|position|internship|job))\b)|\s*\?\s*\*?$)|\bwhen are you (?:able|available) to (?:start|begin|join)\b|\bon what date (?:would|could|can|will) you (?:be available|start|begin)\b/i;
 const NOT_INTERNSHIP_START = /\bfull[- ]?time\b|\bafter (?:you )?graduat\w*|\bpost[- ]?graduat\w*/i;
 const YES_NO_LEAD = /^(?:are|is|do|does|did|have|has|had|can|could|will|would|should)\b/i;
 // Relocation the candidate pays for is its own answer (willing_to_relocate_at_own_expense).
@@ -49,6 +51,36 @@ const NAMED_SCHOOL = /\b(?:at|from|of|attending|attend)\s+(?!(?:a|an|any|your|th
 // "Are you 16 years or older?" (Lockheed Martin, 2026-11-25); inclusive wordings only ("over 16" and "older than 16" ask for more).
 const AGE_16 = /\bat\s+least\s+(?:the\s+age\s+of\s+)?(?:16|sixteen)\b|\b(?:16|sixteen)\s*(?:\+|(?:years?(?:\s+of\s+age|\s+old)?\s+)?(?:or|and)\s+(?:older|over|above)\b)/i;
 const EMPLOYER_REFERENCE = /\b(?:here|for us|with us|(?:this|our|the)\s+(?:company|organization|organisation|firm|employer))\b/i;
+// (Track 79) Graduation wordings the date rule below misses: "When are you graduating?", "What semester are you on track
+// to graduate?", "What is your anticipated graduation year?", "What year do you graduate?", "What is your expected date
+// of graduation?", "Will you be graduating before September 2027?".
+const GRADUATION_WORDING = new RegExp([
+  String.raw`\bwhen (?:are|will) you (?:be )?graduat(?:e|ing)\b`,
+  String.raw`\bwhen (?:do|will) you (?:expect|plan|anticipate|intend) to graduate\b`,
+  String.raw`\bwhen are you expected to graduate\b`,
+  String.raw`\b(?:what|which) (?:semester|term|season|year|month) (?:are you on track to|do you (?:expect|plan|anticipate) to|will you) graduate\b`,
+  String.raw`\bwhat year do you graduate\b`,
+  String.raw`\b(?:anticipated|ancitipated|expected|projected|estimated|planned) graduation (?:year|season|semester|term|month)\b`,
+  String.raw`\bgraduation (?:year|season|semester|term|month and year|month\/year)\b`,
+  String.raw`\b(?:date|month and year|month\/year) of graduation\b`,
+  String.raw`\bgraduat(?:e|ing) (?:before|after|by|prior to|no later than|no earlier than) (?:the )?(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.? |spring |summer |fall |autumn |winter )?20\d\d\b`,
+  String.raw`\bgraduation date (?:is )?in 20\d\d or (?:later|after|earlier|before)\b`
+].join("|"), "i");
+// Only for labels that match through GRADUATION_WORDING: high school is the planner's, and a full-time, relocation, or
+// offer question after graduating, or whether the candidate already graduated, is not the graduation date.
+const GRADUATION_WORDING_NOT = /\bhigh school|secondary school|\bged\b|\bhave you graduated\b|\brecently graduated\b|\bgraduated within\b/i;
+const AFTER_GRADUATING = /\b(?:after|upon|once) (?:you )?graduat\w*/i;
+const AFTER_GRADUATING_ASKS = /full[- ]?time|relocat|offer|permanent/i;
+// (Track 79) "Are you currently enrolled in an undergraduate or graduate degree program?": only a saved Yes answers it.
+const UNDERGRADUATE_PROGRAM = /\bare you (?:currently|presently) enrolled in an? undergraduate(?: or graduate)?(?: degree)? program\b/i;
+// (Track 79) "Are you open to working out of our Torrance (LA) Office 5 Days a Week?", "If hired, can you work from our office in Lehi, Utah …?"
+const OFFICE_WORK = /\bwork(?:ing)? (?:out of|from|at) (?:our|the) (?:[\w.'()-]+\s+){0,4}(?:office|offices|headquarters|hq)\b|\bwork(?:ing)? from our (?:office|offices|headquarters|hq) in\b/i;
+// (Track 79) A score of one named test; a section score ("SAT Math score") is not the total.
+const SAT_WORD = /\bsat\b/i;
+const ACT_WORD = /\bact\b/i;
+const SAT_SCORE = /\bsat (?:total |composite )?(?:score|scores|result|results)\b|\b(?:score|result)s? (?:on|for|from) (?:the )?sat\b/i;
+const ACT_SCORE = /\bact (?:total |composite )?(?:score|scores|result|results)\b|\b(?:score|result)s? (?:on|for|from) (?:the )?act\b/i;
+const TEST_SECTION = /\b(?:math\w*|verbal|reading|writing|ebrw|evidence|english|science|section|sections|subject|essay)\b/i;
 
 export class DeterministicQuestionMapper implements SemanticQuestionMapper {
   async map(question: string, context: QuestionContext = {}): Promise<QuestionMapping> {
@@ -140,7 +172,7 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
       if (SPONSORSHIP.test(normalized) || NOT_WORK_AUTHORIZATION.test(normalized)) {
         return { status: "AMBIGUOUS", reason: "The unrestricted right-to-work question also asks about sponsorship, citizenship, government, or export-control matters; answer it directly." };
       }
-      const country = inferCountryCode(normalized, context);
+      const country = inferCountryCode(normalized, context, trimmed);
       // The posting's country stands in only when the question names no place of its own
       // ("… to work in the United Kingdom?" must not become a United States question).
       const namesOwnPlace = /\bto work\s+(?:in|within|inside)\b/.test(normalized);
@@ -168,7 +200,7 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
     // when both appear, the one asked first decides (an authorization question "… without the need for sponsorship" stays authorization).
     const sponsorshipFirst = sponsorship !== null && (authorization === null || sponsorship.index < authorization.index);
     if (authorization && !sponsorshipFirst) {
-      const country = inferCountryCode(normalized, context);
+      const country = inferCountryCode(normalized, context, trimmed);
       if (!country) {
         return { status: "AMBIGUOUS", reason: "Work authorization requires an explicit country scope, and neither the question nor the posting names one country." };
       }
@@ -183,7 +215,7 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
     }
 
     if (sponsorship) {
-      const country = inferCountryCode(normalized, context);
+      const country = inferCountryCode(normalized, context, trimmed);
       if (!country) {
         return { status: "AMBIGUOUS", reason: "Sponsorship requirements require an explicit country scope, and neither the question nor the posting names one country." };
       }
@@ -239,6 +271,20 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
       };
     }
 
+    // (Track 79) An undergraduate-program enrollment question names "graduate" only as the other level.
+    const undergraduateProgram = UNDERGRADUATE_PROGRAM.exec(normalized);
+    if (undergraduateProgram && !NOT_CURRENT_STUDENT.test(normalized.replace(undergraduateProgram[0], " ")) && !NAMED_SCHOOL.test(normalized)) {
+      return {
+        status: "MAPPED",
+        key: "enrolled_full_time",
+        scope: { kind: "global" },
+        confidence: 0.9,
+        method: "deterministic",
+        explanation: "Undergraduate-program enrollment question; only a saved Yes to full-time enrollment answers it.",
+        broader: true
+      };
+    }
+
     // Less than full-time enrollment: only a saved Yes answers it (broader); a saved No could be part-time study.
     if (CURRENT_STUDENT.test(normalized) && !NOT_CURRENT_STUDENT.test(normalized) && !NAMED_SCHOOL.test(normalized)) {
       return {
@@ -252,7 +298,11 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
       };
     }
 
-    if (/\b(?:graduate|graduation|degree completion).{0,24}(?:date|when|expected)|\bexpected graduation\b/i.test(normalized) && !/\bhighest\s+(?:level\s+of\s+)?(?:education|degree|diploma)\b/i.test(normalized)) {
+    const highestEducation = /\bhighest\s+(?:level\s+of\s+)?(?:education|degree|diploma)\b/i.test(normalized);
+    const graduationDate = /\b(?:graduate|graduation|degree completion).{0,24}(?:date|when|expected)|\bexpected graduation\b/i.test(normalized) && !highestEducation;
+    const graduationWording = !graduationDate && !highestEducation && GRADUATION_WORDING.test(normalized) &&
+      !GRADUATION_WORDING_NOT.test(normalized) && !(AFTER_GRADUATING.test(normalized) && AFTER_GRADUATING_ASKS.test(normalized));
+    if (graduationDate || graduationWording) {
       // A channel-specific application asks for the channel's answer; the
       // resolver falls back to the global answer only inside that channel.
       return {
@@ -355,7 +405,18 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
       };
     }
 
-    if (/\b(?:on[- ]?site|in[- ]office|in[- ]person|in\s+the\s+office|in\s+(?:the|our)\s+(?:[a-z][\w.'-]*\s+){0,3}office|hybrid)\b/i.test(normalized) &&
+    if (/^on-?site availability[\s?:*]*$/i.test(normalized)) {
+      return {
+        status: "MAPPED",
+        key: "work_arrangement",
+        scope: { kind: "global" },
+        confidence: 0.9,
+        method: "deterministic",
+        explanation: "On-site availability question."
+      };
+    }
+
+    if ((/\b(?:on[- ]?site|in[- ]office|in[- ]person|in\s+the\s+office|in\s+(?:the|our)\s+(?:[a-z][\w.'-]*\s+){0,3}office|hybrid)\b/i.test(normalized) || OFFICE_WORK.test(normalized)) &&
       /\b(?:open|willing|able|comfortable|ok(?:ay)?|agree|available)\b|\bcan\s+you\b|\bwould\s+you\b/i.test(normalized) &&
       !/\b(?:prefer\w*|unable|not\s+able|cannot|can't|remote\s+only|fully\s+remote)\b/i.test(normalized) &&
       // Whether the candidate can work "from this location" depends on where they live or would
@@ -379,6 +440,31 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
         confidence: 0.93,
         method: "deterministic",
         explanation: "Relevant coursework question; answered from the candidate's saved courses."
+      };
+    }
+
+    // (Track 79) One test's total score, or which test a score is for; a label naming both tests ("SAT or ACT Score")
+    // stays unmapped so its saved question-memory answer keeps answering it.
+    const sat = SAT_WORD.test(normalized);
+    const act = ACT_WORD.test(normalized);
+    if (sat !== act && (sat ? SAT_SCORE : ACT_SCORE).test(normalized) && !TEST_SECTION.test(normalized)) {
+      return {
+        status: "MAPPED",
+        key: sat ? "sat_score" : "act_score",
+        scope: { kind: "global" },
+        confidence: 0.93,
+        method: "deterministic",
+        explanation: sat ? "SAT total score question." : "ACT composite score question."
+      };
+    }
+    if (!sat && !act && isStandardizedTestTypeQuestion(normalized)) {
+      return {
+        status: "MAPPED",
+        key: "sat_score",
+        scope: { kind: "global" },
+        confidence: 0.9,
+        method: "deterministic",
+        explanation: "Which standardized test a score is for; only a saved SAT score picks the SAT option."
       };
     }
 
@@ -449,6 +535,8 @@ function relocationCountry(question: string, context: QuestionContext): string |
   if (context.countryCode) return context.countryCode.toUpperCase();
   if (/\b(?:united states|usa)\b|\bu\.s\.(?:a\.)?/i.test(question) || /\bUS\b/.test(question)) return "US";
   if (/\bcanada\b/i.test(question)) return "CA";
+  const other = otherCountryCode(question);
+  if (other) return other;
   return context.postingCountryCode?.toUpperCase() ?? null;
 }
 
@@ -458,12 +546,24 @@ function relocationCountry(question: string, context: QuestionContext): string |
  * one stated country (postingQuestionContext sets it only when the posting
  * states exactly one). Null when none of them names one.
  */
-function inferCountryCode(question: string, context: QuestionContext): { code: string; fromPosting: boolean } | null {
+function inferCountryCode(question: string, context: QuestionContext, original: string = question): { code: string; fromPosting: boolean } | null {
   if (context.countryCode) return { code: context.countryCode.toUpperCase(), fromPosting: false };
   if (/\b(?:united states|u\.?s\.?(?:a\.)?)\b/i.test(question)) return { code: "US", fromPosting: false };
   if (/\bcanada\b/i.test(question)) return { code: "CA", fromPosting: false };
+  const other = otherCountryCode(original);
+  if (other) return { code: other, fromPosting: false };
   const posting = context.postingCountryCode?.toUpperCase();
   return posting ? { code: posting, fromPosting: true } : null;
+}
+
+/**
+ * (Track 79) The United Kingdom ("United Kingdom", "Great Britain", "Britain", or the capital abbreviation "UK" /
+ * "U.K.", matched case-sensitively so "uk" in other words never counts) or Hong Kong, from the question as asked.
+ */
+function otherCountryCode(original: string): string | null {
+  if (/\b(?:united kingdom|great britain|britain)\b/i.test(original) || /\bUK\b|\bU\.K\.(?=\W|$)/.test(original)) return "GB";
+  if (/\bhong kong\b/i.test(original)) return "HK";
+  return null;
 }
 
 function extractRelocationLocation(question: string): string | null {

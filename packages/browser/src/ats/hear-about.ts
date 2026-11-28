@@ -10,7 +10,8 @@
  * does not exist. The fallback is seeded, so a rerun of the same application
  * gives the same answer.
  */
-const HEAR_ABOUT = /how did you (hear|learn|find out) (about|of)|how did you find (us|this|out)|where did you (hear|learn|find|see)|how did you (?:first )?connect with us|referral source|^(application |candidate )?source$/i;
+// "Where did you first hear about this job?" (Track 79): "first" may follow "how did you" or "where did you".
+const HEAR_ABOUT = /how did you (?:first )?(hear|learn|find out) (about|of)|how did you find (us|this|out)|where did you (?:first )?(hear|learn|find|see)|how did you (?:first )?connect with us|referral source|^(application |candidate )?source$/i;
 const JOB_BOARD = /job ?boards?|job (site|website|posting|search)s?|online job/i;
 const LINKEDIN = /\blinked ?in\b/i;
 const GENERAL_BOARD = /\b(linkedin|indeed|handshake|glassdoor)\b/i;

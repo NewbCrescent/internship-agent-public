@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { DeterministicQuestionMapper } from "@internship-agent/agent";
+import { postingQuestionContext } from "../../packages/agent/src/saved-answers";
 
 const mapper = new DeterministicQuestionMapper();
 
@@ -677,5 +678,113 @@ describe("known-answer gaps from the 2026-11-26 pass (Track 43)", () => {
     const plain = await mapper.map("Are you willing to relocate?", { postingCountryCode: "US" });
     expect(plain).toMatchObject({ status: "MAPPED", key: "willing_to_relocate" });
     expect(plain.status === "MAPPED" ? plain.broader : "unmapped").toBeUndefined();
+  });
+});
+
+describe("held-question wordings (Track 79; wordings from held runs, fictional companies)", () => {
+  const graduation = { status: "MAPPED", key: "graduation_date", scope: { kind: "global" } };
+
+  it.each([
+    "When are you graduating? Please include month and year.",
+    "What semester are you on track to graduate?",
+    "What is your anticipated graduation year?",
+    "What is your ancitipated graduation season?",
+    "What year do you graduate?",
+    "If you are enrolled in a university or college, what year do you graduate?",
+    "If you are currently a student, when do you expect to graduate or complete your program? (Select the closest date.)",
+    "What is your expected date of graduation?",
+    "What is your anticipated graduation month and year?",
+    "When are you expected to graduate? (MM/YYYY)",
+    "Will you be graduating before September 2027?",
+    "Is your expected graduation date in 2028 or later?"
+  ])("maps %s to the graduation date", async (question) => {
+    expect(await mapper.map(question)).toMatchObject(graduation);
+  });
+
+  it("keeps the channel scope for a new graduation wording", async () => {
+    expect(await mapper.map("What year do you graduate?", { applicationChannel: "handshake_internal" })).toMatchObject({
+      status: "MAPPED", key: "graduation_date", scope: { kind: "application_channel", channel: "handshake_internal" }
+    });
+  });
+
+  it.each([
+    "Are you open to starting full-time immediately after your internship? (either graduated or willing to take time off)",
+    "What year did you graduate high school?",
+    "What is your high school graduation year?",
+    "Have you graduated within the last 12 months?",
+    "If you have recently graduated, what year did you graduate?",
+    "When will you graduate? Would you accept a full-time offer after you graduate?"
+  ])("does not map %s to the graduation date", async (question) => {
+    expect(await mapper.map(question)).not.toMatchObject({ key: "graduation_date" });
+  });
+
+  it("maps new end- and start-date wordings", async () => {
+    expect(await mapper.map("When do you plan on ending your internship?")).toMatchObject({ status: "MAPPED", key: "available_end_date" });
+    expect(await mapper.map("When are you able to join Fixture Co as an intern? (12 week minimum)")).toMatchObject({ status: "MAPPED", key: "available_start_date" });
+    expect(await mapper.map("On what date would you be available for work?")).toMatchObject({ status: "MAPPED", key: "available_start_date" });
+    expect(await mapper.map("On what date could you start?")).toMatchObject({ status: "MAPPED", key: "available_start_date" });
+    expect(await mapper.map("When do you plan to start and end your internship?")).not.toMatchObject({ key: "available_end_date" });
+  });
+
+  it("reads a petition or sponsored-visa question as sponsorship", async () => {
+    expect(await mapper.map("Will you now or in the future require our company to file a petition or application for employment - based immigration status on your behalf in the United States?"))
+      .toMatchObject({ status: "MAPPED", key: "requires_sponsorship", scope: { kind: "country", code: "US" } });
+    expect(await mapper.map("Will you need to be sponsored for a work visa by Fixture Devices – either now or in the future?", { postingCountryCode: "US" }))
+      .toMatchObject({ status: "MAPPED", key: "requires_sponsorship", scope: { kind: "country", code: "US" } });
+  });
+
+  it("reads the United Kingdom and Hong Kong from the question", async () => {
+    expect(await mapper.map("Are you legally authorized to work in the United Kingdom?")).toMatchObject({ key: "authorized_to_work", scope: { kind: "country", code: "GB" } });
+    expect(await mapper.map("Do you require sponsorship to work in the UK?")).toMatchObject({ key: "requires_sponsorship", scope: { kind: "country", code: "GB" } });
+    expect(await mapper.map("Are you authorised to work in Hong Kong?")).toMatchObject({ key: "authorized_to_work", scope: { kind: "country", code: "HK" } });
+    // "uk" inside another word, or lower case, is not the United Kingdom.
+    expect(await mapper.map("Are you authorized to work in Dukmark?")).toMatchObject({ status: "AMBIGUOUS" });
+    expect(await mapper.map("Would you relocate within the UK?")).toMatchObject({ key: "willing_to_relocate", scope: { kind: "country", code: "GB" } });
+  });
+
+  it("maps office wordings to on-site work, and keeps commute and city-only wordings unmapped", async () => {
+    for (const question of [
+      "Are you open to working out of our Fixture Town (FT) Office 5 Days a Week?",
+      "If hired, can you work from our office in Fixture City, Utah, 3 days a week?",
+      "Are you willing to work from our Headquarters in Fixture City, CA, full-time, 5 days a week?",
+      "Onsite Availability",
+      "On-site availability*"
+    ]) {
+      expect(await mapper.map(question)).toMatchObject({ status: "MAPPED", key: "work_arrangement" });
+    }
+    expect(await mapper.map("Are you able to work out of Fixture City?")).not.toMatchObject({ key: "work_arrangement" });
+    expect(await mapper.map("Would you prefer to work from our office in Fixture City?")).not.toMatchObject({ key: "work_arrangement" });
+  });
+
+  it("maps one test's score to its key, and leaves a combined or section score unmapped", async () => {
+    expect(await mapper.map("SAT Score")).toMatchObject({ status: "MAPPED", key: "sat_score", scope: { kind: "global" } });
+    expect(await mapper.map("Provide your best result on SAT:")).toMatchObject({ status: "MAPPED", key: "sat_score" });
+    expect(await mapper.map("ACT Score (if applicable)")).toMatchObject({ status: "MAPPED", key: "act_score" });
+    expect(await mapper.map("Provide your best result on ACT:")).toMatchObject({ status: "MAPPED", key: "act_score" });
+    expect(await mapper.map("Test Type")).toMatchObject({ status: "MAPPED", key: "sat_score" });
+    expect(await mapper.map("SAT or ACT Score")).toMatchObject({ status: "UNMAPPED" });
+    expect(await mapper.map("SAT Math score")).toMatchObject({ status: "UNMAPPED" });
+    expect(await mapper.map("Which test automation tools have you used?")).toMatchObject({ status: "UNMAPPED" });
+  });
+
+  it("maps an undergraduate-program enrollment question as a broader full-time question", async () => {
+    const mapped = await mapper.map("Are you currently enrolled in an undergraduate or graduate degree program?");
+    expect(mapped).toMatchObject({ status: "MAPPED", key: "enrolled_full_time", broader: true });
+    expect(await mapper.map("Are you currently enrolled in an undergraduate program at Fixture University?")).not.toMatchObject({ key: "enrolled_full_time" });
+    expect(await mapper.map("Are you currently enrolled in an undergraduate program in the United States?")).not.toMatchObject({ key: "enrolled_full_time" });
+  });
+
+  it("maps a first-heard question to how heard", async () => {
+    expect(await mapper.map("Where did you first hear about this job?")).toMatchObject({ status: "MAPPED", key: "how_heard" });
+    expect(await mapper.map("How did you first hear about us?")).toMatchObject({ status: "MAPPED", key: "how_heard" });
+  });
+
+  it("reads the posting title's one country when its locations give none", () => {
+    const base = { companyName: "Fixture Co", compensation: null };
+    expect(postingQuestionContext({ ...base, locations: [], title: "Software Engineering Intern (US) - Summer 2027" }).postingCountryCode).toBe("US");
+    expect(postingQuestionContext({ ...base, locations: [], title: "Software Intern - United Kingdom" }).postingCountryCode).toBe("GB");
+    expect(postingQuestionContext({ ...base, locations: [], title: "Software Intern (US/Canada)" }).postingCountryCode).toBeUndefined();
+    expect(postingQuestionContext({ ...base, locations: [], title: "Business Intern - Focus on US markets" }).postingCountryCode).toBeUndefined();
+    expect(postingQuestionContext({ ...base, locations: [], title: "Software Intern" }).postingCountryCode).toBeUndefined();
   });
 });
