@@ -184,7 +184,10 @@ const GENERAL_BACHELOR = /^\s*bachelor'?s?(?:'s)?(?:\s+level)?(?:\s+degree)?\s*(
  * option must fit: the one of the same kind, else the one general
  * "Bachelor's" ("Bachelor's Degree", or "Bachelor's Level Degree" on
  * micron.wd1, 2026-11-25); two options that fit equally return null so the
- * run asks. Curly
+ * run asks, unless they are spellings of the same general answer ("Bachelors"
+ * and "Bachelor's Degree", Track 87), when the first offered is chosen. A
+ * list that names no bachelor's takes its one plain "Undergraduate" option
+ * (Track 87). Curly
  * apostrophes count as plain ones ("Bachelor’s Degree"); the option is
  * returned as offered. A high-school row picks a high-school diploma option,
  * then a plain high-school option, then a combined "Diploma or GED" / "or
@@ -208,7 +211,24 @@ export function chooseDegreeOption(row: EducationRow, options: string[]): string
   const sameKind = held === "other" ? [] : bachelors.filter((option) => bachelorKind(option) === held);
   if (sameKind.length) return sameKind.length === 1 ? sameKind[0]! : null;
   const general = bachelors.filter((option) => GENERAL_BACHELOR.test(plainApostrophes(option)) && !/\b(?:arts|science|engineering|fine)\b/i.test(option));
-  return general.length === 1 ? general[0]! : null;
+  if (general.length === 1) return general[0]!;
+  // (Track 87) Spellings of the one general answer ("Bachelors" and "Bachelor's Degree" on Greenhouse's Degree list) are one
+  // answer, and the first offered is chosen; options that differ in any other word ("Level", a parenthetical) still ask.
+  if (general.length > 1) return new Set(general.map(generalBachelorKey)).size === 1 ? general[0]! : null;
+  // (Track 87) A list naming no bachelor's at all takes its one undergraduate option when it is plain "Undergraduate";
+  // two undergraduate options ("Undergraduate", "Undergraduate (4-year)") ask.
+  if (bachelors.length > 0) return null;
+  const undergraduate = options.filter((option) => /\bundergrad/i.test(option));
+  return undergraduate.length === 1 && UNDERGRADUATE_OPTION.test(plainApostrophes(undergraduate[0]!)) ? undergraduate[0]! : null;
+}
+
+/** (Track 87) "Undergraduate", "Undergrad", "Undergraduate Degree" or "Undergraduate Student", and nothing more. */
+const UNDERGRADUATE_OPTION = /^\s*undergrad(?:uate)?(?:'s)?(?:\s+(?:degree|student|program|studies|level))?\s*$/i;
+
+/** (Track 87) A general "Bachelor's" option's words, ignoring case, apostrophes, a plural "s", and the word "Degree": "Bachelors" and "Bachelor's Degree" are both "bachelor". */
+function generalBachelorKey(option: string): string {
+  return plainApostrophes(option).toLocaleLowerCase("en-US").replace(/'/g, "").replace(/\bbachelors?s?\b/g, "bachelor")
+    .replace(/\bdegree\b/g, " ").replace(/\s+/g, " ").trim();
 }
 
 const STOPWORDS = new Set(["of", "the", "at", "and", "in"]);

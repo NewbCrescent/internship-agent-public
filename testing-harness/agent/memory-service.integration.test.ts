@@ -283,6 +283,25 @@ describe("company-, country-, and protected-scoped answers", () => {
     took.close();
   });
 
+  it("answers previous-internship and outstanding-offers questions from the saved answers; a Yes never answers a question asking to name the offers (Track 87)", async () => {
+    const database = workspace();
+    const named = "Do you have any outstanding offers or deadlines? If so, please list the companies and deadlines.";
+    expect(await resolveCandidateQuestion("How many internships have you completed?", {}, { database })).toMatchObject({ status: "NEEDS_INPUT" });
+    save(database, "prior_internships_count", { kind: "global" }, "3");
+    for (const question of ["How many internships have you completed before this summer?", "Have you completed at least one previous internship?"]) {
+      expect(await resolveCandidateQuestion(question, {}, { database }), question).toMatchObject({ status: "RESOLVED", displayAnswer: "3", fact: { key: "prior_internships_count" } });
+    }
+    save(database, "has_outstanding_offers", { kind: "global" }, false);
+    expect(await resolveCandidateQuestion("Do you have any outstanding job offers or deadlines right now?", {}, { database })).toMatchObject({ status: "RESOLVED", displayAnswer: "No" });
+    expect(await resolveCandidateQuestion(named, {}, { database })).toMatchObject({ status: "RESOLVED", displayAnswer: "No" });
+    database.close();
+    const holding = workspace();
+    save(holding, "has_outstanding_offers", { kind: "global" }, true);
+    expect(await resolveCandidateQuestion("Are you currently considering other offers?", {}, { database: holding })).toMatchObject({ status: "RESOLVED", displayAnswer: "Yes" });
+    expect(await resolveCandidateQuestion(named, {}, { database: holding })).toMatchObject({ status: "NEEDS_INPUT" });
+    holding.close();
+  });
+
   it("answers age thresholds one way only: 18-or-older Yes answers 16-or-older, 16-or-older No answers 18-or-older, never the reverse (Track 57)", async () => {
     const sixteen = "Are you 16 years or older?";
     const eighteen = "Are you 18 or older?";

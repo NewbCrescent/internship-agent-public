@@ -10,7 +10,7 @@
     "build": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest --root ../.. run testing-harness/agent",
-    "test:mapper": "vitest --root ../.. run testing-harness/agent/question-mapper.test.ts testing-harness/agent/held-question-corpus.test.ts testing-harness/agent/held-question-corpus-track83.test.ts",
+    "test:mapper": "vitest --root ../.. run testing-harness/agent/question-mapper.test.ts testing-harness/agent/held-question-corpus.test.ts testing-harness/agent/held-question-corpus-track83.test.ts testing-harness/agent/held-question-corpus-track87.test.ts",
     "test:doorbell": "vitest --root ../.. run testing-harness/agent/pipeline-doorbell.test.ts",
     "test:pass": "vitest --root ../.. run testing-harness/agent/pipeline-pass.integration.test.ts",
     "test:labels": "vitest --root ../.. run testing-harness/agent/requirement-labels.integration.test.ts",

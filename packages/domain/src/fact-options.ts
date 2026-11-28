@@ -22,8 +22,9 @@ import { booleanOption } from "./standard-answers";
  * "After Spring 2028"), graduation comparisons ("Will you be graduating before September 2027?"), the closest
  * single-month option when the label asks for the closest date, numeric score buckets ("1200 - 1390", "1500+") and
  * the test-type pick for a saved SAT or ACT score, and sentence Yes/No options for age, sponsorship ("None" of a
- * visa-class list), previous employment, relatives, full-time enrollment, and on-site work. Each rule returns null
- * rather than guess, so the field pauses.
+ * visa-class list), previous employment, relatives, full-time enrollment, and on-site work. (Track 87) The saved
+ * number of previous internships picks the one count option holding it, or answers an "at least one previous
+ * internship" Yes/No. Each rule returns null rather than guess, so the field pauses.
  */
 
 /** Keys whose saved value picks an offered option by a rule (planner: factOptionDecision). */
@@ -37,7 +38,9 @@ export const FACT_OPTION_KEYS: ReadonlySet<string> = new Set([
   "act_score",
   // (Track 83)
   "act_taken",
-  "county"
+  "county",
+  // (Track 87)
+  "prior_internships_count"
 ]);
 
 /**
@@ -151,7 +154,8 @@ const BEYOND_RELOCATION = /\b(?:own|expenses?|costs?|assist\w*|support\w*|reimbu
  * commuting, living nearby). When several options start with Yes, a saved relocation Yes picks the one that names
  * relocating and says nothing more ("Yes: I am willing to relocate" beside "Yes: I live nearby or the role is
  * remote"; Track 62); otherwise null. (Track 79) A saved age, sponsorship, previous-employment, relatives,
- * full-time-enrollment, or on-site answer picks its sentence option by sentenceYesNoOption. Other keys return null.
+ * full-time-enrollment, or on-site answer picks its sentence option by sentenceYesNoOption, and (Track 87) so does a
+ * saved outstanding-offers answer. Other keys return null.
  */
 export function savedYesNoOption(key: string, value: boolean | string, options: readonly string[]): string | null {
   if (typeof value !== "boolean") return null;
@@ -180,7 +184,9 @@ const SENTENCE_VETOES: Record<string, RegExp | null> = {
   previously_worked_here: NOT_EMPLOYMENT,
   relatives_at_company: NOT_EMPLOYMENT,
   enrolled_full_time: /\b(?:part[- ]?time|graduate|master'?s?|ph\.?\s?d)\b/,
-  work_arrangement: /\b(?:relocat\w*|live|living|located|reside|commut\w*|remote|require\w*|need\w*)\b/
+  work_arrangement: /\b(?:relocat\w*|live|living|located|reside|commut\w*|remote|require\w*|need\w*)\b/,
+  // (Track 87) "No, I do not have any outstanding offers."
+  has_outstanding_offers: null
 };
 const NEGATION = /\b(?:not|never|no)\b/;
 const VISA_CLASS = /\b(?:opt|cpt|h-?1b|h1b|tn|j-?1|f-?1|e-?3|l-?1|o-?1)\b/;
@@ -585,7 +591,80 @@ export function factOption(key: string, value: boolean | string, options: readon
     const option = countyOption(value, options, context.regionCode);
     return option ? { option, reason: "The county of your saved address." } : null;
   }
+  if (key === "prior_internships_count" && typeof value === "string" && /^\d{1,2}$/.test(value)) {
+    const count = Number(value);
+    const threshold = context.question ? priorInternshipThreshold(context.question) : null;
+    if (threshold !== null) {
+      const option = booleanOption(count >= threshold, options);
+      return option ? { option, reason: "Read from your saved number of previous internships." } : null;
+    }
+    const option = internshipCountOption(count, options);
+    return option ? { option, reason: `Your saved number of previous internships falls in "${option}".` } : null;
+  }
   return null;
+}
+
+/** (Track 87) A question's text with trailing marks and a time tail ("before this summer", "so far") cut, for the internship-count wordings. */
+function internshipQuestionText(question: string): string {
+  return optionKey(question)
+    .replace(/[\s*:?.!]+$/, "")
+    .replace(/\s+(?:before|prior to) (?:this|the|next) (?:summer|year|internship|application|term)$/, "")
+    .replace(/\s+(?:so far|to date|in total|previously|before|in the past|until now)$/, "")
+    .trim();
+}
+
+// (Track 87) "How many internships have you completed (before this summer)?", "Number of prior internships". Any other
+// qualifier (technical, paid, at a company, in a field, co-ops or jobs) changes the count, so it is not read.
+const INTERNSHIP_COUNT_QUESTION = [
+  /^how many (?:(?:previous|prior|past|total) )?internships? (?:have you (?:ever )?(?:completed|done|had|held|participated in)|did you (?:complete|do|have)|have you)$/,
+  /^(?:(?:total )?number|#|no\.?) of (?:(?:previous|prior|past|completed) )?internships?(?: completed)?$/
+];
+// (Track 87) "Have you completed at least one previous internship?", "Have you ever interned before?", "Do you have any
+// prior internship experience?". The same qualifiers as above are not read.
+const PRIOR_INTERNSHIP_YES_NO = [
+  /^(?:have you|did you) (?:ever |previously |already )?(?:completed|complete|done|do|had|have|held|participated in|participate in) (at least (?:one|1|two|2|three|3)|an|a|any) (?:(?:previous|prior|past|other) )?internships?(?: experience)?$/,
+  /^have you (?:ever |previously )?interned$/,
+  /^do you have (?:any |an? )?(?:(?:previous|prior|past) )?internship experience$/
+];
+const THRESHOLD_WORDS: Record<string, number> = { one: 1, "1": 1, two: 2, "2": 2, three: 3, "3": 3 };
+
+/** (Track 87) Whether a label asks how many internships the candidate completed before, with no other qualifier. */
+export function isPriorInternshipCountQuestion(question: string): boolean {
+  const text = internshipQuestionText(question);
+  return INTERNSHIP_COUNT_QUESTION.some((pattern) => pattern.test(text));
+}
+
+/**
+ * (Track 87) The number of previous internships a Yes/No question asks for ("at least one previous internship" is 1,
+ * "at least two" is 2, "an internship" or "any internship experience" is 1); null when the label is not such a question.
+ */
+export function priorInternshipThreshold(question: string): number | null {
+  const text = internshipQuestionText(question);
+  for (const pattern of PRIOR_INTERNSHIP_YES_NO) {
+    const match = pattern.exec(text);
+    if (!match) continue;
+    const words = /^at least (\w+)$/.exec(match[1] ?? "");
+    return words ? THRESHOLD_WORDS[words[1]!] ?? null : 1;
+  }
+  return null;
+}
+
+const COUNT_WORDS: Record<string, string> = { none: "0", zero: "0", one: "1", two: "2", three: "3", four: "4", five: "5" };
+
+/**
+ * (Track 87) The one count option holding the saved number of previous internships ("0", "None", "1", "2", "3+",
+ * "3 or more", "1-2", "More than 3"; a trailing "internship(s)" is dropped). Null when fewer than two options name a
+ * count, or none or several hold it.
+ */
+export function internshipCountOption(count: number, options: readonly string[]): string | null {
+  const read = options.map((option) => {
+    const text = optionKey(option).replace(/\s+internships?$/, "").replace(/\b(none|zero|one|two|three|four|five)\b/g, (word) => COUNT_WORDS[word]!);
+    return { option, range: numericRange(text) };
+  }).filter((entry): entry is { option: string; range: NonNullable<ReturnType<typeof numericRange>> } => entry.range !== null);
+  if (read.length < 2) return null;
+  const hits = read.filter(({ range }) =>
+    (range.minOpen ? count > range.min : count >= range.min) && (range.maxOpen ? count < range.max : count <= range.max));
+  return hits.length === 1 ? hits[0]!.option : null;
 }
 
 const NOT_TAKEN = /\b(?:did not|didn'?t|have not|haven'?t|never) (?:take|taken|took)\b|\bnot taken\b|\b(?:do not|don'?t) have (?:an? )?(?:act )?(?:score|scores)\b|\bno (?:act )?scores?\b|^(?:n\/?a|none|not applicable)\b/;

@@ -536,6 +536,27 @@ export const factDefinitions = {
     reusePolicy: "auto",
     explicitUserSourceRequired: true
   },
+  // (Track 87) How many internships the candidate completed before; a "how many" list takes the one option holding it, and a
+  // "have you completed at least one previous internship?" question reads Yes or No from it (fact-options.ts).
+  prior_internships_count: {
+    label: "Number of internships completed before",
+    valueType: "text",
+    valueSchema: z.string().trim().regex(/^\d{1,2}$/),
+    allowedScopes: ["global"],
+    sensitivity: "standard",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
+  // (Track 87) Whether the candidate has outstanding offers or offer deadlines; a question also asking to name them takes only a saved No.
+  has_outstanding_offers: {
+    label: "Has outstanding offers or deadlines",
+    valueType: "boolean",
+    valueSchema: z.boolean(),
+    allowedScopes: ["global"],
+    sensitivity: "standard",
+    reusePolicy: "auto",
+    explicitUserSourceRequired: true
+  },
   salary_expectation: {
     label: "Salary expectation",
     valueType: "text",
@@ -599,7 +620,9 @@ export const candidateFactKeySchema = z.enum([
   "salary_expectation",
   "sat_score",
   "act_score",
-  "act_taken"
+  "act_taken",
+  "prior_internships_count",
+  "has_outstanding_offers"
 ]);
 
 export type CandidateFactKey = z.infer<typeof candidateFactKeySchema>;

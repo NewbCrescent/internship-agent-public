@@ -1,5 +1,5 @@
 import { isHearAboutQuestion } from "@internship-agent/browser";
-import { isStandardizedTestTypeQuestion, mentionsCompany, statedDateRange, statedLengthDays, mentionsCompanyLead, mentionsSiteTenant, normalizeCompanyName, relocationQuestionParts, type CandidateFactKey, type FactScope, type QuestionContext, type QuestionMapping } from "@internship-agent/domain";
+import { isPriorInternshipCountQuestion, isStandardizedTestTypeQuestion, mentionsCompany, priorInternshipThreshold, statedDateRange, statedLengthDays, mentionsCompanyLead, mentionsSiteTenant, normalizeCompanyName, relocationQuestionParts, type CandidateFactKey, type FactScope, type QuestionContext, type QuestionMapping } from "@internship-agent/domain";
 import { readPlace, readWellKnownCity } from "@internship-agent/jobs";
 
 import { mapStandardQuestion } from "./standard-question-mapper";
@@ -90,6 +90,14 @@ const FULL_TIME_WORK = /\b(?:work|working|commit|committing|available|availabili
 const NOT_FULL_TIME_WORK = /\bfull[- ]?time (?:offer|role|position|job|employment|opportunit\w*|student)\b|\b(?:after|following|upon|once)\b[^?]{0,30}\b(?:internship|graduat\w*|degree)\b|\bimmediately after\b|\bpost[- ]?graduat\w*|\bpart[- ]?time\b|\b(?:fall|spring|winter|autumn|semester|school year|academic year)\b|\bsenior\b|\bstudent\b|\benroll\w*|\b(?:on[- ]?site|in[- ]office|in[- ]person|hybrid|remote(?:ly)?|office)\b/i;
 // (Track 83) The county of the current address ("County", "County of residence", "What county do you live in?").
 const COUNTY = /^(?:(?:current|home|residential|your) )?county(?: of residence)?$|^(?:what|which) county do you (?:currently )?(?:live|reside) in\??$|^county \/ parish$/i;
+// (Track 87) Outstanding or competing offers, or offer deadlines, asked as a Yes/No about the candidate ("Do you have any
+// outstanding job offers or deadlines right now?", "Are you currently considering other offers?"). An offer the employer
+// makes ("accept an offer", "if offered", "return offer"), or a deadline asked with timing or other considerations, is not it.
+const OFFERS_LEAD = /^(?:do you (?:currently )?have|are you (?:currently )?(?:considering|holding|weighing|entertaining)|have you (?:received|gotten|got)|are there|is there)\b/;
+const OUTSTANDING_OFFERS = /\b(?:outstanding|other|competing|pending|existing|current|active|exploding)\s+(?:(?:job|internship|employment)\s+)?offers?\b|\bconsidering (?:any )?(?:other |competing )?(?:(?:job|internship) )?offers?\b|\bhave (?:an?|any) (?:(?:active|current|other) )?(?:(?:job|internship) )?offers?\b|\boffers? (?:or|and|\/) deadlines?\b|\b(?:any|other) (?:(?:upcoming|time[- ]sensitive|pressing|offer) )?deadlines?\b/;
+const NOT_OUTSTANDING_OFFERS = /\b(?:accept\w*|if (?:you are |you're )?offered|return offers?|offer letter|this offer|our offer|contingent|relocation|sponsor\w*|timeline|timing|consideration\w*|constraints?|application deadlines?|project\w*|school|academic|exam\w*)\b/;
+// (Track 87) A Yes/No that also asks to name the offers or their deadlines: only a saved No answers it.
+const NAME_THE_OFFERS = /\bif (?:yes|so)\b|\bplease (?:list|name|describe|explain|share|provide|specify|include|indicate)\b|\b(?:list|name) (?:them|the|any|all|your)\b|\bwhich (?:compan\w*|employers?|firms?|organi[sz]ations?)\b|\bwhat (?:compan\w*|is the deadline|are the deadlines|are they)\b|\bwhen (?:is|are|do) (?:the|they|it|your)\b/;
 const TEST_SECTION = /\b(?:math\w*|verbal|reading|writing|ebrw|evidence|english|science|section|sections|subject|essay)\b/i;
 
 export class DeterministicQuestionMapper implements SemanticQuestionMapper {
@@ -429,6 +437,31 @@ export class DeterministicQuestionMapper implements SemanticQuestionMapper {
         confidence: 0.93,
         method: "deterministic",
         explanation: "(Track 83) County of the current address."
+      };
+    }
+
+    // (Track 87) The number of internships completed before, asked as a count or as an "at least one" Yes/No.
+    if (isPriorInternshipCountQuestion(trimmed) || priorInternshipThreshold(trimmed) !== null) {
+      return {
+        status: "MAPPED",
+        key: "prior_internships_count",
+        scope: { kind: "global" },
+        confidence: 0.92,
+        method: "deterministic",
+        explanation: "(Track 87) Number of internships completed before."
+      };
+    }
+
+    // (Track 87) Outstanding offers or deadlines; a question also asking to name them is narrower (only a saved No answers it).
+    if (OFFERS_LEAD.test(normalized) && OUTSTANDING_OFFERS.test(normalized) && !NOT_OUTSTANDING_OFFERS.test(normalized)) {
+      return {
+        status: "MAPPED",
+        key: "has_outstanding_offers",
+        scope: { kind: "global" },
+        confidence: 0.9,
+        method: "deterministic",
+        explanation: "(Track 87) Outstanding offers or offer deadlines.",
+        ...(NAME_THE_OFFERS.test(normalized) ? { narrower: true } : {})
       };
     }
 

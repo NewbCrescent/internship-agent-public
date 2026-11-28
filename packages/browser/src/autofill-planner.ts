@@ -4,7 +4,7 @@ import type {
   PauseRecord,
   RecognizedForm
 } from "@internship-agent/domain";
-import { citizenAuthorizationOption, factOption, FACT_OPTION_KEYS, isStandardizedTestTypeQuestion, samePlace, savedYesNoOption, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
+import { citizenAuthorizationOption, factOption, FACT_OPTION_KEYS, isStandardizedTestTypeQuestion, priorInternshipThreshold, samePlace, savedYesNoOption, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
 import { asksForAllSchools, asksForHighSchool, schoolsAttendedLines, type EducationRow, type HighSchoolPlace } from "@internship-agent/domain";
 import { clipDecisionText } from "@internship-agent/domain";
 import { bachelorKind, campusOption, checkboxAnswer, chooseDegreeOption, fieldOfStudyCategoryOption, isStandardAnswerKey, matchOfferedOption, namedSchoolRelation, promptSearchTerms, sameNameKey, sameNamedOption, standardAnswerOption, usPersonYesNoOption } from "@internship-agent/domain";
@@ -708,6 +708,20 @@ function factOptionDecision(field: BrowserField, resolution: Extract<FieldResolu
     regionCode: profileRegionCode(inputs.profile.addressRegion)
   }) : null;
   if (picked) return { fieldId: field.id, action: "choose", value: picked.option, basis, reason: picked.reason, pause: null };
+  // (Track 87) An "at least one previous internship" Yes/No takes Yes or No from the saved count, never the count itself:
+  // a text box gets the word, and a list or other control without its one Yes or No option pauses.
+  const threshold = resolution.key === "prior_internships_count" ? priorInternshipThreshold(field.label) : null;
+  if (threshold !== null && typeof resolution.value === "string" && /^\d{1,2}$/.test(resolution.value)) {
+    if (!listed && (TEXT_KINDS.has(field.kind) || field.kind === "textarea") && field.widget !== "autocomplete") {
+      return fill(field, Number(resolution.value) >= threshold ? "Yes" : "No", basis, "Read from your saved number of previous internships.");
+    }
+    return pauseDecision(field, {
+      question: `The saved answer is not among the options for "${field.label}". How should it be answered?`,
+      key: resolution.key,
+      scope: resolution.scope,
+      safeguard: false
+    });
+  }
   // (Track 79) Which test a saved score is for: only its own "SAT" / "ACT" option, never the score typed or echoed.
   if ((resolution.key === "sat_score" || resolution.key === "act_score") && isStandardizedTestTypeQuestion(field.label)) {
     return pauseDecision(field, {
