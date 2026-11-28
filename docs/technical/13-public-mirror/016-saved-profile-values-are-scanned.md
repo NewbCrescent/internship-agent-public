@@ -1,0 +1,5 @@
+The scan also refuses to publish the candidate's saved street, ZIP, county, or phone: at sync time `loadProfileValues` opens the real profile database (`data/profiles/real/internship-agent.sqlite`, another one with `--profile-db <file>`) read-only, and `profileValueRules` compares its address line, profile and high-school postal codes, phone, and any saved county fact with every exported file and file name in memory.
+A street also matches its house number and first street word, a US ZIP its five digits outside a longer number, a county with or without "County", and a phone its last ten digits with any spacing, dots, dashes, or brackets.
+A hit is listed as `<path>:<line> profile: saved <kind>` and never shows the value, and a missing profile database stops the sync, so nothing is exported without this scan.
+County is not a profile column, so until a county fact is saved the real county belongs in the deny-list's `forbid` rules.
+The city, Berkeley, is not scanned, because generic Berkeley rules, examples, and tests stay in the repository (the candidate's decision, 2026-11-20).

@@ -5,15 +5,20 @@
 // public repository. See docs/technical/13-public-mirror/.
 //
 //   pnpm public:sync -- --public-dir <clone> [--ref <ref>] [--scrub <file>]
-//                       [--verify] [--dry-run] [--push] [--out <new dir>]
+//                       [--profile-db <file>] [--verify] [--dry-run] [--push]
+//                       [--out <new dir>]
 //
 // The deny-list (default data/public-scrub.json, Git-ignored) holds the real
-// names and hosts; this file never does. The script never reads .env files
-// and never prints a secret it finds, only where it is.
+// names and hosts; this file never does. The candidate's saved street, ZIP,
+// county, and phone are read from the local profile database (default
+// data/profiles/real/internship-agent.sqlite, opened read-only) and compared in
+// memory. The script never reads .env files and never prints a secret or a
+// saved profile value it finds, only where it is.
 import { spawnSync } from "node:child_process";
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** Tracked paths that never leave the private repository (a trailing "/" is a folder). */
@@ -23,6 +28,9 @@ export const PRIVATE_ONLY_PATHS = ["HANDOFF.md", "triage/"];
 export const PUBLIC_README = "PUBLIC-README.md";
 
 export const DEFAULT_SCRUB_FILE = "data/public-scrub.json";
+
+/** The real profile's database, read-only, for the saved-value scan. */
+export const DEFAULT_PROFILE_DB = "data/profiles/real/internship-agent.sqlite";
 
 /** Files that are neither rewritten nor name-scanned (hashes could spell anything); secrets are still scanned. */
 const NO_REWRITE = new Set(["pnpm-lock.yaml"]);
@@ -57,6 +65,74 @@ function findPattern(rule, flags) {
   return rule.word === false ? new RegExp(body, flags) : new RegExp(`(?<![A-Za-z0-9])${body}(?![A-Za-z0-9])`, flags);
 }
 
+/** Whole-word tokens joined by any whitespace run, case-insensitive. */
+function tokensPattern(tokens) {
+  return new RegExp(`(?<![A-Za-z0-9])${tokens.map(escapeRegExp).join("\\s+")}(?![A-Za-z0-9])`, "gi");
+}
+
+/**
+ * Scan rules for the candidate's saved street, ZIP, county, and phone. Each rule's note names the kind of
+ * value, never the value. A street also matches its house number and first street word ("12 Elm" of
+ * "12 Elm Street"), a US ZIP matches its five digits not inside a longer number, a county matches with
+ * or without "County", and a phone matches its last ten digits with any spacing, dots, dashes, or brackets.
+ */
+export function profileValueRules(values) {
+  const rules = [];
+  const strings = (list) => (list ?? []).map((value) => String(value ?? "").trim()).filter(Boolean);
+  for (const street of strings(values.streets)) {
+    const tokens = street.split(/\s+/);
+    rules.push({ note: "saved street", pattern: tokensPattern(tokens) });
+    if (tokens.length > 2 && /^\d+[A-Za-z]?$/.test(tokens[0])) rules.push({ note: "saved street", pattern: tokensPattern(tokens.slice(0, 2)) });
+  }
+  for (const zip of strings(values.zips)) {
+    const us = /^(\d{5})(?:-\d{4})?$/.exec(zip);
+    rules.push({ note: "saved ZIP", pattern: us ? new RegExp(`(?<![0-9])${us[1]}(?![0-9])`, "g") : tokensPattern(zip.split(/\s+/)) });
+  }
+  for (const county of strings(values.counties)) {
+    const tokens = county.replace(/\s+county$/i, "").split(/\s+/).filter(Boolean);
+    if (tokens.length > 0) rules.push({ note: "saved county", pattern: tokensPattern(tokens) });
+  }
+  for (const phone of strings(values.phones)) {
+    const digits = phone.replace(/\D/g, "").slice(-10);
+    if (digits.length < 7) continue;
+    rules.push({ note: "saved phone", pattern: new RegExp(`(?<![0-9])${digits.split("").join("[\\s().+-]{0,3}")}(?![0-9])`, "g") });
+  }
+  return rules;
+}
+
+/**
+ * Reads the saved street, ZIP, county, and phone from a profile database, read-only. County is not a profile
+ * column, so it comes from any current saved fact whose key names a county. A missing database throws:
+ * nothing is exported without this scan.
+ */
+export function loadProfileValues(file) {
+  if (!existsSync(file)) throw new Error(`No profile database at ${file}; give --profile-db <file> (nothing is exported without the saved-value scan)`);
+  const database = new DatabaseSync(file, { readOnly: true });
+  try {
+    const has = (table) => database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !== undefined;
+    const values = { streets: [], zips: [], counties: [], phones: [] };
+    if (has("candidates")) {
+      for (const row of database.prepare("SELECT * FROM candidates").all()) {
+        values.streets.push(row.address_line1);
+        values.zips.push(row.address_postal_code, row.high_school_postal_code);
+        values.phones.push(row.phone);
+      }
+    }
+    if (has("candidate_facts")) {
+      const facts = database.prepare("SELECT value_json FROM candidate_facts WHERE revoked_at IS NULL AND superseded_at IS NULL AND lower(key) LIKE '%county%'").all();
+      for (const fact of facts) {
+        try {
+          const value = JSON.parse(String(fact.value_json));
+          if (typeof value === "string") values.counties.push(value);
+        } catch { /* a malformed value is not a county */ }
+      }
+    }
+    return values;
+  } finally {
+    database.close();
+  }
+}
+
 /** Validates the parsed deny-list and returns it in a fixed shape; throws on anything malformed. */
 export function parseScrubList(value) {
   const fail = (message) => { throw new Error(`Invalid scrub list: ${message}`); };
@@ -78,7 +154,7 @@ export function parseScrubList(value) {
   allowSecrets.forEach((entry, index) => { if (typeof entry !== "string" || entry === "") fail(`allowSecrets[${index}] must be a non-empty string`); });
   // Longest finds first, so "Example Labs Inc" is replaced before "Example Labs".
   const ordered = replace.map((rule) => ({ ...rule })).sort((a, b) => b.find.length - a.find.length);
-  return { replace: ordered, forbid: forbid.map((rule) => ({ ...rule })), allowSecrets: [...allowSecrets] };
+  return { replace: ordered, forbid: forbid.map((rule) => ({ ...rule })), allowSecrets: [...allowSecrets], profile: [] };
 }
 
 /** Applies every replace rule. A match that wrapped across a line break keeps one break in its replacement. */
@@ -153,7 +229,7 @@ function lineOf(text, index) {
   return text.slice(0, index).split("\n").length;
 }
 
-/** Everything private still in a file: deny-list finds, forbidden patterns, run ids, and secrets. Never returns the secret text itself. */
+/** Everything private still in a file: deny-list finds, forbidden patterns, saved profile values, run ids, and secrets. Never returns a secret or a saved value. */
 export function scanText(text, path, list) {
   const hits = [];
   if (!NO_REWRITE.has(path)) {
@@ -170,6 +246,11 @@ export function scanText(text, path, list) {
     for (const rule of list.forbid) {
       for (const match of text.matchAll(new RegExp(rule.pattern, `${(rule.flags ?? "i").replace("g", "")}g`))) {
         hits.push({ path, line: lineOf(text, match.index), kind: "forbidden", note: rule.note ?? rule.pattern });
+      }
+    }
+    for (const rule of list.profile ?? []) {
+      for (const match of text.matchAll(rule.pattern)) {
+        hits.push({ path, line: lineOf(text, match.index), kind: "profile", note: rule.note });
       }
     }
     const masked = path.endsWith(".md") ? maskRunIds(text, true) : COMMENT_EXTENSIONS.test(path) ? maskRunIdsInComments(text, path) : text;
@@ -317,7 +398,7 @@ function localDate() {
 }
 
 export function parseArgs(argv) {
-  const options = { ref: "HEAD", scrub: null, publicDir: null, out: null, verify: false, dryRun: false, push: false };
+  const options = { ref: "HEAD", scrub: null, profileDb: null, publicDir: null, out: null, verify: false, dryRun: false, push: false };
   const args = argv.filter((argument) => argument !== "--");
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
@@ -329,6 +410,7 @@ export function parseArgs(argv) {
     };
     if (argument === "--ref") options.ref = value();
     else if (argument === "--scrub") options.scrub = value();
+    else if (argument === "--profile-db") options.profileDb = value();
     else if (argument === "--public-dir") options.publicDir = value();
     else if (argument === "--out") options.out = value();
     else if (argument === "--verify") options.verify = true;
@@ -352,7 +434,9 @@ function main(argv) {
   const options = parseArgs(argv);
   const repo = run("git", ["-C", dirname(fileURLToPath(import.meta.url)), "rev-parse", "--show-toplevel"]).trim();
   const list = loadScrubList(resolve(repo, options.scrub ?? DEFAULT_SCRUB_FILE));
-  return syncPublic(repo, list, options);
+  const profile = profileValueRules(loadProfileValues(resolve(repo, options.profileDb ?? DEFAULT_PROFILE_DB)));
+  console.log(`profile scan: ${profile.length} saved-value rules`);
+  return syncPublic(repo, { ...list, profile }, options);
 }
 
 /** Export, scrub, scan, optionally verify, then write --out and/or the clone. Returns the exit code. */
@@ -372,7 +456,7 @@ export function syncPublic(repo, list, options) {
       for (const hit of hits) console.error(`  ${hit.path}:${hit.line} ${hit.kind}: ${hit.note}`);
       return 1;
     }
-    console.log("scan: clean (deny-list, forbidden patterns, run ids, secrets)");
+    console.log("scan: clean (deny-list, forbidden patterns, saved profile values, run ids, secrets)");
 
     if (options.verify) {
       // A throwaway copy, so installs and build caches never reach the export.

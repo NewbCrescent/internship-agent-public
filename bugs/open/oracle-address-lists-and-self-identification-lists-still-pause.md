@@ -4,8 +4,8 @@ On the one-page Oracle forms reached on 2026-11-27 (pass 28), these fields
 still pause after Track 63:
 
 - ZIP, City, and County are geography lists whose options combine places
-  ("94704, Berkeley, Alameda, CA" for ZIP, "Berkeley, Alameda, CA" for City,
-  "Alameda, CA" for County), with at most 500 shown; the planner matches
+  ("<ZIP>, Berkeley, <county>, CA" for ZIP, "Berkeley, <county>, CA" for City,
+  "<county>, CA" for County), with at most 500 shown; the planner matches
   none of them to the profile's postal code or city, and County is not a
   saved fact.
 - On Corvane and Vertiv the gender and veteran lists were recorded as text

@@ -3,13 +3,16 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import {
   RUN_ID_MASK,
   applyReplacements,
+  loadProfileValues,
   parseScrubList,
   preparePublicTree,
+  profileValueRules,
   scanPath,
   scanText,
   scrubText,
@@ -186,5 +189,69 @@ test("a sync fails closed on a leftover and otherwise mirrors the export into th
     assert.equal(git(clone, "rev-list", "--count", "HEAD"), "2\n");
   } finally {
     for (const dir of [work, leaky, repo, clone]) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Fictional saved values: no real street, ZIP, county, or phone.
+const SAVED = { streets: ["4321 Fixture Lane"], zips: ["90999", null], counties: ["Quarrow County"], phones: ["+1 (555) 010-4477"] };
+const PROFILE_LIST = { ...LIST, profile: profileValueRules(SAVED) };
+
+test("saved street, ZIP, county, and phone values fail the scan without being echoed", () => {
+  const text = [
+    "Mail to 4321 fixture\nlane.",
+    "Near 4321 Fixture, as a form shortened it.",
+    "ZIP 90999-1234 on the form.",
+    "Quarrow, CA was the county option.",
+    "Call 555.010.4477 or (555) 010-4477.",
+    "Berkeley rules, ZIP 909990, 5550104477123, and Quarrowville stay."
+  ].join("\n");
+  const hits = scanText(text, "bugs/open/example.md", PROFILE_LIST);
+  assert.deepEqual(hits.map((hit) => [hit.line, hit.kind, hit.note]), [
+    [1, "profile", "saved street"],
+    [1, "profile", "saved street"],
+    [3, "profile", "saved street"],
+    [4, "profile", "saved ZIP"],
+    [5, "profile", "saved county"],
+    [6, "profile", "saved phone"],
+    [6, "profile", "saved phone"]
+  ]);
+  for (const value of ["4321", "Fixture", "Quarrow", "90999", "0104477"]) assert.ok(hits.every((hit) => !JSON.stringify(hit).includes(value)));
+  assert.deepEqual(scanPath("bugs/open/quarrow-county-list-fails.md", PROFILE_LIST).map((hit) => [hit.kind, hit.note]), [["path profile", "saved county"]]);
+  assert.deepEqual(scanText(text, "bugs/open/example.md", LIST), []);
+});
+
+test("saved values are read read-only from a profile database, and a missing one stops the sync", () => {
+  const dir = mkdtempSync(join(tmpdir(), "public-sync-profile-"));
+  try {
+    const file = join(dir, "profile.sqlite");
+    const database = new DatabaseSync(file);
+    database.exec(`CREATE TABLE candidates (id TEXT, phone TEXT, address_line1 TEXT, address_postal_code TEXT, high_school_postal_code TEXT);
+      CREATE TABLE candidate_facts (key TEXT, value_json TEXT, superseded_at TEXT, revoked_at TEXT);`);
+    database.prepare("INSERT INTO candidates VALUES (?, ?, ?, ?, ?)").run("c1", "+1 (555) 010-4477", "4321 Fixture Lane", "90999", "90998");
+    const fact = database.prepare("INSERT INTO candidate_facts VALUES (?, ?, ?, ?)");
+    fact.run("county_of_residence", JSON.stringify("Quarrow County"), null, null);
+    fact.run("county_of_residence", JSON.stringify("Old County"), "2026-01-01", null);
+    fact.run("pronouns", JSON.stringify("they/them"), null, null);
+    database.close();
+    assert.deepEqual(loadProfileValues(file), { streets: ["4321 Fixture Lane"], zips: ["90999", "90998"], counties: ["Quarrow County"], phones: ["+1 (555) 010-4477"] });
+    assert.throws(() => loadProfileValues(join(dir, "missing.sqlite")), /No profile database/);
+    assert.equal(existsSync(join(dir, "missing.sqlite")), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a sync refuses to publish a file holding a saved profile value", () => {
+  const work = mkdtempSync(join(tmpdir(), "public-sync-work-"));
+  const leaky = fixtureRepo({ "bugs/open/list.md": "Options read \"Berkeley, Quarrow, CA\".\n" });
+  const clean = fixtureRepo({ "bugs/open/list.md": "Options read \"Berkeley, <county>, CA\".\n" });
+  try {
+    const out = join(work, "out");
+    assert.equal(quiet(() => syncPublic(leaky, PROFILE_LIST, { out })), 1);
+    assert.equal(existsSync(out), false);
+    assert.equal(quiet(() => syncPublic(clean, PROFILE_LIST, { out })), 0);
+    assert.equal(readFileSync(join(out, "bugs/open/list.md"), "utf8"), "Options read \"Berkeley, <county>, CA\".\n");
+  } finally {
+    for (const dir of [work, leaky, clean]) rmSync(dir, { recursive: true, force: true });
   }
 });
