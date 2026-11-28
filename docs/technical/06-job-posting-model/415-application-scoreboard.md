@@ -16,6 +16,7 @@ The blocker board groups every currently held or paused application by its block
 Questions group by the question-memory normalization, with the company's own name read as "the company", so different wordings of one question share a blocker.
 Question labels keep their digits, so "Are you 18 or older?" and "Are you 21 or older?" are two blockers.
 Stop and hold reasons group after their sites, numbers, quoted text, company name, and Playwright logs are removed.
+A held run's stop reason comes only from a stop or hold event ("Automatic browser run waiting|needs you|failed|stopped: …", "Automatic submission failed: …", "Application hold: …"), never from its start, restart, or retry note; without one, a paused run whose every question is answered shows "<ATS>: all questions answered; the run waits to be continued", another paused run "<ATS>: paused with no open question", and a failed run "<ATS>: browser run failed" (Track 78).
 A link at a sentence's end leaves the period in place, so the reason still ends at its first sentence.
 Workday history pauses show as "<section> history entry: <field>" (for example "education history entry: degree") or "<section> history row", never with the school or employer the entry names, so the same field on different entries is one blocker.
 A sensitive pause shows as "a sensitive or self-identification question", never with its label.

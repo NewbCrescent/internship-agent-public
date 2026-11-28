@@ -32,6 +32,10 @@ import type { BrowserPage, RawControl } from "@internship-agent/browser";
 import {
   acquirePipelineLock,
   advancePipeline,
+  ANSWERED_CONTINUE_FAILURE,
+  answeredContinueBlocker,
+  answeredHeldRuns,
+  answerRunPause,
   approveApplication,
   continueBrowserRun,
   continuedAutoSubmitBlocker,
@@ -455,6 +459,109 @@ describe("answered automatic runs under the auto-submit policy", () => {
     const report = await pass(database, dataDir, formPage(flag));
     expect(report.submitted).toEqual([]);
     expect(flag.clicked).toBe(false);
+    database.close();
+  });
+});
+
+describe("answered held runs (Track 78)", () => {
+  /** A pipeline-started run that paused on its first pass and whose open question was answered without a continue. */
+  async function answeredWithoutContinue(database: DatabaseSync, dataDir: string, flag: { clicked: boolean }) {
+    const jobId = seededJob(database);
+    const first = await pass(database, dataDir, formPage(flag));
+    expect(first.started).toEqual([{ jobId, runStatus: "paused-needs-input" }]);
+    const run = listBrowserRuns(database, jobId)[0]!;
+    const open = run.pauses.filter((pause) => pause.status === "open");
+    expect(open.map((pause) => pause.label)).toEqual(["Favorite color?"]);
+    // No continue: the state the stop re-check and the application page leave.
+    await answerRunPause(run.id, open[0]!.fieldId, "Blue", false, { database });
+    const answered = getBrowserRun(database, run.id)!;
+    expect(answered.status).toBe("paused-needs-input");
+    expect(answered.pauses.some((pause) => pause.status === "open")).toBe(false);
+    return { jobId, run: answered };
+  }
+
+  it("continues a pipeline-started run whose last question was answered without a continue, and submits it on the same pass", async () => {
+    stubPolicyEnv();
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-continued-data-");
+    const flag = { clicked: false };
+    const { jobId, run } = await answeredWithoutContinue(database, dataDir, flag);
+    expect(answeredContinueBlocker(database, dataDir, run)).toBeNull();
+
+    const second = await pass(database, dataDir, formPage(flag));
+    expect(second.errors).toEqual([]);
+    expect(second.continued).toEqual([{ jobId, runStatus: "awaiting-approval" }]);
+    expect(second.submitted).toEqual([{ jobId, confirmation: expect.stringContaining("application was received") }]);
+    expect(flag.clicked).toBe(true);
+    expect(getBrowserRun(database, run.id)?.status).toBe("submitted");
+    expect(autoSubmitEvents(database, jobId)).toHaveLength(1);
+    database.close();
+  });
+
+  it("logs a failed continue once as the run's stop and does not retry it until the run changes", async () => {
+    stubPolicyEnv();
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-continued-data-");
+    const flag = { clicked: false };
+    const { jobId, run } = await answeredWithoutContinue(database, dataDir, flag);
+
+    const second = await pass(database, dataDir, async () => fakePage({ controls: [] }));
+    expect(second.continued).toEqual([]);
+    expect(second.stopped).toHaveLength(1);
+    expect(second.stopped[0]!.jobId).toBe(jobId);
+    expect(second.stopped[0]!.reason.startsWith("The answered run could not be continued: ")).toBe(true);
+    const failures = () => listApplicationEvents(database, jobId).filter((event) => event.detail?.startsWith(ANSWERED_CONTINUE_FAILURE));
+    expect(failures()).toHaveLength(1);
+    const held = getBrowserRun(database, run.id)!;
+    expect(held.status).toBe("paused-needs-input");
+    expect(answeredContinueBlocker(database, dataDir, held)).toBe("continuing it failed, and it has not changed since.");
+
+    let opened = 0;
+    const third = await pass(database, dataDir, async () => {
+      opened += 1;
+      return fakePage({ controls: [] });
+    });
+    expect(opened).toBe(0);
+    expect(third.continued).toEqual([]);
+    expect(failures()).toHaveLength(1);
+    expect(flag.clicked).toBe(false);
+    database.close();
+  });
+
+  it("leaves an answered run the candidate started for the candidate", async () => {
+    stubPolicyEnv();
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-continued-data-");
+    const jobId = seededJob(database, "approved");
+    const { run: started } = await startBrowserRun(jobId, "https://boards.greenhouse.io/example/jobs/2", {
+      database, dataDir, openPage: async () => fakePage({ controls: UNANSWERED }), voiceDrafter: null
+    });
+    expect(started.status).toBe("paused-needs-input");
+    const open = started.pauses.find((pause) => pause.status === "open" && pause.label === "Favorite color?")!;
+    await answerRunPause(started.id, open.fieldId, "Blue", false, { database });
+    const answered = getBrowserRun(database, started.id)!;
+    expect(answered.pauses.some((pause) => pause.status === "open")).toBe(false);
+    expect(answeredContinueBlocker(database, dataDir, answered)).toContain("you started this run yourself");
+
+    const flag = { clicked: false };
+    const report = await pass(database, dataDir, formPage(flag));
+    expect(report.continued).toEqual([]);
+    expect(getBrowserRun(database, started.id)?.status).toBe("paused-needs-input");
+    expect(flag.clicked).toBe(false);
+    database.close();
+  });
+
+  it("does not continue a Workday run automatically", async () => {
+    stubPolicyEnv();
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-continued-data-");
+    const flag = { clicked: false };
+    const { run } = await answeredWithoutContinue(database, dataDir, flag);
+    database.prepare("UPDATE browser_runs SET application_url = ? WHERE id = ?")
+      .run("https://acme.wd5.myworkdayjobs.com/en-US/External/job/Intern_R1/apply", run.id);
+    expect(answeredContinueBlocker(database, dataDir, getBrowserRun(database, run.id)!))
+      .toBe("Workday runs are continued with pnpm run:answer --continue.");
+    expect(answeredHeldRuns(database, dataDir)).toEqual([]);
     database.close();
   });
 });

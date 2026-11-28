@@ -120,6 +120,7 @@ export async function runPipelinePass(options: {
     for (const entry of report.held) log(`  waiting for you ${name(entry.jobId)}: ${entry.reasons.join(" ")}`);
     for (const entry of report.skipped) log(`  ruled out ${name(entry.jobId)}: ${entry.reasons.join(" ")}`);
     for (const entry of report.started) log(`  run ${name(entry.jobId)}: ${entry.runStatus}`);
+    for (const entry of report.continued ?? []) log(`  continued ${name(entry.jobId)}: ${entry.runStatus}`);
     for (const entry of report.stopped) log(`  stopped ${name(entry.jobId)}: ${entry.reason.replace(/\s+/g, " ").slice(0, 300)}`);
     const workdayWaiting = report.waiting.filter((entry) => entry.reason.startsWith("workday"));
     const icimsWaiting = report.waiting.filter((entry) => entry.reason === "icims-account");

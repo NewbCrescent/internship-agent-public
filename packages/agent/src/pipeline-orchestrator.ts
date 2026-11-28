@@ -27,13 +27,13 @@ import { prepareApplication } from "./application-orchestrator";
 import { unverifiedRequirements, type PursuedOnFit } from "./fit-pursuit";
 import { relabelHeldPostings } from "./requirement-relabel";
 import { getMatchReport, evaluateAndPersistMatch } from "./match-orchestrator";
-import { applicationUrlFor, approveRunSubmissionAutomatically, AutomaticRunStopped, IcimsAccountHeld, PostingClosed, startBrowserRun, submitBrowserRun,
+import { applicationUrlFor, approveRunSubmissionAutomatically, AutomaticRunStopped, continueBrowserRun, IcimsAccountHeld, PostingClosed, startBrowserRun, submitBrowserRun,
   WorkdayAccountHeld, type PageFactory, type PdfRenderer } from "./browser-orchestrator";
 import { resolveWorkdayAccounts, workdayAccountSettings, workdayAccountWait, type WorkdayAccountSettings } from "./workday-account-service";
 import { icimsAccountSettings, icimsAccountWait, resolveIcimsAccounts, type IcimsAccountSettings } from "./icims-account-service";
 import { fitTargetDecision, postingTargetDecision, targetTerm } from "./application-target";
 import { companyStanding } from "./company-policy";
-import { continuedAutoSubmitRuns, profileMismatchReason } from "./continued-auto-submit";
+import { ANSWERED_CONTINUE_FAILURE, answeredHeldRuns, continuedAutoSubmitRuns, profileMismatchReason } from "./continued-auto-submit";
 import type { VoiceDrafter } from "./voice-drafting";
 import type { VerificationMailboxFactory } from "./workday-verification-mail";
 import { AUTO_SUBMIT_EVENT, autoSubmitBlockers, autoSubmitSettings, combineTargetDecisions, manualOnly, parseWorkdayUrl,
@@ -162,6 +162,8 @@ export type PipelineReport = {
     pursuedOnFit?: PursuedOnFit;
   }>;
   started: Array<{ jobId: string; runStatus: string }>;
+  /** Held runs whose every question was answered, continued to the submit step or the next pause (Track 78). */
+  continued?: Array<{ jobId: string; runStatus: string }>;
   stopped: Array<{ jobId: string; reason: string }>;
   /**
    * Workday applications held without opening a browser until the candidate
@@ -185,6 +187,7 @@ export type PipelineReport = {
  * decision is apply), then (with auto-apply on) fill
  * verified applications in a browser and stop at the submit approval.
  * With the auto-submit policy, clean runs are submitted through submitAutomatically: right after the fill, and on later passes for runs the pipeline started that became clean since (answered, or held earlier only by the target, the AI fit, or a cap).
+ * Answered held runs the pipeline started (every question answered, nobody continued them) are continued first (Track 78).
  * Per company: at most the company cap of applications per target term, and one graduation profile.
  */
 export async function advancePipeline(options: {
@@ -212,7 +215,7 @@ export async function advancePipeline(options: {
   const database = options.database ?? getDatabase();
   const candidateId = options.candidateId ?? LOCAL_CANDIDATE_ID;
   const settings = options.settings ?? pipelineSettings();
-  const report: PipelineReport = { analyzed: [], prepared: [], started: [], stopped: [], waiting: [], submitted: [], held: [], skipped: [], errors: [] };
+  const report: PipelineReport = { analyzed: [], prepared: [], started: [], continued: [], stopped: [], waiting: [], submitted: [], held: [], skipped: [], errors: [] };
   const target = settings.target ?? null;
   const autoSubmit = target ? settings.autoSubmit ?? null : null;
   const fitFloor = autoSubmit?.minFit ?? 80;
@@ -314,6 +317,20 @@ export async function advancePipeline(options: {
   const icimsRuntime = icimsAccounts && "runtime" in icimsAccounts ? icimsAccounts.runtime : null;
   const standingSettings = standingConsentSettings();
   const acceptDataConsent = standingSettings.acceptDataConsent;
+  // Held runs whose every question is now answered (the stop re-check, or an answer saved without a continue) are filled
+  // again and taken to the submit step (Track 78); the sweep below may then submit them under the policy.
+  for (const run of answeredHeldRuns(database, resolveDataDir(options.dataDir))) {
+    try {
+      const { run: continued } = await continueBrowserRun(run.id, {
+        database, dataDir: options.dataDir, openPage: options.openPage, renderPdf: options.renderPdf, voiceDrafter: null, pauseReviewer: null
+      });
+      report.continued!.push({ jobId: run.jobId, runStatus: continued.status });
+    } catch (error) {
+      const reason = messageOf(error).replace(/\s+/g, " ").trim();
+      logApplicationEvent(database, { jobId: run.jobId, fromStatus: "APPLYING", toStatus: "APPLYING", detail: (ANSWERED_CONTINUE_FAILURE + reason).slice(0, 600) });
+      report.stopped.push({ jobId: run.jobId, reason: `The answered run could not be continued: ${reason}` });
+    }
+  }
   // Runs the pipeline started that reached the submit step clean since their start pass (answered, or held only by the
   // target, the AI fit, or a cap) go through the same policy check (candidate decision, 2026-11-21).
   if (autoSubmit) {

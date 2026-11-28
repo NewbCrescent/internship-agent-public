@@ -18,9 +18,10 @@ import {
   saveCandidateFact,
   saveQuestionAnswer
 } from "@internship-agent/db";
-import type { BrowserRun, FillDecision, PauseRecord } from "@internship-agent/domain";
+import { normalizeAnswerText, type BrowserRun, type FillDecision, type PauseRecord } from "@internship-agent/domain";
 
 import { runScoreboardCommand } from "../../packages/agent/scripts/pipeline-scoreboard";
+import { ANSWERED_CONTINUE_FAILURE } from "../../packages/agent/src/continued-auto-submit";
 import {
   blockerId,
   buildScoreboard,
@@ -329,6 +330,31 @@ describe("blocker board", () => {
     expect(text).toContain('fix in the browser: "enter a valid email like email"');
     expect(text).toContain("greenhouse: <site>: Timeout Nms exceeded waiting for getByLabel(<text>) at <site>");
   });
+  it("names a held run's stop only from a stop or hold event, never its start note (Track 78)", async () => {
+    const AUTO_START = "Browser run started automatically from the verified package; your approval is required before submission.";
+    seed((database) => {
+      const answered = posting(database, "Answered Co", "APPLYING");
+      run(database, answered, "paused-needs-input", [pause("Export control status", { status: "answered", answer: "US Citizen" })]);
+      event(database, answered, "READY_FOR_REVIEW", "APPLYING", AUTO_START, "2026-11-25T10:00:00.000Z");
+      event(database, answered, "APPLYING", "APPLYING", "Run trace saved: traces/answered.zip", "2026-11-25T10:05:00.000Z");
+      const empty = posting(database, "Empty Co", "APPLYING");
+      run(database, empty, "paused-needs-input", []);
+      event(database, empty, "READY_FOR_REVIEW", "APPLYING", AUTO_START, "2026-11-25T10:00:00.000Z");
+      const failed = posting(database, "Continue Co", "APPLYING");
+      run(database, failed, "paused-needs-input", [pause("Export control status", { status: "answered", answer: "US Citizen" })]);
+      event(database, failed, "READY_FOR_REVIEW", "APPLYING", AUTO_START, "2026-11-25T10:00:00.000Z");
+      event(database, failed, "APPLYING", "APPLYING", "Run trace saved: traces/continue.zip", "2026-11-25T10:05:00.000Z");
+      event(database, failed, "APPLYING", "APPLYING",
+        ANSWERED_CONTINUE_FAILURE + "No application form was reached at https://job-boards.greenhouse.io/x. The page shows nothing.", "2026-11-25T11:00:00.000Z");
+    });
+    const result = await board();
+    const byCompany = (company: string) => result.blockers.filter((blocker) => blocker.companies.includes(company))
+      .map(({ label, category }) => ({ label, category }));
+    expect(byCompany("Answered Co")).toEqual([{ label: "greenhouse: all questions answered; the run waits to be continued", category: "needs-fix" }]);
+    expect(byCompany("Empty Co")).toEqual([{ label: "greenhouse: paused with no open question", category: "needs-fix" }]);
+    expect(byCompany("Continue Co")).toEqual([{ label: "greenhouse: the answered run could not be continued: No application form was reached at <site>", category: "needs-fix" }]);
+    expect(result.blockers.some((blocker) => blocker.label.includes("started automatically"))).toBe(false);
+  });
 });
 
 describe("command", () => {
@@ -389,9 +415,9 @@ describe("command", () => {
     expect(second.code).toBe(0);
     const over18 = blockerId("question|are you over 18");
     const term = blockerId("question|what is your expected graduation term");
-    const noQuestion = blockerId("stop|greenhouse paused with no open question");
+    const noQuestion = blockerId(`stop|${normalizeAnswerText("greenhouse: all questions answered; the run waits to be continued")}`);
     expect(second.text).toContain(`Since the last scoreboard (${NOW.toISOString()}): held 2 → 3; confirmed submissions (7 days) 0 → 0; `
-      + `grew: [${noQuestion}] greenhouse: paused with no open question 0 → 1, [${term}] question: "what is your expected graduation term" 1 → 2; `
+      + `grew: [${noQuestion}] greenhouse: all questions answered; the run waits to be continued 0 → 1, [${term}] question: "what is your expected graduation term" 1 → 2; `
       + `shrank: [${over18}] question: "are you over 18" 1 → 0`);
 
     const oldSnapshot = (at: Date) => writeFileSync(join(folder, snapshotFileName(at)),

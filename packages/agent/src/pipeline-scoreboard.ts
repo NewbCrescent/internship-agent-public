@@ -303,11 +303,24 @@ function pauseCause(pause: PauseRecord, kind: "fault" | "challenge" | "correctio
   return guard({ kind: "question", category: "needs-candidate", label: `question: "${question}"`, causeText: question });
 }
 
+const ANSWERED_RUN_LABEL = "all questions answered; the run waits to be continued";
+const NO_OPEN_QUESTION_LABEL = "paused with no open question";
+
+function runStopFallback(run: BrowserRun | null): string {
+  if (!run || run.status === "failed") return "browser run failed";
+  if (run.status === "paused-needs-input" && run.pauses.length > 0 && !run.pauses.some((pause) => pause.status === "open")) {
+    return ANSWERED_RUN_LABEL;
+  }
+  return NO_OPEN_QUESTION_LABEL;
+}
+
 function stopCause(detail: string | null | undefined, company: string, run: BrowserRun | null, matches: ValueMatcher): Cause {
-  const cleaned = detail?.trim() ? normalizeStopReason(detail, company).label : "";
-  let label = cleaned || (run && run.status !== "failed" ? "paused with no open question" : "browser run failed");
+  // A run-start, restart, or retry note is never a stop reason (Track 78); job-level holds (no run) keep their source text.
+  const reason = detail?.trim() && (!run || STOP_PREFIX.test(detail.trim())) ? detail : null;
+  const cleaned = reason ? normalizeStopReason(reason, company).label : "";
+  let label = cleaned || runStopFallback(run);
   if (run && !startsWithAts(label)) label = `${run.atsKind}: ${label}`;
-  const rawText = detail?.trim() ? detail : label;
+  const rawText = reason ?? label;
   return guardCause({ kind: "stop", category: stopReasonCategory(label), label, causeText: label }, rawText, matches, run?.atsKind ?? "");
 }
 
