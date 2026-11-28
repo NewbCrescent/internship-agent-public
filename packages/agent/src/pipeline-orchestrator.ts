@@ -38,8 +38,8 @@ import type { VoiceDrafter } from "./voice-drafting";
 import type { VerificationMailboxFactory } from "./workday-verification-mail";
 import { AUTO_SUBMIT_EVENT, autoSubmitBlockers, autoSubmitSettings, combineTargetDecisions, manualOnly, parseWorkdayUrl,
   workdaySiteKey, type AutoSubmitSettings, type BrowserRun, type TargetDecision, type TargetTerm } from "@internship-agent/domain";
-import { COMPANY_CAP_PREFIX, companyCapReason, companyCapSetting, DEFAULT_COMPANY_CAP, QUICK_SKIP_REASONS, standingConsentSettings } from "@internship-agent/domain";
-import { icimsHostOf, resolveDataDir, SubmissionHeld } from "@internship-agent/browser";
+import { COMPANY_CAP_PREFIX, companyCapReason, companyCapSetting, DEFAULT_COMPANY_CAP, POSSIBLE_SUBMISSION_NOTE, QUICK_SKIP_REASONS, standingConsentSettings } from "@internship-agent/domain";
+import { icimsHostOf, resolveDataDir, SubmissionHeld, SubmissionUnverified } from "@internship-agent/browser";
 import { reviewPursuit } from "@internship-agent/matching";
 
 export type PipelineSettings = {
@@ -171,8 +171,16 @@ export type PipelineReport = {
    * iCIMS applications held by their account step (siteKey `icims:<host>`).
    */
   waiting: Array<{ jobId: string; siteKey: string; reason: "workday-sign-in" | "workday-account" | "icims-account"; detail?: string }>;
-  /** Submitted by the auto-submit policy, with the confirmation the site showed. */
+  /**
+   * Submitted by the auto-submit policy with the confirmation the site showed, or (added by the pass, Track 85)
+   * confirmed by the employer's receipt email.
+   */
   submitted: Array<{ jobId: string; confirmation: string }>;
+  /**
+   * Policy submits held as a possible submission (`SubmissionUnverified`) until a receipt check finds the employer's
+   * receipt (Track 85). They are not errors and are never submitted again automatically.
+   */
+  possibleSubmissions?: Array<{ jobId: string; runId: string; reason: string }>;
   /** Filled runs left at the submit step for the candidate, and why. */
   held: Array<{ jobId: string; reasons: string[] }>;
   /** Postings the target or a company cap ruled out on this pass (each is reported once). */
@@ -215,7 +223,7 @@ export async function advancePipeline(options: {
   const database = options.database ?? getDatabase();
   const candidateId = options.candidateId ?? LOCAL_CANDIDATE_ID;
   const settings = options.settings ?? pipelineSettings();
-  const report: PipelineReport = { analyzed: [], prepared: [], started: [], continued: [], stopped: [], waiting: [], submitted: [], held: [], skipped: [], errors: [] };
+  const report: PipelineReport = { analyzed: [], prepared: [], started: [], continued: [], stopped: [], waiting: [], submitted: [], possibleSubmissions: [], held: [], skipped: [], errors: [] };
   const target = settings.target ?? null;
   const autoSubmit = target ? settings.autoSubmit ?? null : null;
   const fitFloor = autoSubmit?.minFit ?? 80;
@@ -483,6 +491,12 @@ export async function advancePipeline(options: {
       // A failed submit may still have reached the site; it is never retried automatically.
       const reason = messageOf(error);
       const status = getJobPosting(database, run.jobId)?.status ?? "APPLYING";
+      // Track 85: a policy submit on a site whose confirmation page is not captured is a held possible submission, not an error.
+      if (error instanceof SubmissionUnverified) {
+        logApplicationEvent(database, { jobId: run.jobId, fromStatus: status, toStatus: status, detail: (POSSIBLE_SUBMISSION_NOTE + reason.replace(/\s+/g, " ")).slice(0, 600) });
+        report.possibleSubmissions?.push({ jobId: run.jobId, runId: run.id, reason });
+        return;
+      }
       logApplicationEvent(database, { jobId: run.jobId, fromStatus: status, toStatus: status, detail: (AUTO_SUBMIT_FAILURE + reason.replace(/\s+/g, " ")).slice(0, 600) });
       // A visible challenge or a refusal around the submit is held for the candidate, not an error.
       if (error instanceof SubmissionHeld) report.held.push({ jobId: run.jobId, reasons: [reason] });

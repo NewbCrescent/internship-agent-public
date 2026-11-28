@@ -4,7 +4,10 @@ import { DatabaseSync } from "node:sqlite";
 
 import type { WorkspaceProfile } from "@internship-agent/domain";
 
+import { setJobStatus } from "./application-repository";
+import { getBrowserRun, listBrowserRuns, updateBrowserRun } from "./browser-run-repository";
 import { resolveProfileDatabasePath } from "./database";
+import { getJobStatus } from "./job-posting-repository";
 
 export function openApplicationAuditDatabase(profile: WorkspaceProfile): DatabaseSync {
   return new DatabaseSync(resolveProfileDatabasePath(profile), { readOnly: true });
@@ -137,6 +140,43 @@ export function applicationReceiptConfirmed(database: DatabaseSync, runId: strin
   return !!database.prepare("SELECT 1 FROM application_receipt_checks WHERE run_id = ? AND result = 'confirmed'").get(runId);
 }
 
+/** Track 85: the confirmation text of a run marked submitted on the employer's receipt email; the private proof key is not in it. */
+export const RECEIPT_CONFIRMATION_TEXT = "Confirmed by the employer's application receipt email (receipt check).";
+
+const TERMINAL_JOB_STATUSES: ReadonlySet<string> = new Set(["NOT_QUALIFIED", "SUBMITTED", "INTERVIEW", "OFFER", "REJECTED", "WITHDRAWN"]);
+const VALUE_ACTIONS: ReadonlySet<string> = new Set(["fill", "choose", "check"]);
+
+/**
+ * Track 85: marks a run submitted, and its job SUBMITTED, on a trusted receipt. Called only inside a hold transaction.
+ * It does nothing for a run that is submitting (the browser still owns it), already submitted, or cancelled, for a job
+ * already SUBMITTED or past it, or when another run of the job is submitted or submitting.
+ */
+function submitOnReceipt(database: DatabaseSync, jobId: string, runId: string): boolean {
+  const run = getBrowserRun(database, runId);
+  if (!run || run.jobId !== jobId) return false;
+  if (run.status === "submitted" || run.status === "submitting" || run.status === "cancelled") return false;
+  const status = getJobStatus(database, jobId);
+  if (!status || TERMINAL_JOB_STATUSES.has(status)) return false;
+  if (listBrowserRuns(database, jobId).some((other) => other.id !== runId && (other.status === "submitted" || other.status === "submitting"))) return false;
+  let submittedAnswers = run.submittedAnswers;
+  if (run.submissionApprovedAt) {
+    // The same answers a recognized confirmation records (browser-orchestrator.ts).
+    const answers: Record<string, string> = {};
+    for (const decision of run.decisions) {
+      if (VALUE_ACTIONS.has(decision.action) && typeof decision.value === "string") answers[decision.fieldId] = decision.value;
+    }
+    submittedAnswers = answers;
+  }
+  updateBrowserRun(database, runId, { status: "submitted", confirmationText: RECEIPT_CONFIRMATION_TEXT, submittedAnswers });
+  setJobStatus(database, jobId, status, "SUBMITTED", `Submitted with confirmation: ${RECEIPT_CONFIRMATION_TEXT}`);
+  return true;
+}
+
+/**
+ * Records a receipt check for a run. A trusted receipt ("confirmed") for a run held as a possible submission resolves
+ * that hold and, since Track 85, marks the run submitted with RECEIPT_CONFIRMATION_TEXT and the job SUBMITTED, all in
+ * one transaction (`submitOnReceipt` names the runs it skips). A stored confirmed check is never overwritten.
+ */
 export function recordApplicationReceipt(database: DatabaseSync, hold: Pick<ApplicationHold, "jobId" | "runId">, result: ReceiptResult, proofRef: string | null, attemptedAt: string, at: string): void {
   if (!hold.runId) return;
   const runId = hold.runId;
@@ -152,9 +192,30 @@ export function recordApplicationReceipt(database: DatabaseSync, hold: Pick<Appl
     const current = getApplicationHold(database, hold.jobId, runId);
     if (current) {
       appendEvent(database, current, "receipt-check", at, proofRef, result);
-      if (result === "confirmed" && current.active && current.reason === "possible-submission") resolveHold(database, current, at);
+      if (result === "confirmed" && current.active && current.reason === "possible-submission") {
+        submitOnReceipt(database, hold.jobId, runId);
+        resolveHold(database, current, at);
+      }
     }
   });
+}
+
+/**
+ * Track 85: applies trusted receipts recorded before Track 85, or while their run was still submitting: each run with a
+ * confirmed receipt check that is not submitted, submitting, or cancelled, on a job not yet SUBMITTED or past it, is
+ * marked submitted (`submitOnReceipt`). It never touches a run without a confirmed receipt. Returns the runs it marked.
+ */
+export function promoteConfirmedReceiptRuns(database: DatabaseSync): Array<{ jobId: string; runId: string }> {
+  if (!applicationHoldSchemaPresent(database)) return [];
+  const rows = database.prepare(`
+    SELECT r.job_id AS jobId, r.id AS runId FROM application_receipt_checks c
+      JOIN browser_runs r ON r.id = c.run_id JOIN jobs j ON j.id = r.job_id
+    WHERE c.result = 'confirmed' AND r.status NOT IN ('submitted', 'submitting', 'cancelled')
+      AND j.status NOT IN ('NOT_QUALIFIED', 'SUBMITTED', 'INTERVIEW', 'OFFER', 'REJECTED', 'WITHDRAWN')
+    ORDER BY c.checked_at, r.id
+  `).all() as Array<{ jobId: string; runId: string }>;
+  if (rows.length === 0) return [];
+  return withApplicationHoldTransaction(database, () => rows.filter((row) => submitOnReceipt(database, row.jobId, row.runId)));
 }
 
 export function applicationHoldFixUsed(database: DatabaseSync, hold: ApplicationHold, fix: string): boolean {

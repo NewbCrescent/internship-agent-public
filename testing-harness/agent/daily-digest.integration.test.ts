@@ -14,9 +14,10 @@ import {
   persistNormalizedPosting,
   resolveProfileDatabasePath,
   resolveProfileDataDirectory,
-  saveBrowserRun
+  saveBrowserRun,
+  updateBrowserRun
 } from "@internship-agent/db";
-import type { BrowserRun, PauseRecord } from "@internship-agent/domain";
+import { POSSIBLE_SUBMISSION_NOTE, type BrowserRun, type PauseRecord } from "@internship-agent/domain";
 
 import { runPipelinePass, runWatchTick } from "../../packages/agent/scripts/pipeline-pass";
 import {
@@ -191,6 +192,25 @@ describe("digest text", () => {
     expect(digest.text).toContain("Replies from companies: 1 interview invite (Acme), 2 rejections (Globex, Initech)");
     expect(digest.text).toContain(`"Email [email] or call [number]?"`);
     expect(digest.text.split("\n").length).toBeLessThanOrEqual(15);
+  });
+
+  it("lists policy submits waiting for their receipt email apart, and sends nothing for that line alone (Track 85)", () => {
+    const awaitingReceipt = [{ jobId: randomUUID(), companyName: "Acme" }];
+    const digest = buildDigest({ ...empty, awaitingReceipt, sent: [{ jobId: randomUUID(), companyName: "Stripe" }] }, at(20, 9))!;
+    expect(digest.text.split("\n").slice(1)).toEqual(["Sent since last update: 1 (Stripe)", "Sent, waiting for the employer's receipt email: 1 (Acme)"]);
+    expect(digest.text).not.toContain("Being fixed");
+    expect(buildDigest({ ...empty, awaitingReceipt }, at(20, 9))).toBeNull();
+  });
+
+  it("never calls a run held for having no application content ready (Track 85)", () => {
+    const newsletter = run("awaiting-approval", [], { noApplicationContent: true });
+    expect(classifyHold(newsletter)).toEqual({ kind: "candidate", captcha: false, asks: [], ready: true, voiceDraft: false });
+    const digest = buildDigest({ ...empty, applying: [job("Fixture", "Intern", newsletter), job("Acme", "Intern", run("awaiting-approval"))] }, at(20, 9))!;
+    const [first, second] = digest.text.split("\n").filter((line) => /^\d\. /.test(line));
+    expect(first).toContain("held, not ready:");
+    expect(first).toContain("newsletter or sign-up box");
+    expect(first).not.toContain('ready, say "send');
+    expect(second).toBe(`2. Acme Intern — ready, say "send Acme"`);
   });
 
   it("stays short: at most eight items, then a count", () => {
@@ -399,6 +419,39 @@ describe("watcher tick", () => {
     const checked = createDatabase(resolveProfileDatabasePath("real"));
     expect(getBrowserRun(checked, firstRun)?.pauses.map((pause) => pause.status)).toEqual(["open", "answered"]);
     checked.close();
+  });
+
+  it("collects possible submissions waiting for a receipt apart from holds, and flags runs with no application content (Track 85)", () => {
+    const seed = createDatabase(resolveProfileDatabasePath("real"));
+    const approvedAt = new Date(Date.now() - 60_000).toISOString();
+    const held = (companyName: string, note: string) => {
+      const jobId = posting(seed, companyName, "Intern", "APPLYING");
+      const runId = heldRun(seed, jobId, "paused-needs-input", []);
+      updateBrowserRun(seed, runId, { status: "failed", submissionApprovedAt: approvedAt });
+      logApplicationEvent(seed, { jobId, fromStatus: "APPLYING", toStatus: "APPLYING", detail: note });
+      return jobId;
+    };
+    const current = held("Acme", `${POSSIBLE_SUBMISSION_NOTE}The auto-submit policy clicked the final submit of the application at acme.example and the page read as a confirmation.`);
+    const legacy = held("Globex", "Automatic submission failed: The auto-submit policy clicked the final submit of the application at globex.example and the page read as a confirmation.");
+    const failed = held("Initech", "Automatic submission failed: The site did not load.");
+    const newsletter = posting(seed, "Umbrella", "Intern", "APPLYING");
+    const newsletterRun = heldRun(seed, newsletter, "awaiting-approval", []);
+    updateBrowserRun(seed, newsletterRun, {
+      atsKind: "unknown",
+      decisions: [{ fieldId: "email", action: "fill", value: "candidate@example.test", basis: { kind: "profile", field: "email" }, reason: "Profile email.", pause: null }]
+    });
+    seed.close();
+
+    const database = createDatabase(resolveProfileDatabasePath("real"));
+    const snapshot = collectDigestSnapshot(database, new Date(Date.now() - 60 * 60 * 1000).toISOString());
+    database.close();
+    expect([...(snapshot.awaitingReceipt ?? [])].sort((a, b) => a.companyName.localeCompare(b.companyName)))
+      .toEqual([{ jobId: current, companyName: "Acme" }, { jobId: legacy, companyName: "Globex" }]);
+    expect(snapshot.applying.map((entry) => entry.jobId)).not.toContain(current);
+    expect(snapshot.applying.map((entry) => entry.jobId)).not.toContain(legacy);
+    expect(snapshot.applying.map((entry) => entry.jobId)).toContain(failed);
+    expect(snapshot.applying.find((entry) => entry.jobId === newsletter)?.run?.noApplicationContent).toBe(true);
+    expect(snapshot.applying.find((entry) => entry.jobId === failed)?.run?.noApplicationContent).toBe(false);
   });
 
   it("never counts a security or verification code email as a company reply, under the new or the older label", () => {

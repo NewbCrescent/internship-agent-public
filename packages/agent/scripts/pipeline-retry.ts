@@ -22,7 +22,8 @@
  * candidate's words>" with named --run references replaces that site
  * evidence with the candidate's own verdict that the run was not submitted.
  * A fresh read-only receipt check of the Gmail mailbox runs first for each
- * run; a receipt found is recorded and nothing is reopened.
+ * run; a receipt found is recorded, marks the application submitted, and
+ * nothing is reopened.
  * --close-unsubmitted --reason … closes a failed submit that was never
  * clicked ("No submit control was found") on a posting its evidence shows
  * closed: the run is cancelled and the job skipped as "Posting closed"; it is

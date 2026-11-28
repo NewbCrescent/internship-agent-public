@@ -155,7 +155,9 @@ describe("pipeline watcher pass", () => {
       createdAt: now, updatedAt: now
     });
     const { fetch, contents } = recordingFetch(dataDir);
-    const pass = () => runPipelinePass({ profile: "real", sourceIds: [], log: () => undefined, notify: { fetch },
+    // The seeded run has a submit approval, so the pass's receipt check is replaced: no test reads a real mailbox.
+    const receipts = async () => ({ pending: 0, mailbox: "none-pending" as const, confirmed: [] });
+    const pass = () => runPipelinePass({ profile: "real", sourceIds: [], log: () => undefined, notify: { fetch }, receipts,
       advance: async () => ({ analyzed: [], prepared: [], started: [], stopped: [], waiting: [], held: [], skipped: [], submitted: [], errors: [] }) });
     await pass();
     expect(contents).toEqual([]);
@@ -571,6 +573,45 @@ describe("pipeline watcher pass", () => {
     const blocked: string[] = [];
     await expect(runPipelinePass({ profile: "real", sourceIds: [], log: (line) => blocked.push(line), advance })).resolves.toBe(report);
     expect(blocked.filter((line) => line.startsWith("Board:"))).toEqual(["Board: 0 applications held; no blockers (snapshot not saved: EEXIST)"]);
+  });
+
+  it("checks receipts each pass: a confirmed one counts as submitted, the rest are held possible submissions, never errors (Track 85)", async () => {
+    const dataDir = resolveProfileDataDirectory("real");
+    const [first, second] = [randomUUID(), randomUUID()];
+    const [firstRun, secondRun] = [randomUUID(), randomUUID()];
+    const reason = "The auto-submit policy clicked the final submit of the application at example.test and the page read as a confirmation, so it is held as a possible submission until a receipt check finds the site's receipt.";
+    const advance = async (): Promise<PipelineReport> => ({
+      analyzed: [], prepared: [], started: [], stopped: [], waiting: [], held: [], skipped: [], submitted: [], errors: [],
+      possibleSubmissions: [{ jobId: first, runId: firstRun, reason }, { jobId: second, runId: secondRun, reason }]
+    });
+    const confirmation = "Confirmed by the employer's application receipt email (receipt check).";
+    const seen: string[] = [];
+    const receipts = async (input: { dataDir: string }) => {
+      seen.push(input.dataDir);
+      return { pending: 2, mailbox: "checked" as const, confirmed: [{ jobId: second, runId: secondRun, confirmation }] };
+    };
+    const lines: string[] = [];
+    const report = await runPipelinePass({ profile: "real", sourceIds: [], log: (line) => lines.push(line), advance, receipts });
+    expect(seen).toEqual([dataDir]);
+    expect(report.submitted).toEqual([{ jobId: second, confirmation }]);
+    expect(report.possibleSubmissions).toEqual([{ jobId: first, runId: firstRun, reason }]);
+    expect(report.errors).toEqual([]);
+    expect(lines).toContain("Receipts: checked 2 possible submission(s) for an employer receipt; 1 marked submitted.");
+    expect(lines).toContainEqual(expect.stringMatching(new RegExp(`^  SUBMITTED ${second}: Confirmed by the employer's application receipt email`)));
+    expect(lines).toContainEqual(expect.stringMatching(new RegExp(`^  sent, waiting for its receipt ${first}: The auto-submit policy clicked`)));
+    expect(lines.some((line) => line.includes("Automatic submission failed"))).toBe(false);
+    expect(lines).toContainEqual(expect.stringMatching(/^Analyzed 0 left over; .*submitted 1;/));
+    const status = JSON.parse(readFileSync(join(dataDir, "pipeline-status.json"), "utf8")) as { possibleSubmissions: unknown; submitted: unknown; errors: unknown };
+    expect(status.possibleSubmissions).toEqual([{ job: first, jobId: first, runId: firstRun, reason }]);
+    expect(status.submitted).toEqual([{ job: second, jobId: second, confirmation }]);
+    expect(status.errors).toEqual([]);
+
+    const failing: string[] = [];
+    const broken = async () => { throw Object.assign(new Error("mailbox gone"), { code: "ECONNRESET" }); };
+    await expect(runPipelinePass({ profile: "real", sourceIds: [], log: (line) => failing.push(line), advance, receipts: broken })).resolves.toBeDefined();
+    expect(failing).toContain("Receipts: not checked (ECONNRESET); the pass is unaffected.");
+    expect(failing).toContainEqual(expect.stringMatching(/^Analyzed 0 left over;/));
+    expect(existsSync(join(dataDir, "pipeline.lock"))).toBe(false);
   });
 });
 

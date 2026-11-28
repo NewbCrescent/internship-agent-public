@@ -34,6 +34,7 @@ import {
   AUTO_SUBMIT_EVENT,
   manualOnly,
   mentionsCompany,
+  POSSIBLE_SUBMISSION_NOTE,
   QUICK_SKIP_REASONS,
   runStartedByPipeline,
   workspaceProfileSchema,
@@ -409,7 +410,8 @@ export type CandidateVerdictOutcome =
  * submitted. It first runs a fresh read-only receipt check
  * (catchUpSubmissionReceipt, as `pnpm mail:scan --receipt` does): a trusted
  * receipt is recorded as that command records it (its possible-submission
- * hold resolved, the application status unchanged) and the run is not
+ * hold resolved and, since Track 85, the run marked submitted and the job
+ * SUBMITTED) and the run is not
  * reopened; an ambiguous, truncated, or unavailable check keeps it held.
  * With no receipt it cancels the run, moves the job from APPLYING back to
  * READY_FOR_REVIEW, logs "Reopened on the candidate's verdict that it was
@@ -672,7 +674,7 @@ export function requeueVerifiedHold(
 /** Evidence outcomes saved before any submit click (account steps, Workday entry or step errors, iCIMS stops, a dialog over the form while it filled, a Track 42 stop capture); any other outcome is post-submit. */
 const PRE_SUBMIT_OUTCOMES: ReadonlySet<string> = new Set(["workday-account", "workday-errors", "workday-entry", "icims-account", "icims-application", "covering-dialog", "stop"]);
 /** Timeline notes that show a submit was approved, attempted, reopened, or recorded for the job. */
-const SUBMIT_ATTEMPT_NOTES = [AUTO_SUBMIT_EVENT, APPROVAL_EVENT_PREFIX, "Automatic submission failed: ", REOPENED_UNSUBMITTED_PREFIX, CANDIDATE_VERDICT_REOPEN_PREFIX];
+const SUBMIT_ATTEMPT_NOTES = [AUTO_SUBMIT_EVENT, APPROVAL_EVENT_PREFIX, "Automatic submission failed: ", POSSIBLE_SUBMISSION_NOTE, REOPENED_UNSUBMITTED_PREFIX, CANDIDATE_VERDICT_REOPEN_PREFIX];
 
 /** Why the job's record shows a submit may have been attempted, or null when nothing does. */
 function jobSubmitAttempt(database: DatabaseSync, dataDir: string, jobId: string): string | null {
@@ -1138,7 +1140,7 @@ export async function runRetryCommand(argv: string[], deps: Partial<RetryCommand
               receipts += 1;
               io.log(args.dryRun
                 ? `receipt found for ${label} (dry run, nothing recorded): a trusted receipt matches this attempt, so it went through and would not be reopened.`
-                : `receipt found for ${label}: a trusted receipt matches this attempt, so it went through; the receipt is recorded, its possible-submission hold is resolved, and it is not reopened.`);
+                : `receipt found for ${label}: a trusted receipt matches this attempt, so it went through; the receipt is recorded, the application is marked submitted, and it is not reopened.`);
             } else if (outcome.kind === "would-reopen") {
               retried += 1;
               io.log(`would reopen ${label} on the candidate's verdict that it was not submitted (fresh receipt check: absent; nothing recorded).`);
@@ -1214,7 +1216,7 @@ export async function runRetryCommand(argv: string[], deps: Partial<RetryCommand
     if (receipts > 0) {
       io.log(args.dryRun
         ? `Dry run: receipts found for ${receipts} run(s); nothing recorded.`
-        : `Receipts found for ${receipts} run(s): recorded as received, not reopened.`);
+        : `Receipts found for ${receipts} run(s): recorded as received and marked submitted, not reopened.`);
     }
     if (released > 0) {
       io.log(args.dryRun ? `Dry run: would release ${released} Workday account hold(s).` : `Released ${released} Workday account hold(s).`);

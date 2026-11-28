@@ -7,7 +7,7 @@ import {
   listApplicationHolds, listApplicationHoldJobs, listBrowserRuns, logApplicationEvent, reconcileApplicationHolds,
   type ApplicationHold, type HoldObservation, type HoldReason
 } from "@internship-agent/db";
-import { atsKindNeedsApproval, type BrowserRun } from "@internship-agent/domain";
+import { atsKindNeedsApproval, isPossibleSubmissionNote, type BrowserRun } from "@internship-agent/domain";
 
 import { readJobEvidence } from "./submit-evidence";
 
@@ -210,6 +210,16 @@ export function observeApplicationHolds(database: DatabaseSync, dataDir: string)
     else if (source) resolved.add(applicationHoldKey(jobId, null));
   }
   return { observations, resolved };
+}
+
+/**
+ * Track 85: whether a run is a policy submit held as a possible submission until a receipt check: failed, approved,
+ * unconfirmed, with its note (isPossibleSubmissionNote) logged at or after its approval.
+ */
+export function awaitsReceipt(database: DatabaseSync, run: Pick<BrowserRun, "jobId" | "status" | "submissionApprovedAt" | "confirmationText">): boolean {
+  const approvedAt = run.submissionApprovedAt;
+  if (run.status !== "failed" || !approvedAt || run.confirmationText) return false;
+  return listApplicationEvents(database, run.jobId).some((event) => isPossibleSubmissionNote(event.detail) && event.createdAt >= approvedAt);
 }
 
 export function refreshApplicationHolds(database: DatabaseSync, dataDir: string, now = new Date()): ApplicationHold[] {

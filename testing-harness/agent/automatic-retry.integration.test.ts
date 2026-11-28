@@ -12,13 +12,17 @@ import {
   closeProfileDatabase,
   createDatabase,
   getFitInputVersion,
+  getBrowserRun,
   listApplicationEvents,
+  listApplicationReceiptAttempts,
   listBrowserRuns,
   listProjectEvidenceProfiles,
   LOCAL_CANDIDATE_ID,
   logApplicationEvent,
   persistNormalizedPosting,
+  promoteConfirmedReceiptRuns,
   readApplicationReceiptCheck,
+  RECEIPT_CONFIRMATION_TEXT,
   reconcileProjectEvidence,
   recordApplicationReceipt,
   registerGitHubRepository,
@@ -32,7 +36,7 @@ import {
   seedDevelopmentData,
   updateBrowserRun
 } from "@internship-agent/db";
-import { AUTO_SUBMIT_EVENT, runStartedByPipeline, type BrowserRun, type PauseRecord } from "@internship-agent/domain";
+import { AUTO_SUBMIT_EVENT, POSSIBLE_SUBMISSION_NOTE, runStartedByPipeline, type BrowserRun, type PauseRecord } from "@internship-agent/domain";
 import {
   ASHBY_BUSY_DETAIL,
   ASHBY_NOT_SENT_DETAIL,
@@ -95,7 +99,8 @@ import {
 
 import { mayHaveSubmitted, refreshApplicationHolds } from "../../packages/agent/src/application-holds";
 import { evaluateMail, mailEventDetail, type AppliedJob, type MailHeader } from "../../packages/agent/src/mail-outcomes";
-import type { MailSession, MailSessionFactory } from "../../packages/agent/src/mail-watch";
+import { scanUids, type MailContext, type MailSession, type MailSessionFactory } from "../../packages/agent/src/mail-watch";
+import { checkPendingSubmissionReceipts } from "../../packages/agent/src/submission-receipts";
 import { runPipelinePass } from "../../packages/agent/scripts/pipeline-pass";
 
 /**
@@ -971,6 +976,12 @@ describe("verified job-level hold requeue (--job)", () => {
     ["the revision is not the current one", () => 2, /the hold revision changed/],
     ["an approval was logged on the timeline", (database, _dataDir, jobId) => {
       logApplicationEvent(database, { jobId, fromStatus: "READY_FOR_REVIEW", toStatus: "READY_FOR_REVIEW", detail: `${AUTO_SUBMIT_EVENT}.` });
+    }, /timeline records a submit approval, attempt, or submission/],
+    ["a possible-submission note was logged", (database, _dataDir, jobId) => {
+      logApplicationEvent(database, {
+        jobId, fromStatus: "READY_FOR_REVIEW", toStatus: "READY_FOR_REVIEW",
+        detail: `${POSSIBLE_SUBMISSION_NOTE}The auto-submit policy clicked the final submit of the application at example.test and the page read as a confirmation.`
+      });
     }, /timeline records a submit approval, attempt, or submission/],
     ["a cancelled run had a submit approval", (database, _dataDir, jobId) => {
       liveRun(database, jobId, "cancelled", { submissionApprovedAt: new Date(Date.now() - 60_000).toISOString() });
@@ -2272,11 +2283,15 @@ describe("pnpm pipeline:retry --reopen-unsubmitted --candidate-verdict not-submi
     const { deps, lines } = commandDeps(database, { dataDir: () => dataDir, mailbox: box.connect });
 
     expect(await runRetryCommand(VERDICT_ARGS(ref), deps)).toBe(0);
-    expect(lines[0]).toMatch(new RegExp(`^receipt found for ${ref} Northstar Systems .*: a trusted receipt matches this attempt, so it went through; the receipt is recorded, its possible-submission hold is resolved, and it is not reopened\\.$`));
-    expect(lines.slice(-2)).toEqual(["Reopened 0; skipped 1.", "Receipts found for 1 run(s): recorded as received, not reopened."]);
+    expect(lines[0]).toMatch(new RegExp(`^receipt found for ${ref} Northstar Systems .*: a trusted receipt matches this attempt, so it went through; the receipt is recorded, the application is marked submitted, and it is not reopened\\.$`));
+    expect(lines.slice(-2)).toEqual(["Reopened 0; skipped 1.", "Receipts found for 1 run(s): recorded as received and marked submitted, not reopened."]);
     expect(applicationReceiptConfirmed(database, run.id)).toBe(true);
-    expect(listBrowserRuns(database, jobId).map((entry) => entry.status)).toEqual(["failed"]);
-    expect(statusOf(database, jobId)).toBe("APPLYING");
+    // Track 85: the trusted receipt marks the run submitted and the job SUBMITTED.
+    expect(listBrowserRuns(database, jobId).map((entry) => entry.status)).toEqual(["submitted"]);
+    expect(listBrowserRuns(database, jobId)[0]!.confirmationText).toBe(RECEIPT_CONFIRMATION_TEXT);
+    expect(statusOf(database, jobId)).toBe("SUBMITTED");
+    expect(listApplicationEvents(database, jobId).filter((event) => event.toStatus === "SUBMITTED").at(-1)?.detail)
+      .toBe(`Submitted with confirmation: ${RECEIPT_CONFIRMATION_TEXT}`);
     expect(verdictEvents(database, jobId)).toEqual([]);
     expect(storedActiveHolds(database, jobId)).toEqual([]);
     expect((await pass(database, dataDir, neverOpen)).started).toEqual([]);
@@ -2494,5 +2509,176 @@ describe("pnpm pipeline:retry --reopen-unsubmitted --candidate-verdict not-submi
     expect(box.connects()).toBe(0);
     expect(snapshot(database)).toEqual(before);
     database.close();
+  });
+
+  describe("Track 85: receipts mark possible submissions submitted", () => {
+    /** The Gmail watcher's context over the disposable database, as workspaceReceiptStore builds it; no Discord, no outcome store. */
+    function watcherContext(database: DatabaseSync, dataDir: string): MailContext {
+      return {
+        dataDir, log: () => {}, discord: null, candidateAddress: "candidate@example.test", secrets: [],
+        store: { appliedJobs: () => [], recordEvent: () => {} },
+        receipts: {
+          attempts: () => { refreshApplicationHolds(database, dataDir); return listApplicationReceiptAttempts(database); },
+          record: (attempt, result, proof, at) => recordApplicationReceipt(database, attempt, result, proof, attempt.attemptedAt, at)
+        }
+      };
+    }
+
+    /** Delivers these messages to the watcher, as on their arrival. */
+    async function arrive(database: DatabaseSync, dataDir: string, messages: FakeMessage[]): Promise<void> {
+      const session = await fakeMailbox(messages).connect();
+      await scanUids(session, messages.map((_, index) => index + 1), watcherContext(database, dataDir), { dryRun: false });
+    }
+
+    /** A second Northstar Systems possible submission on another posting with the same title (a synthetic run with an unknown capture). */
+    async function secondNorthstar(database: DatabaseSync, dataDir: string): Promise<BrowserRun> {
+      const run = failedSubmit(database, { company: "Northstar Systems", applicationUrl: "https://boards.greenhouse.io/northstar/jobs/9" });
+      await capture(database, dataDir, run, { outcome: "unknown", url: "https://boards.greenhouse.io/northstar/jobs/9", bodyText: "" });
+      return run;
+    }
+
+    const runStatus = (database: DatabaseSync, run: BrowserRun) => getBrowserRun(database, run.id)?.status;
+
+    it("marks the run submitted and the job SUBMITTED when the watcher records a trusted receipt on arrival", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDirectory("internship-agent-receipt85-");
+      const { jobId, run } = await possibleSubmission(database, dataDir);
+      await arrive(database, dataDir, [northstarReceipt(database, run)]);
+      const stored = getBrowserRun(database, run.id)!;
+      expect(stored.status).toBe("submitted");
+      expect(stored.confirmationText).toBe(RECEIPT_CONFIRMATION_TEXT);
+      expect(statusOf(database, jobId)).toBe("SUBMITTED");
+      expect(details(database, jobId).at(-1)).toBe(`Submitted with confirmation: ${RECEIPT_CONFIRMATION_TEXT}`);
+      expect(applicationReceiptConfirmed(database, run.id)).toBe(true);
+      expect(storedActiveHolds(database, jobId)).toEqual([]);
+      expect(holdTrace(database, jobId).slice(-2)).toEqual(["receipt-check", "resolved"]);
+      expect((await pass(database, dataDir, neverOpen)).started).toEqual([]);
+      database.close();
+    });
+
+    it("leaves the run failed and the job APPLYING for a receipt before the approval, an unrelated sender, or an ambiguous match", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDirectory("internship-agent-receipt85-");
+      const { jobId, run } = await possibleSubmission(database, dataDir);
+      const receipt = northstarReceipt(database, run);
+      await arrive(database, dataDir, [
+        { ...receipt, receivedAt: new Date(Date.parse(run.submissionApprovedAt!) - 60_000) },
+        { ...receipt, fromAddress: "careers@unrelated-employer.example", fromName: "Unrelated Employer", subject: "Application received" }
+      ]);
+      expect(runStatus(database, run)).toBe("failed");
+      expect(statusOf(database, jobId)).toBe("APPLYING");
+      expect(applicationReceiptConfirmed(database, run.id)).toBe(false);
+      expect(storedActiveHolds(database, jobId)).toEqual([{ runId: run.id, reason: "possible-submission" }]);
+
+      const other = await secondNorthstar(database, dataDir);
+      await arrive(database, dataDir, [receipt]);
+      expect(readApplicationReceiptCheck(database, run.id)?.result).toBe("ambiguous");
+      expect(readApplicationReceiptCheck(database, other.id)?.result).toBe("ambiguous");
+      for (const entry of [run, other]) {
+        expect(runStatus(database, entry)).toBe("failed");
+        expect(statusOf(database, entry.jobId)).toBe("APPLYING");
+      }
+      database.close();
+    });
+
+    it("skips a run still submitting and applies its trusted receipt once it is failed; never a cancelled run", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDirectory("internship-agent-receipt85-");
+      const { jobId, run } = await possibleSubmission(database, dataDir);
+      updateBrowserRun(database, run.id, { status: "submitting" });
+      receiptCheck(database, run, "confirmed");
+      expect(runStatus(database, run)).toBe("submitting");
+      expect(statusOf(database, jobId)).toBe("APPLYING");
+      expect(readApplicationReceiptCheck(database, run.id)?.result).toBe("confirmed");
+      expect(storedActiveHolds(database, jobId)).toEqual([]);
+      expect(promoteConfirmedReceiptRuns(database)).toEqual([]);
+      updateBrowserRun(database, run.id, { status: "failed" });
+      expect(promoteConfirmedReceiptRuns(database)).toEqual([{ jobId, runId: run.id }]);
+      expect(runStatus(database, run)).toBe("submitted");
+      expect(statusOf(database, jobId)).toBe("SUBMITTED");
+      expect(promoteConfirmedReceiptRuns(database)).toEqual([]);
+
+      const cancelledDatabase = disposableDatabase();
+      const cancelledDir = disposableDirectory("internship-agent-receipt85-");
+      const cancelled = await possibleSubmission(cancelledDatabase, cancelledDir);
+      updateBrowserRun(cancelledDatabase, cancelled.run.id, { status: "cancelled" });
+      receiptCheck(cancelledDatabase, cancelled.run, "confirmed");
+      expect(promoteConfirmedReceiptRuns(cancelledDatabase)).toEqual([]);
+      expect(runStatus(cancelledDatabase, cancelled.run)).toBe("cancelled");
+      expect(statusOf(cancelledDatabase, cancelled.jobId)).toBe("APPLYING");
+      cancelledDatabase.close();
+      database.close();
+    });
+
+    it("checks every open possible submission each pass: a receipt marks it submitted, none leaves it held and never retried", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDirectory("internship-agent-receipt85-");
+      const { jobId, run } = await possibleSubmission(database, dataDir);
+      const empty = fakeMailbox([]);
+      expect(await checkPendingSubmissionReceipts({ database, dataDir, connect: empty.connect }))
+        .toEqual({ pending: 1, mailbox: "checked", confirmed: [] });
+      expect(empty.connects()).toBe(1);
+      expect(readApplicationReceiptCheck(database, run.id)?.result).toBe("absent");
+      expect(runStatus(database, run)).toBe("failed");
+      expect(statusOf(database, jobId)).toBe("APPLYING");
+      expect((await pass(database, dataDir, neverOpen)).started).toEqual([]);
+
+      const box = fakeMailbox([northstarReceipt(database, run)]);
+      expect(await checkPendingSubmissionReceipts({ database, dataDir, connect: box.connect }))
+        .toEqual({ pending: 1, mailbox: "checked", confirmed: [{ jobId, runId: run.id, confirmation: RECEIPT_CONFIRMATION_TEXT }] });
+      expect(box.connects()).toBe(1);
+      expect(runStatus(database, run)).toBe("submitted");
+      expect(statusOf(database, jobId)).toBe("SUBMITTED");
+      const after = fakeMailbox([]);
+      expect(await checkPendingSubmissionReceipts({ database, dataDir, connect: after.connect }))
+        .toEqual({ pending: 0, mailbox: "none-pending", confirmed: [] });
+      expect(after.connects()).toBe(0);
+      database.close();
+    });
+
+    it("records nothing without a mailbox or when it cannot be read, and skips holds older than the receipt window", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDirectory("internship-agent-receipt85-");
+      const { jobId, run } = await possibleSubmission(database, dataDir);
+      expect(await checkPendingSubmissionReceipts({ database, dataDir, connect: null }))
+        .toEqual({ pending: 1, mailbox: "not-set-up", confirmed: [] });
+      expect(readApplicationReceiptCheck(database, run.id)).toBeNull();
+      const failing = fakeMailbox([], { fail: true });
+      expect(await checkPendingSubmissionReceipts({ database, dataDir, connect: failing.connect }))
+        .toEqual({ pending: 1, mailbox: "unavailable", confirmed: [] });
+      expect(failing.connects()).toBe(1);
+      expect(readApplicationReceiptCheck(database, run.id)).toBeNull();
+      const old = fakeMailbox([northstarReceipt(database, run)]);
+      const later = new Date(Date.parse(run.submissionApprovedAt!) + 15 * 86_400_000);
+      expect(await checkPendingSubmissionReceipts({ database, dataDir, connect: old.connect, now: later }))
+        .toEqual({ pending: 0, mailbox: "none-pending", confirmed: [] });
+      expect(old.connects()).toBe(0);
+      expect(runStatus(database, run)).toBe("failed");
+      expect(statusOf(database, jobId)).toBe("APPLYING");
+      database.close();
+
+      const quiet = disposableDatabase();
+      const quietDir = disposableDirectory("internship-agent-receipt85-");
+      seededJob(quiet);
+      const none = fakeMailbox([]);
+      expect(await checkPendingSubmissionReceipts({ database: quiet, dataDir: quietDir, connect: none.connect }))
+        .toEqual({ pending: 0, mailbox: "none-pending", confirmed: [] });
+      expect(none.connects()).toBe(0);
+      quiet.close();
+    });
+
+    it("backfills a trusted receipt recorded before the hold was refreshed, without a mailbox", async () => {
+      const database = disposableDatabase();
+      const dataDir = disposableDirectory("internship-agent-receipt85-");
+      const run = failedSubmit(database, { company: "Eastgate Labs", applicationUrl: "https://boards.greenhouse.io/eastgate/jobs/7" });
+      receiptCheck(database, run, "confirmed");
+      expect(runStatus(database, run)).toBe("failed");
+      expect(statusOf(database, run.jobId)).toBe("APPLYING");
+      expect(await checkPendingSubmissionReceipts({ database, dataDir, connect: null }))
+        .toEqual({ pending: 0, mailbox: "none-pending", confirmed: [{ jobId: run.jobId, runId: run.id, confirmation: RECEIPT_CONFIRMATION_TEXT }] });
+      expect(runStatus(database, run)).toBe("submitted");
+      expect(statusOf(database, run.jobId)).toBe("SUBMITTED");
+      database.close();
+    });
   });
 });

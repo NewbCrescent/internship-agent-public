@@ -14,7 +14,7 @@ import {
   normalizeQuestionText, QUICK_SKIP_REASONS, type BrowserRun, type PauseRecord
 } from "@internship-agent/domain";
 
-import { classifyOpenPauses, observeApplicationHolds } from "./application-holds";
+import { awaitsReceipt, classifyOpenPauses, observeApplicationHolds } from "./application-holds";
 import { discoveryTraceDirectory } from "./discovery-trace";
 import { redactNoticeText } from "./pass-notice";
 import { claimAgeHours, claimIsStale, readScoreboardClaims, scoreboardDirectory } from "./scoreboard-claims";
@@ -39,13 +39,15 @@ export const SNAPSHOT_RETENTION_COUNT = 200;
 const DAY_MS = 86_400_000;
 const LABEL_MAX = 140;
 
-export type BlockerCategory = "needs-candidate" | "needs-fix" | "site-safeguard";
+/** "awaiting-receipt" (Track 85): a policy submit held as a possible submission, which each pass checks for its receipt email. */
+export type BlockerCategory = "needs-candidate" | "needs-fix" | "site-safeguard" | "awaiting-receipt";
 export const BLOCKER_CATEGORY_WORDS: Record<BlockerCategory, string> = {
   "needs-candidate": "needs the candidate",
   "needs-fix": "needs a fix",
-  "site-safeguard": "site safeguard"
+  "site-safeguard": "site safeguard",
+  "awaiting-receipt": "waiting for a receipt"
 };
-const CATEGORY_ORDER: BlockerCategory[] = ["needs-fix", "needs-candidate", "site-safeguard"];
+const CATEGORY_ORDER: BlockerCategory[] = ["needs-fix", "needs-candidate", "site-safeguard", "awaiting-receipt"];
 
 export type BlockerKind = "question" | "missing-fact" | "saved-fact-unused" | "saved-answer-unused" | "document" |
   "field-correction" | "challenge" | "fault" | "stop" | "submit-hold" | "unconfirmed-submit";
@@ -82,6 +84,8 @@ export type ScoreboardChanges = {
 
 export type LastPassSummary = {
   finishedAt: string | null; submitted: number; held: number; ruledOut: number; stopped: number; waitingForSignIn: number; errors: number;
+  /** Policy submits the pass held as possible submissions until a receipt check (Track 85). */
+  awaitingReceipt: number;
 };
 
 export type Scoreboard = {
@@ -155,7 +159,7 @@ export function cleanCauseText(text: string, companyName?: string, options: { fi
   return clip(value.trim(), LABEL_MAX);
 }
 
-const STOP_PREFIX = /^(?:Automatic browser run (?:waiting|needs you|failed|stopped)|Automatic submission failed|Application hold):\s*/i;
+const STOP_PREFIX = /^(?:Automatic browser run (?:waiting|needs you|failed|stopped)|Automatic submission failed|Automatic submission held as a possible submission|Application hold):\s*/i;
 
 /** A stop or hold event's cause, with its source prefix, site, numbers, and quoted text removed. */
 export function normalizeStopReason(detail: string, companyName?: string): { key: string; label: string } {
@@ -346,12 +350,18 @@ function submitHoldCauses(
 }
 
 const UNCONFIRMED_LABEL = "a submit may have gone through: check for a receipt before any retry";
+/** Track 85: a policy submit held as a possible submission; every pass checks its receipt, so it needs neither the candidate nor a fix. */
+export const AWAITING_RECEIPT_LABEL = "submitted under the auto-submit policy on a site whose confirmation page is not captured: waiting for the employer's receipt email";
 
 function observationCauses(
   database: DatabaseSync, observation: HoldObservation, company: string, passHeld: Map<string, string[]>,
   facts: { factScopes: Set<string>; questionKeys: Set<string>; matches: ValueMatcher }
 ): Cause[] {
   if (observation.reason === "possible-submission") {
+    const held = observation.runId ? getBrowserRun(database, observation.runId) : null;
+    if (held && awaitsReceipt(database, held)) {
+      return [{ kind: "unconfirmed-submit", category: "awaiting-receipt", label: AWAITING_RECEIPT_LABEL, causeText: AWAITING_RECEIPT_LABEL }];
+    }
     return [{ kind: "unconfirmed-submit", category: "needs-fix", label: UNCONFIRMED_LABEL, causeText: UNCONFIRMED_LABEL }];
   }
   const run = observation.runId ? getBrowserRun(database, observation.runId) : null;
@@ -390,7 +400,7 @@ function readLastPass(dataDir: string): { summary: LastPassSummary; held: Map<st
       summary: {
         finishedAt: typeof status.finishedAt === "string" ? status.finishedAt : null,
         submitted: length("submitted"), held: length("held"), ruledOut: length("ruledOut"), stopped: length("stopped"),
-        waitingForSignIn: length("waitingForSignIn"), errors: length("errors")
+        waitingForSignIn: length("waitingForSignIn"), errors: length("errors"), awaitingReceipt: length("possibleSubmissions")
       },
       held
     };
@@ -444,7 +454,7 @@ const STAGES: Stage[] = ["stored", "qualified", "ruledOut", "started", "reachedS
 
 const TARGET_SKIP = "Not pursued for your target: ";
 const RUN_START = /^(?:Browser|Workday) run started automatically|^Automatic browser run (?:waiting|needs you|failed|stopped):/;
-const REACHED_SUBMIT = /^Submission approved |^Post-submit evidence saved|^Automatic submission failed/;
+const REACHED_SUBMIT = /^Submission approved |^Post-submit evidence saved|^Automatic submission failed|^Automatic submission held as a possible submission/;
 /** The 2026-11-21 closed-dialog relabel (RELABEL_CONFIRMATION in automatic-retry.ts) is not a confirmation. */
 const RELABEL = /\bmodal dialog closed after submit without errors\b/i;
 const QUICK_SKIPS: ReadonlySet<string> = new Set(Object.values(QUICK_SKIP_REASONS));
@@ -844,7 +854,7 @@ export function formatScoreboard(board: Scoreboard): string[] {
   if (board.lastPass) {
     const pass = board.lastPass;
     lines.push(`Last pass (finished ${pass.finishedAt ?? "unknown"}): submitted ${pass.submitted}, held ${pass.held}, ruled out ${pass.ruledOut}, `
-      + `stopped ${pass.stopped}, waiting for sign-in ${pass.waitingForSignIn}, errors ${pass.errors}`);
+      + `stopped ${pass.stopped}, waiting for sign-in ${pass.waitingForSignIn}, errors ${pass.errors}, waiting for a receipt ${pass.awaitingReceipt}`);
   }
   lines.push("");
   if (!board.holdsAvailable) lines.push("The hold tables are missing from this database (before migration 0033), so the blocker board is empty.");

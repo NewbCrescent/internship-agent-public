@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   createDatabase,
+  getFitInputVersion,
   getJobPosting,
   listApplicationEvents,
   listProjectEvidenceProfiles,
@@ -25,10 +26,11 @@ import {
   registerGitHubRepository,
   reviewEvidenceClaim,
   saveCandidateFact,
+  saveSemanticFit,
   seedDevelopmentData,
   updateBrowserRun
 } from "@internship-agent/db";
-import { AUTO_SUBMIT_EVENT, autoSubmitBlockers, NO_APPLICATION_CONTENT_BLOCKER, type BrowserField } from "@internship-agent/domain";
+import { AUTO_SUBMIT_EVENT, autoSubmitBlockers, NO_APPLICATION_CONTENT_BLOCKER, POSSIBLE_SUBMISSION_NOTE, type BrowserField } from "@internship-agent/domain";
 import {
   SUBMIT_TARGET_FIELD,
   SubmissionChallenged,
@@ -41,6 +43,7 @@ import {
   type VisibleChallenge
 } from "@internship-agent/browser";
 import {
+  advancePipeline,
   answerRunPause,
   approveApplication,
   approveRunSubmission,
@@ -521,6 +524,29 @@ describe("the auto-submit policy on sites whose confirmation page was never capt
     expect(after.status).toBe("paused-needs-input");
     expect(after.submissionApprovedAt).toBeNull();
     named.database.close();
+  });
+
+  it("reports a pass's policy submit on an unrecognized site as a held possible submission, never an error (Track 85)", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDataDir();
+    const jobId = approvedJobId(database, "qualified");
+    saveSemanticFit(database, jobId, getFitInputVersion(database, jobId), {
+      score: 86, rating: "STRONG", confidence: "MEDIUM", summary: "Fixture judgment.", strengths: [], gaps: [], unknowns: ["Applicant pool."],
+      decisions: [], unknownCount: 1, model: "fixture", evaluatedAt: new Date().toISOString(), version: 2
+    });
+    const pages = opener(() => onePage());
+    const settings = { minFit: 0, autoApply: true, target: { season: "summer", year: 2027 } as const, autoSubmit: { minFit: 80, dailyCap: 5 } };
+    const report = await advancePipeline({ database, dataDir, settings, voiceDrafter: null, renderPdf, openPage: pages.openPage, submitWait: QUICK });
+    const run = getBrowserRuns(jobId, database)[0]!;
+    expect(report.errors).toEqual([]);
+    expect(report.submitted).toEqual([]);
+    expect(report.possibleSubmissions).toEqual([{ jobId, runId: run.id, reason: expect.stringContaining("held as a possible submission") }]);
+    const notes = listApplicationEvents(database, jobId).map((event) => event.detail ?? "");
+    expect(notes.filter((detail) => detail.startsWith(POSSIBLE_SUBMISSION_NOTE))).toHaveLength(1);
+    expect(notes.some((detail) => detail.startsWith("Automatic submission failed: "))).toBe(false);
+    expect(pages.opened.flatMap((opened) => opened.state.submitClicks)).toEqual([1]);
+    expectPossibleSubmission(database, dataDir, jobId, run.id);
+    database.close();
   });
 
   it("leaves the candidate's own approval unchanged: a recognized confirmation marks it submitted", async () => {

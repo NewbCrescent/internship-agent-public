@@ -1,6 +1,8 @@
+import type { DatabaseSync } from "node:sqlite";
+
 import {
-  closeProfileDatabase, getProfileDatabase, listApplicationReceiptAttempts, recordApplicationReceipt,
-  type ApplicationReceiptAttempt, type ReceiptResult
+  closeProfileDatabase, getBrowserRun, getProfileDatabase, listApplicationReceiptAttempts, promoteConfirmedReceiptRuns,
+  recordApplicationReceipt, RECEIPT_CONFIRMATION_TEXT, type ApplicationReceiptAttempt, type ReceiptResult
 } from "@internship-agent/db";
 import type { WorkspaceProfile } from "@internship-agent/domain";
 
@@ -138,6 +140,70 @@ async function within<T>(operation: Promise<T>, deadline: number): Promise<T> {
   } finally { clearTimeout(timer); }
 }
 
+/** Connects within the deadline; a session that connects after it is closed. */
+async function openSession(connect: MailSessionFactory, deadline: number): Promise<MailSession> {
+  const connecting = connect();
+  try { return await within(connecting, deadline); }
+  catch (error) {
+    void connecting.then((opened) => opened.close()).catch(() => undefined);
+    throw error;
+  }
+}
+
+type ReceiptOutcome = { result: ReceiptResult; proof: string | null };
+
+/**
+ * Scans one mailbox session for the receipts of these targets (pending attempts with a run): headers of the newest
+ * MAX_UIDS messages since the earliest attempt (and the window), then bounded bodies only for messages a target's
+ * trusted sender sent after its attempt, at most MAX_BODIES in all. Throws on any mailbox error.
+ */
+async function scanForReceipts(
+  session: MailSession,
+  targets: ReadonlyArray<ApplicationReceiptAttempt>,
+  attempts: ReadonlyArray<ApplicationReceiptAttempt>,
+  earliest: number,
+  deadline: number
+): Promise<Map<string, ReceiptOutcome>> {
+  const outcomes = new Map<string, ReceiptOutcome>();
+  for (const target of targets) {
+    outcomes.set(target.runId ?? "", { result: Date.parse(target.attemptedAt) < earliest ? "truncated" : "absent", proof: null });
+  }
+  const outcomeOf = (target: ApplicationReceiptAttempt): ReceiptOutcome => outcomes.get(target.runId ?? "") as ReceiptOutcome;
+  const unconfirmed = () => targets.filter((target) => outcomeOf(target).result !== "confirmed");
+  const truncateAll = () => { for (const target of unconfirmed()) outcomeOf(target).result = "truncated"; };
+  if (targets.length === 0) return outcomes;
+  const first = Math.min(...targets.map((target) => Date.parse(target.attemptedAt)));
+  const uids = await within(session.uidsAfter(0, { since: new Date(Math.max(earliest, first)) }), deadline);
+  if (uids.length > MAX_UIDS) truncateAll();
+  let bodies = 0;
+  const selected = uids.slice(-MAX_UIDS);
+  scan: for (let offset = 0; offset < selected.length; offset += 50) {
+    const batch = selected.slice(offset, offset + 50);
+    const headers = await within(session.headers(batch), deadline);
+    if (headers.length !== batch.length) truncateAll();
+    for (const header of headers) {
+      const relevant = unconfirmed().filter((target) => receiptHeaderRelevant(header, [target]));
+      if (relevant.length === 0) continue;
+      if (bodies >= MAX_BODIES) { truncateAll(); break scan; }
+      bodies += 1;
+      const { body, truncated } = session.bodyForReceipt
+        ? await within(session.bodyForReceipt(header.uid, BODY_BYTES), deadline)
+        : { body: await within(session.bodyText(header.uid, BODY_BYTES), deadline), truncated: false };
+      if (truncated) for (const target of relevant) outcomeOf(target).result = "truncated";
+      const matches = evaluateSubmissionReceipt({ header, body, truncated, uidValidity: session.uidValidity, attempts });
+      for (const target of relevant) {
+        const outcome = outcomeOf(target);
+        const match = matches.find(({ attempt }) => attempt.runId === target.runId);
+        if (match?.result === "confirmed") { outcome.result = "confirmed"; outcome.proof = match.proofRef; }
+        else if (match?.result === "ambiguous" && outcome.result !== "truncated") outcome.result = "ambiguous";
+        else if (match?.result === "truncated") outcome.result = "truncated";
+      }
+      if (unconfirmed().length === 0) break scan;
+    }
+  }
+  return outcomes;
+}
+
 export async function catchUpSubmissionReceipt(input: {
   runId: string; store: ReceiptStore; connect: MailSessionFactory | null; now?: Date;
 }): Promise<ReceiptResult | null> {
@@ -146,43 +212,16 @@ export async function catchUpSubmissionReceipt(input: {
   if (!target) return null;
   const now = input.now ?? new Date();
   const deadline = Date.now() + MAX_CHECK_MS;
-  const attemptedAt = Date.parse(target.attemptedAt);
   const earliest = now.getTime() - MAX_DAYS * 86_400_000;
-  let result: ReceiptResult = attemptedAt < earliest ? "truncated" : "absent";
+  let result: ReceiptResult;
   let proof: string | null = null;
   let session: MailSession | undefined;
   try {
     if (!input.connect) throw new Error("receipt mailbox unavailable");
-    const connecting = input.connect();
-    try { session = await within(connecting, deadline); }
-    catch (error) {
-      void connecting.then((opened) => opened.close()).catch(() => undefined);
-      throw error;
-    }
-    const uids = await within(session.uidsAfter(0, { since: new Date(Math.max(earliest, attemptedAt)) }), deadline);
-    if (uids.length > MAX_UIDS) result = "truncated";
-    let bodies = 0;
-    const selected = uids.slice(-MAX_UIDS);
-    for (let offset = 0; offset < selected.length; offset += 50) {
-      const batch = selected.slice(offset, offset + 50);
-      const headers = await within(session.headers(batch), deadline);
-      if (headers.length !== batch.length) result = "truncated";
-      for (const header of headers) {
-        if (!receiptHeaderRelevant(header, [target])) continue;
-        if (bodies >= MAX_BODIES) { result = "truncated"; break; }
-        bodies += 1;
-        const { body, truncated } = session.bodyForReceipt
-          ? await within(session.bodyForReceipt(header.uid, BODY_BYTES), deadline)
-          : { body: await within(session.bodyText(header.uid, BODY_BYTES), deadline), truncated: false };
-        if (truncated) result = "truncated";
-        const match = evaluateSubmissionReceipt({ header, body, truncated, uidValidity: session.uidValidity, attempts })
-          .find(({ attempt }) => attempt.runId === target.runId);
-        if (match?.result === "confirmed") { result = "confirmed"; proof = match.proofRef; break; }
-        if (match?.result === "ambiguous" && result !== "truncated") result = "ambiguous";
-        if (match?.result === "truncated") result = "truncated";
-      }
-      if (result === "confirmed") break;
-    }
+    session = await openSession(input.connect, deadline);
+    const outcome = (await scanForReceipts(session, [target], attempts, earliest, deadline)).get(input.runId) as ReceiptOutcome;
+    result = outcome.result;
+    proof = outcome.proof;
   } catch {
     result = "unavailable";
     proof = null;
@@ -191,4 +230,56 @@ export async function catchUpSubmissionReceipt(input: {
   }
   input.store.record(target, result, proof, now.toISOString());
   return result;
+}
+
+export type PendingReceiptCheck = {
+  /** Open possible-submission holds attempted within the receipt window (14 days). */
+  pending: number;
+  /** "none-pending": nothing to check; "not-set-up": no mailbox; "unavailable": it could not be read (nothing recorded). */
+  mailbox: "checked" | "none-pending" | "not-set-up" | "unavailable";
+  /** Applications this call marked submitted on a trusted receipt (backfilled ones first). */
+  confirmed: Array<{ jobId: string; runId: string; confirmation: string }>;
+};
+
+/**
+ * Track 85: the receipt check every pipeline pass runs. It first marks submitted the runs whose trusted receipt was
+ * recorded earlier (`promoteConfirmedReceiptRuns`), then checks every open possible-submission hold attempted within
+ * the last 14 days in one mailbox session. It is read-only on the mailbox (headers, then bounded bodies only for
+ * messages from a trusted sender after the attempt, with the single-run check's bounds), never retries a run, and
+ * marks nothing submitted without a trusted receipt. Nothing is recorded when the mailbox is not set up or unreadable.
+ */
+export async function checkPendingSubmissionReceipts(input: {
+  database: DatabaseSync; dataDir: string; connect: MailSessionFactory | null; now?: Date;
+}): Promise<PendingReceiptCheck> {
+  const { database } = input;
+  const now = input.now ?? new Date();
+  const confirmed: PendingReceiptCheck["confirmed"] = promoteConfirmedReceiptRuns(database)
+    .map((entry) => ({ ...entry, confirmation: RECEIPT_CONFIRMATION_TEXT }));
+  refreshApplicationHolds(database, input.dataDir, now);
+  const attempts = listApplicationReceiptAttempts(database);
+  const earliest = now.getTime() - MAX_DAYS * 86_400_000;
+  const targets = attempts.filter((attempt) => attempt.pending && attempt.runId && Date.parse(attempt.attemptedAt) >= earliest);
+  const pending = targets.length;
+  if (pending === 0) return { pending: 0, mailbox: "none-pending", confirmed };
+  if (!input.connect) return { pending, mailbox: "not-set-up", confirmed };
+  const deadline = Date.now() + MAX_CHECK_MS;
+  let session: MailSession | undefined;
+  let outcomes: Map<string, ReceiptOutcome>;
+  try {
+    session = await openSession(input.connect, deadline);
+    outcomes = await scanForReceipts(session, targets, attempts, earliest, deadline);
+  } catch {
+    return { pending, mailbox: "unavailable", confirmed };
+  } finally {
+    if (session) void session.close().catch(() => undefined);
+  }
+  for (const target of targets) {
+    const runId = target.runId as string;
+    const outcome = outcomes.get(runId);
+    if (!outcome) continue;
+    recordApplicationReceipt(database, target, outcome.result, outcome.proof, target.attemptedAt, now.toISOString());
+    const run = outcome.result === "confirmed" ? getBrowserRun(database, runId) : null;
+    if (run?.status === "submitted") confirmed.push({ jobId: target.jobId, runId, confirmation: run.confirmationText ?? RECEIPT_CONFIRMATION_TEXT });
+  }
+  return { pending, mailbox: "checked", confirmed };
 }

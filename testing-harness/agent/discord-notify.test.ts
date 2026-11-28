@@ -279,6 +279,22 @@ describe("pass notice items", () => {
     expect(text.startsWith("Internship agent: 5 new updates\n\nHeld for you:")).toBe(true);
   });
 
+  it("lists a policy submit held as a possible submission once under its own section, never under errors (Track 85)", () => {
+    const report = emptyReport();
+    report.submitted = [{ jobId: JOB_SENT, confirmation: "Thanks" }];
+    report.possibleSubmissions = [{ jobId: JOB_FAILED, runId: RUN_HELD, reason: "The auto-submit policy clicked the final submit of the application at x.test." }];
+    const items = passNoticeItems(report, { ...lookupFor({}), holds: [] });
+    const awaiting = items.filter((entry) => entry.section === "awaiting");
+    expect(awaiting.map((entry) => entry.key)).toEqual([`possible:${RUN_HELD}`]);
+    expect(awaiting[0]!.lines[0]).toBe(`• Company ${JOB_FAILED.slice(0, 4)} — Software Engineer Intern (run ${RUN_HELD.slice(0, 8)})`);
+    expect(items.some((entry) => entry.section === "errors")).toBe(false);
+    const text = formatNotice(items);
+    expect(text).toContain("Sent, waiting for the receipt email:");
+    expect(text).toContain("It is never sent again.");
+    expect(text).not.toContain("Errors:");
+    expect(text.indexOf("Sent:")).toBeLessThan(text.indexOf("Sent, waiting for the receipt email:"));
+  });
+
   it("says a sent item's record was saved locally, never its path or file", () => {
     const report = emptyReport();
     report.submitted = [{ jobId: JOB_SENT, confirmation: "Thanks" }, { jobId: JOB_HELD, confirmation: "Thanks" }];

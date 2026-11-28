@@ -22,9 +22,11 @@ import type { PipelineReport } from "./pipeline-orchestrator";
  * confirmations are never read. A sent item may add that its local record
  * was saved; the record itself is never read or attached. A held or sent
  * posting pursued on AI fit adds a line listing its unverified requirements
- * (requirement text only).
+ * (requirement text only). A policy submit held as a possible submission until
+ * a receipt check is listed once per run under "Sent, waiting for the receipt
+ * email:", never under errors (Track 85).
  */
-export type NoticeSection = "held" | "sent" | "stopped" | "errors";
+export type NoticeSection = "held" | "sent" | "awaiting" | "stopped" | "errors";
 export type NoticeItem = { key: string; section: NoticeSection; lines: string[]; hold?: ApplicationHold };
 /** Only what a notice may show: no answers, drafts, or question rewordings. */
 export type NoticePause = { label: string; status: "open" | "answered"; safeguard: boolean; sensitive: boolean; upload: boolean; fieldId?: string };
@@ -114,6 +116,16 @@ export function passNoticeItems(report: PipelineReport, lookup: NoticeLookup): N
     lines.push(...pursuedLines(entry.jobId));
     add({ key: `submitted:${entry.jobId}`, section: "sent", lines });
   }
+  for (const entry of report.possibleSubmissions ?? []) {
+    add({
+      key: `possible:${entry.runId}`,
+      section: "awaiting",
+      lines: [
+        `• ${name(entry.jobId)} (run ${ref(entry.runId)})`,
+        "  Submitted under the auto-submit policy; this site's confirmation page is not known yet, so it counts as submitted once the employer's receipt email is found (checked every pass). It is never sent again."
+      ]
+    });
+  }
   if (lookup.holds) return items;
   for (const entry of report.stopped) {
     add({
@@ -173,6 +185,7 @@ export function passFailureItem(error: unknown): NoticeItem {
 const SECTION_TITLES: Array<[NoticeSection, string]> = [
   ["held", "Held for you:"],
   ["sent", "Sent:"],
+  ["awaiting", "Sent, waiting for the receipt email:"],
   ["stopped", "Stopped:"],
   ["errors", "Errors:"]
 ];

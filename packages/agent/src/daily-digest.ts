@@ -19,9 +19,9 @@ import {
   resolveProfileDataDirectory,
   type ApplicationHold
 } from "@internship-agent/db";
-import type { WorkspaceProfile } from "@internship-agent/domain";
+import { autoSubmitBlockers, NO_APPLICATION_CONTENT_BLOCKER, type WorkspaceProfile } from "@internship-agent/domain";
 
-import { acquireHoldDeliveryGuard, candidateDeliveryRecipient, classifyOpenPauses, classifyRunHold, observeApplicationHolds, refreshApplicationHolds } from "./application-holds";
+import { acquireHoldDeliveryGuard, awaitsReceipt, candidateDeliveryRecipient, classifyOpenPauses, classifyRunHold, observeApplicationHolds, refreshApplicationHolds } from "./application-holds";
 
 import { discordFailureStatus, discordSettings, sendDiscordDm, type DiscordSettings, type DiscordTransport } from "./discord-notify";
 import { verificationSubject } from "./mail-outcomes";
@@ -50,6 +50,8 @@ export type DigestRun = {
   suggestedAtsKind?: string | null;
   submissionApprovedAt?: string | null;
   voiceDraft: boolean; pauses: ReadonlyArray<DigestPause>;
+  /** The run's auto-submit blockers include NO_APPLICATION_CONTENT_BLOCKER (Track 85): it is held, not ready. */
+  noApplicationContent?: boolean;
 };
 export type ReplyKind = "assessment" | "interview" | "offer" | "rejection" | "recruiter";
 /** What the digest reads: postings being applied to with their latest run, and what happened since the last digest. */
@@ -59,6 +61,8 @@ export type DigestSnapshot = {
   resumeTooLong: number;
   holdDelivery?: boolean;
   sent: ReadonlyArray<{ jobId: string; companyName: string }>;
+  /** Policy submits held as possible submissions until a receipt check (Track 85); not counted as being fixed. */
+  awaitingReceipt?: ReadonlyArray<{ jobId: string; companyName: string }>;
   replies: ReadonlyArray<{ companyName: string; kind: ReplyKind }>;
 };
 export type DigestEntry = { number: number; runId: string; jobId: string; company: string };
@@ -128,7 +132,9 @@ export function buildDigest(snapshot: DigestSnapshot, now: Date): Digest | null 
     if (hold.kind === "fixing") { fixing += 1; continue; }
     const company = plain(job.companyName, 40);
     const parts: string[] = [];
-    if (hold.ready) {
+    if (hold.ready && job.run.noApplicationContent) {
+      parts.push(`held, not ready: the form has no resume and not your name with your email, so it may be a newsletter or sign-up box; check it before you say "send ${company}"`);
+    } else if (hold.ready) {
       parts.push(hold.voiceDraft ? `ready, check the drafted answer, then say "send ${company}"` : `ready, say "send ${company}"`);
     } else {
       if (hold.captcha) parts.push(hold.asks.length === 0 && !hold.corrections?.length ? "solve a CAPTCHA, the only step left for you" : "solve a CAPTCHA");
@@ -155,12 +161,14 @@ export function buildDigest(snapshot: DigestSnapshot, now: Date): Digest | null 
     const companies = snapshot.replies.filter((reply) => reply.kind === kind).map((reply) => plain(reply.companyName, 40));
     return companies.length ? [`${companies.length} ${companies.length === 1 ? one : many} (${names(companies)})`] : [];
   });
-  // Only the fixing count is not worth a message on its own.
+  const awaiting = (snapshot.awaitingReceipt ?? []).map((entry) => plain(entry.companyName, 40));
+  // Only the fixing count, or the count waiting for a receipt email, is not worth a message on its own.
   if (waiting.length === 0 && sent.length === 0 && replies.length === 0) return null;
 
   const date = now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }).replace(/,/g, "");
   const lines = [`📋 Daily internship update — ${date}`];
   if (sent.length) lines.push(`Sent since last update: ${sent.length} (${names(sent)})`);
+  if (awaiting.length) lines.push(`Sent, waiting for the employer's receipt email: ${awaiting.length} (${names(awaiting)})`);
   const shown = waiting.slice(0, MAX_ITEMS);
   if (waiting.length) {
     lines.push(`Waiting on you (${waiting.length}):`, ...shown.map((item) => item.line));
@@ -185,16 +193,21 @@ export function collectDigestSnapshot(database: DatabaseSync, sinceIso: string):
   const jobs = listAppliedJobsForMail(database);
   const applying: Array<DigestSnapshot["applying"][number]> = [];
   const sent: Array<DigestSnapshot["sent"][number]> = [];
+  const awaitingReceipt: Array<{ jobId: string; companyName: string }> = [];
   const replies: Array<DigestSnapshot["replies"][number]> = [];
   for (const job of jobs) {
-    if (job.status === "APPLYING") {
-      const run = listBrowserRuns(database, job.id)[0];
+    const latest = job.status === "APPLYING" ? listBrowserRuns(database, job.id)[0] : undefined;
+    // Track 85: a policy submit held as a possible submission waits for its receipt email; it is not being fixed.
+    if (latest && awaitsReceipt(database, latest)) awaitingReceipt.push({ jobId: job.id, companyName: job.companyName });
+    else if (job.status === "APPLYING") {
+      const run = latest;
       applying.push({
         jobId: job.id, companyName: job.companyName, title: job.title,
         run: run ? {
           id: run.id, status: run.status, atsConfirmed: run.atsConfirmed, suggestedAtsKind: run.suggestedAtsKind, submissionApprovedAt: run.submissionApprovedAt,
           voiceDraft: run.decisions.some((decision) => decision.basis?.kind === "voice_draft"),
-          pauses: run.pauses.map(({ label, status, safeguard, upload, fieldId }) => ({ label, status, safeguard, upload, fieldId }))
+          pauses: run.pauses.map(({ label, status, safeguard, upload, fieldId }) => ({ label, status, safeguard, upload, fieldId })),
+          noApplicationContent: autoSubmitBlockers(run).includes(NO_APPLICATION_CONTENT_BLOCKER)
         } : null
       });
     }
@@ -214,7 +227,7 @@ export function collectDigestSnapshot(database: DatabaseSync, sinceIso: string):
     const last = listApplicationEvents(database, job.id).at(-1);
     if (last?.detail && AUTOMATIC_FAILURE.test(last.detail)) resumeTooLong += 1;
   }
-  return { applying, resumeTooLong, sent, replies };
+  return { applying, resumeTooLong, sent, awaitingReceipt, replies };
 }
 
 const stateSchema = z.object({

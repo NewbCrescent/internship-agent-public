@@ -144,3 +144,18 @@ export function autoSubmitBlockers(run: RunForAutoSubmit): string[] {
 export function uncapturedSiteRun(run: { atsKind: string; decisions: ReadonlyArray<{ fieldId?: string }>; pauses?: ReadonlyArray<{ fieldId: string }> }): boolean {
   return isSteppedRun(run) || !atsConfirmationCaptured(run.atsKind);
 }
+
+/**
+ * Track 85: the timeline note of a policy submit held as a possible submission (`SubmissionUnverified`) until a
+ * receipt check. It is not a failure.
+ */
+export const POSSIBLE_SUBMISSION_NOTE = "Automatic submission held as a possible submission: ";
+
+// Track 80 logged the same hold as a failure; every `unverifiedSubmission` message starts with this text.
+const LEGACY_POSSIBLE_SUBMISSION_NOTE = /^Automatic submission failed: The auto-submit policy clicked the final submit of /;
+
+/** Track 85: whether a timeline note records a policy submit held as a possible submission (either note form). Pure. */
+export function isPossibleSubmissionNote(detail: string | null | undefined): boolean {
+  if (typeof detail !== "string") return false;
+  return detail.startsWith(POSSIBLE_SUBMISSION_NOTE) || LEGACY_POSSIBLE_SUBMISSION_NOTE.test(detail);
+}

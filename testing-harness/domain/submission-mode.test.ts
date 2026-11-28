@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { aiReviewMatchLabel, aiReviewMatchReason, atsConfirmationCaptured, autoSubmitBlockers, hasApplicationContent, isAiReviewMatchReason, autoSubmitSettings, manualOnly, NO_APPLICATION_CONTENT_BLOCKER, SITE_VALUE_KEPT_REASON, uncapturedSiteRun, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
+import { aiReviewMatchLabel, aiReviewMatchReason, atsConfirmationCaptured, autoSubmitBlockers, hasApplicationContent, isAiReviewMatchReason, isPossibleSubmissionNote, autoSubmitSettings, manualOnly, NO_APPLICATION_CONTENT_BLOCKER, POSSIBLE_SUBMISSION_NOTE, SITE_VALUE_KEPT_REASON, uncapturedSiteRun, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
 
 /** Track 80: the candidate's name and email from the profile, the application content an unconfirmed run needs. */
 const NAME_AND_EMAIL = [
@@ -192,12 +192,22 @@ describe("auto-submit policy", () => {
   });
 
   it("names the kinds whose confirmation page was captured, and the runs on any other site (Track 80)", () => {
-    for (const kind of ["greenhouse", "lever", "workday", "handshake", "ashby", "dover"]) expect(atsConfirmationCaptured(kind)).toBe(true);
+    // Track 85: Workable joins on the success text from its public bundle that the fixture regression reads.
+    for (const kind of ["greenhouse", "lever", "workday", "handshake", "ashby", "dover", "workable"]) expect(atsConfirmationCaptured(kind)).toBe(true);
     for (const kind of ["oracle", "paylocity", "unknown", null]) expect(atsConfirmationCaptured(kind)).toBe(false);
     expect(uncapturedSiteRun({ atsKind: "greenhouse", decisions: [{ fieldId: "email" }] })).toBe(false);
     expect(uncapturedSiteRun({ atsKind: "oracle", decisions: [{ fieldId: "email" }] })).toBe(true);
     expect(uncapturedSiteRun({ atsKind: "unknown", decisions: [{ fieldId: "email" }] })).toBe(true);
     expect(uncapturedSiteRun({ atsKind: "paylocity", decisions: [] })).toBe(true);
     expect(uncapturedSiteRun({ atsKind: "greenhouse", decisions: [{ fieldId: "step-1::email" }] })).toBe(true);
+    expect(uncapturedSiteRun({ atsKind: "workable", decisions: [] })).toBe(false);
+  });
+
+  it("reads a policy submit held as a possible submission from its note, in either form (Track 85)", () => {
+    expect(isPossibleSubmissionNote(`${POSSIBLE_SUBMISSION_NOTE}The auto-submit policy clicked the final submit of the application at x.example.`)).toBe(true);
+    expect(isPossibleSubmissionNote("Automatic submission failed: The auto-submit policy clicked the final submit of the application at x.example and the page read as a confirmation.")).toBe(true);
+    expect(isPossibleSubmissionNote("Automatic submission failed: The site did not load.")).toBe(false);
+    expect(isPossibleSubmissionNote(null)).toBe(false);
+    expect(isPossibleSubmissionNote(undefined)).toBe(false);
   });
 });

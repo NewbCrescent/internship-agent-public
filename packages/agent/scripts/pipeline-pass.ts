@@ -18,6 +18,8 @@ import { notifyPass, passNoticeItems, type NoticeItem } from "../src/pass-notice
 import { recordApplicationHoldFailures, refreshApplicationHolds } from "../src/application-holds";
 import { dailyDigestTick, type DigestTickOptions } from "../src/daily-digest";
 import { passBoardLine, refreshScoreboardSnapshot } from "../src/pipeline-scoreboard";
+import { checkPendingSubmissionReceipts, type PendingReceiptCheck } from "../src/submission-receipts";
+import { gmailMailSessionFactory } from "../src/gmail-mailbox";
 
 export type PassLog = (line: string) => void;
 
@@ -44,6 +46,8 @@ export async function runPipelinePass(options: {
   discoveryClock?: () => number;
   /** Tests replace the end-of-pass board refresh; production runs refreshScoreboardSnapshot. */
   scoreboard?: typeof refreshScoreboardSnapshot;
+  /** Tests replace the receipt check; production runs checkPendingSubmissionReceipts with the Gmail mailbox (none when unset). */
+  receipts?: (input: { database: DatabaseSync; dataDir: string }) => Promise<PendingReceiptCheck>;
 }): Promise<PipelineReport> {
   const { profile, log } = options;
   const dataDir = resolveProfileDataDirectory(profile);
@@ -111,6 +115,20 @@ export async function runPipelinePass(options: {
     if (deferredLine) log(deferredLine);
     const report = await (options.advance ?? advancePipeline)({ database, dataDir, settings, retryStopped: options.retryStopped, analyzeLeftovers: false });
     const name = (jobId: string) => describe(database, jobId);
+    // Track 85: every pass checks the open possible submissions for the employer's receipt (read-only); a failure is one line.
+    try {
+      const check = await (options.receipts ?? ((input) => checkPendingSubmissionReceipts({ ...input, connect: gmailMailSessionFactory() })))({ database, dataDir });
+      const confirmedRuns = new Set(check.confirmed.map((entry) => entry.runId));
+      for (const entry of check.confirmed) {
+        if (!report.submitted.some((submitted) => submitted.jobId === entry.jobId)) report.submitted.push({ jobId: entry.jobId, confirmation: entry.confirmation });
+      }
+      if (report.possibleSubmissions) report.possibleSubmissions = report.possibleSubmissions.filter((entry) => !confirmedRuns.has(entry.runId));
+      const line = receiptCheckLine(check);
+      if (line) log(line);
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : error instanceof Error ? error.name : "unexpected error";
+      log(`Receipts: not checked (${code.slice(0, 40)}); the pass is unaffected.`);
+    }
     log(`Analyzed ${report.analyzed.length} left over; prepared ${report.prepared.length}; browser runs started ${report.started.length}; ` +
       `submitted ${report.submitted.length}; held for you ${report.held.length}; ruled out ${report.skipped.length}; stopped ${report.stopped.length}.`);
     for (const entry of report.submitted) log(`  SUBMITTED ${name(entry.jobId)}: ${entry.confirmation.replace(/\s+/g, " ").slice(0, 160)}`);
@@ -122,6 +140,7 @@ export async function runPipelinePass(options: {
     for (const entry of report.started) log(`  run ${name(entry.jobId)}: ${entry.runStatus}`);
     for (const entry of report.continued ?? []) log(`  continued ${name(entry.jobId)}: ${entry.runStatus}`);
     for (const entry of report.stopped) log(`  stopped ${name(entry.jobId)}: ${entry.reason.replace(/\s+/g, " ").slice(0, 300)}`);
+    for (const entry of report.possibleSubmissions ?? []) log(`  sent, waiting for its receipt ${name(entry.jobId)}: ${entry.reason.replace(/\s+/g, " ").slice(0, 300)}`);
     const workdayWaiting = report.waiting.filter((entry) => entry.reason.startsWith("workday"));
     const icimsWaiting = report.waiting.filter((entry) => entry.reason === "icims-account");
     if (workdayWaiting.length) {
@@ -137,6 +156,7 @@ export async function runPipelinePass(options: {
       held: report.held.map((entry) => ({ job: name(entry.jobId), jobId: entry.jobId, reasons: entry.reasons })),
       ruledOut: report.skipped.map((entry) => ({ job: name(entry.jobId), jobId: entry.jobId, reasons: entry.reasons })),
       stopped: report.stopped.map((entry) => ({ job: name(entry.jobId), jobId: entry.jobId, reason: entry.reason.slice(0, 500) })),
+      possibleSubmissions: (report.possibleSubmissions ?? []).map((entry) => ({ job: name(entry.jobId), jobId: entry.jobId, runId: entry.runId, reason: entry.reason.slice(0, 500) })),
       waitingForSignIn: report.waiting.map((entry) => ({ job: name(entry.jobId), jobId: entry.jobId, site: entry.siteKey })),
       pursuedOnFit: report.prepared.flatMap((entry) => entry.pursuedOnFit
         ? [{ job: name(entry.jobId), jobId: entry.jobId, fit: entry.pursuedOnFit.score, unverified: entry.pursuedOnFit.unverified }]
@@ -243,6 +263,16 @@ function describe(database: DatabaseSync, jobId: string): string {
 
 export function statusPath(dataDir: string): string {
   return join(dataDir, "pipeline-status.json");
+}
+
+/** The pass log's receipt-check line, or null when nothing was pending and nothing was marked submitted. */
+function receiptCheckLine(check: PendingReceiptCheck): string | null {
+  if (check.mailbox === "checked") {
+    return `Receipts: checked ${check.pending} possible submission(s) for an employer receipt; ${check.confirmed.length} marked submitted.`;
+  }
+  if (check.mailbox === "not-set-up") return `Receipts: ${check.pending} possible submission(s) wait for a receipt check; the Gmail mailbox is not set up.`;
+  if (check.mailbox === "unavailable") return `Receipts: ${check.pending} possible submission(s) wait for a receipt check; the mailbox could not be read.`;
+  return check.confirmed.length > 0 ? `Receipts: ${check.confirmed.length} application(s) with a trusted receipt marked submitted.` : null;
 }
 
 function writeStatus(dataDir: string, status: unknown): void {

@@ -18,11 +18,12 @@ import {
   saveCandidateFact,
   saveQuestionAnswer
 } from "@internship-agent/db";
-import { normalizeAnswerText, type BrowserRun, type FillDecision, type PauseRecord } from "@internship-agent/domain";
+import { normalizeAnswerText, POSSIBLE_SUBMISSION_NOTE, type BrowserRun, type FillDecision, type PauseRecord } from "@internship-agent/domain";
 
 import { runScoreboardCommand } from "../../packages/agent/scripts/pipeline-scoreboard";
 import { ANSWERED_CONTINUE_FAILURE } from "../../packages/agent/src/continued-auto-submit";
 import {
+  AWAITING_RECEIPT_LABEL,
   blockerId,
   buildScoreboard,
   normalizeStopReason,
@@ -285,7 +286,7 @@ describe("blocker board", () => {
       ['saved answer not used: "do you have a driver s license"', "needs-fix", 1, 0]
     ]);
     expect(result.blockers.map((blocker) => blocker.kind)).toEqual(["question", "fault", "saved-fact-unused", "missing-fact", "challenge", "saved-answer-unused"]);
-    expect(result.byCategory).toEqual({ "needs-fix": 3, "needs-candidate": 3, "site-safeguard": 1 });
+    expect(result.byCategory).toEqual({ "needs-fix": 3, "needs-candidate": 3, "site-safeguard": 1, "awaiting-receipt": 0 });
     expect(result.blockers.find((blocker) => blocker.kind === "fault")!.owner).toEqual(["manager"]);
     expect(stopReasonCategory(normalizeStopReason("Automatic browser run stopped: iCIMS careers-acme.icims.com: the site showed a CAPTCHA before the form.").label)).toBe("site-safeguard");
     expect(stopReasonCategory(normalizeStopReason("Automatic browser run failed: locator.click: Timeout 30000ms exceeded.").label)).toBe("needs-fix");
@@ -294,6 +295,28 @@ describe("blocker board", () => {
     expect(text).toContain(`Biggest blocker: [${result.blockers[0]!.id}] question: "what is your favorite color" — 2 applications (needs the candidate)`);
     expect(text).toContain(`1. [${result.blockers[0]!.id}] [needs the candidate] question: "what is your favorite color" — 2 applications, 1 held only by this (Answer Co, Question Co)`);
     expect(text).toContain("By category: needs a fix 3, needs the candidate 3, site safeguard 1");
+  });
+
+  it("lists a policy submit held as a possible submission as waiting for a receipt, apart from other possible submissions (Track 85)", async () => {
+    const approved = { submissionApprovedAt: "2026-11-25T10:30:00.000Z", updatedAt: "2026-11-25T10:40:00.000Z" };
+    seed((database) => {
+      const policy = posting(database, "Policy Co", "APPLYING");
+      run(database, policy, "failed", [], approved);
+      event(database, policy, "APPLYING", "APPLYING",
+        `${POSSIBLE_SUBMISSION_NOTE}The auto-submit policy clicked the final submit of the application at policy.example and the page read as a confirmation.`, "2026-11-25T10:35:00.000Z");
+      const plain = posting(database, "Plain Co", "APPLYING");
+      run(database, plain, "failed", [], approved);
+    });
+    const result = await board();
+    expect(result.blockers.map(({ label, category, kind, applications, companies }) => ({ label, category, kind, applications, companies }))).toEqual([
+      { label: "a submit may have gone through: check for a receipt before any retry", category: "needs-fix", kind: "unconfirmed-submit", applications: 1, companies: ["Plain Co"] },
+      { label: AWAITING_RECEIPT_LABEL, category: "awaiting-receipt", kind: "unconfirmed-submit", applications: 1, companies: ["Policy Co"] }
+    ]);
+    expect(result.byCategory["awaiting-receipt"]).toBe(1);
+    expect(result.funnel.totals.reachedSubmit).toBeGreaterThanOrEqual(1);
+    const text = (await command(["--no-save"])).text;
+    expect(text).toContain(`[waiting for a receipt] ${AWAITING_RECEIPT_LABEL}`);
+    expect(text).toContain("waiting for a receipt 1");
   });
 
   it("never prints answers, options, drafts, decision values, confirmations, saved fact values, or self-identification values", async () => {

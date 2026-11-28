@@ -110,8 +110,10 @@ export function atsKindNeedsApproval(kind: string | null | undefined): boolean {
  * confirmation there marks a submit as submitted. On any other kind, an unrecognized site, or a several-page form
  * walked without an adapter, a submit under the auto-submit policy is held as a possible submission until a receipt
  * check. A kind joins only with a captured confirmation page and a regression.
+ * Workable joins (Track 85) on the success text from its public application bundle, which the Workable fixture
+ * regression reads; no live Workable confirmation has been observed yet.
  */
-export const ATS_KINDS_WITH_CAPTURED_CONFIRMATION: ReadonlySet<string> = new Set(["greenhouse", "lever", "workday", "handshake", "ashby", "dover"]);
+export const ATS_KINDS_WITH_CAPTURED_CONFIRMATION: ReadonlySet<string> = new Set(["greenhouse", "lever", "workday", "handshake", "ashby", "dover", "workable"]);
 
 export function atsConfirmationCaptured(kind: string | null | undefined): boolean {
   return typeof kind === "string" && ATS_KINDS_WITH_CAPTURED_CONFIRMATION.has(kind);
