@@ -25,3 +25,6 @@ generic filler now fills (see the resolved one-page form bugs); no
 several-section page and no post-submit code step has been seen, so the
 section walker is not built and the post-submit code and `/my-profile`
 confirmation remain open.
+
+Update 2026-11-28 (Track 80): the auto-submit policy now submits clean one-page Oracle runs.
+Because the `/my-profile` landing and the post-submit code step are still not read as an outcome, such a submit is held as a possible submission until a receipt check, and a code step after the policy's click is held the same way, never retried blindly.

@@ -110,7 +110,7 @@ function questionLine(pause: PauseRecord, n: number, correction: boolean): strin
   const label = labelOf(pause);
   if (pause.fieldId === "site-security-code") return `Q${n} agent review: "${label}"`;
   if (correction) return `Q${n} fix this field in the browser: "${label}"`;
-  if (pause.safeguard) return `Q${n} CAPTCHA or safeguard, solve it in the browser: "${label}"`;
+  if (pause.safeguard) return `Q${n} CAPTCHA or safeguard, the one step the agent never does for you; solve it in the browser: "${label}"`;
   if (pause.upload) return `Q${n} needs a document: "${label}"`;
   if (pause.sensitive) return `Q${n} demographic, answered for this application only: "${label}"`;
   return `Q${n}: "${label}"`;

@@ -82,7 +82,7 @@ export function nextAshbyStep(state: AshbySubmitState, clicks: number): AshbySub
 export const ASHBY_SPAM_CHECK_DETAIL = "Ashby's spam check (reCAPTCHA Enterprise)";
 
 export const ASHBY_SPAM_CHECK_MESSAGE =
-  "After the submit click Ashby's spam check (reCAPTCHA Enterprise) refused the submission. The agent never works around a bot check or solves CAPTCHAs, so this application is held for you: finish it in your own browser. The run is not marked submitted.";
+  "After the submit click Ashby's spam check (reCAPTCHA Enterprise) refused the submission. The agent never works around a bot check or solves CAPTCHAs, so this is the only step left for you: check this application in your own browser and finish it there. The run is not marked submitted.";
 
 export const ASHBY_BUSY_DETAIL = "Ashby showed its \"We're updating your application\" notice at the last submit click, so that click sent nothing.";
 

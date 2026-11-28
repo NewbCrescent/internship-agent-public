@@ -14,6 +14,8 @@ import {
   capturePostSubmitEvidence,
   challengePause,
   choicesNotTaken,
+  claimedSiteHoldReason,
+  finalSubmitHoldReason,
   formChangedPause,
   hasApplicationFields,
   hasSiteNavigation,
@@ -28,9 +30,11 @@ import {
   submitTargetHoldReason,
   submitTargetPause,
   SubmissionChallenged,
+  SubmissionCodeNotFound,
   SubmissionHeld,
   SubmissionNeedsInput,
   unfilledPause,
+  unverifiedSubmission,
   walkSteppedForm,
   type ApplyDecisionsOptions,
   type AtsFlow,
@@ -47,6 +51,7 @@ import {
   boundPauseQuestion,
   parseSteppedFieldId,
   steppedFieldId,
+  uncapturedSiteRun,
   type ApplicationChannel,
   type ApplicationProfile,
   type AtsKind,
@@ -76,9 +81,11 @@ import { applyVoiceDrafts, draftSourcesFor, type VoiceDrafter } from "./voice-dr
  * step by step (packages/browser/src/stepped-form.ts). Start and continue
  * walk to the last step and stop there; submit re-walks to the last step with
  * the candidate's recorded approval only, checks again, and clicks the form's
- * own submit control there. The auto-submit policy never submits these runs
- * (autoSubmitBlockers' stepped-form blocker, and submitSteppedRun refuses a
- * policy approval). Field ids are `step-<n>::<id>`.
+ * own submit control there. Since Track 80 the auto-submit policy submits
+ * them too: its click goes only to a control that reads as the final submit,
+ * and its outcome is held as a possible submission until a receipt check,
+ * since no stepped site's confirmation page was captured. Field ids are
+ * `step-<n>::<id>`.
  */
 
 /** Orchestrator helpers the stepped run reuses, passed in to keep one source of truth (as WorkdayRunDeps). */
@@ -469,11 +476,6 @@ export async function submitSteppedRun(
     policyApproval?: boolean;
   }
 ): Promise<BrowserRun> {
-  if (options.policyApproval) {
-    // Defensive: autoSubmitBlockers already refuses these runs.
-    updateBrowserRun(database, run.id, { submissionApprovedAt: null });
-    throw new Error("The auto-submit policy does not submit several-page forms on sites the agent has no adapter for; nothing was opened or clicked, and the run waits for your approval.");
-  }
   const { posting, packageAnswers, profile, channel } = runInputs(database, run);
   const opened = await options.openPage(run.applicationUrl);
   const hold = (base: { decisions: FillDecision[]; pauses: PauseRecord[] }, held: { decision: FillDecision; pause: PauseRecord }): void => {
@@ -492,7 +494,16 @@ export async function submitSteppedRun(
     const challenge = page.visibleChallenge ? await page.visibleChallenge() : null;
     if (challenge) {
       hold(run, challengePause(challenge));
-      throw new SubmissionChallenged(`Before the submit click the site showed ${challenge.detail}. The agent never solves CAPTCHAs, so this application is held for you: finish it in your own browser. The run is not marked submitted.`);
+      throw new SubmissionChallenged(`Before the submit click the site showed ${challenge.detail}. The agent never solves CAPTCHAs or site checks, so this is the only step left for you: finish this application in your own browser. The run is not marked submitted.`);
+    }
+    // Under the auto-submit policy, the claimed kind must be the site's own (Track 38), as on the one-page path.
+    if (options.policyApproval) {
+      const claimed = claimedSiteHoldReason({ atsKind: run.atsKind, pageUrl: page.url(), runUrl: run.applicationUrl });
+      if (claimed) {
+        const held = submitTargetPause(claimed);
+        hold(run, held);
+        throw new SubmissionHeld(held.pause.question);
+      }
     }
   } catch (error) {
     await opened.close();
@@ -559,7 +570,7 @@ export async function submitSteppedRun(
     if (lateChallenge) {
       hold(outcome, challengePause(lateChallenge));
       heldForInput = true;
-      throw new SubmissionChallenged(`Before the submit click the site showed ${lateChallenge.detail}. The agent never solves CAPTCHAs, so this application is held for you: finish it in your own browser. The run is not marked submitted.`);
+      throw new SubmissionChallenged(`Before the submit click the site showed ${lateChallenge.detail}. The agent never solves CAPTCHAs or site checks, so this is the only step left for you: finish this application in your own browser. The run is not marked submitted.`);
     }
     // The click goes only to the form's own submit control, on its last step (Track 38).
     const submitShown = page.submitControlShown ? await page.submitControlShown().catch(() => false) : null;
@@ -570,12 +581,29 @@ export async function submitSteppedRun(
       heldForInput = true;
       throw new SubmissionHeld(held.pause.question);
     }
+    // Track 80: under the policy the click goes only to a control that reads as the final submit (no stepped site's confirmation page was captured).
+    if (options.policyApproval && uncapturedSiteRun(run)) {
+      const label = page.submitControlLabel ? await page.submitControlLabel().catch(() => null) : null;
+      const final = finalSubmitHoldReason({ url: page.url(), label });
+      if (final) {
+        const held = submitTargetPause(final);
+        hold(outcome, held);
+        heldForInput = true;
+        throw new SubmissionHeld(held.pause.question);
+      }
+    }
     let confirmation: string;
     try {
       confirmation = await submitAndConfirm(page, { ...options.submitWait, securityCode: null, atsKind: run.atsKind });
     } catch (error) {
       // Anything after the click (even a failed click) keeps what the page showed.
       postSubmit = postSubmitEvidenceOf(error) ?? await capturePostSubmitEvidence(page, "unknown");
+      // Track 80: a code step after the policy's click may follow a sent application, so it is held as a possible submission.
+      if (error instanceof SubmissionCodeNotFound && options.policyApproval && uncapturedSiteRun(run)) {
+        const unverified = await unverifiedSubmission(page, { id: run.id, atsKind: run.atsKind, stepped: true }, postSubmit);
+        postSubmit = unverified.evidence;
+        throw unverified;
+      }
       if (error instanceof SubmissionNeedsInput) {
         // The site refused the last step with field errors, so nothing was sent: the approval is withdrawn.
         const refused = invalidFieldPauses(last.form, last.decisions, last.pauses, error.invalidFields);
@@ -587,6 +615,12 @@ export async function submitSteppedRun(
         heldForInput = true;
       }
       throw error;
+    }
+    // Track 80: a confirmation after the policy's click waits for a receipt check.
+    if (options.policyApproval && uncapturedSiteRun(run)) {
+      const unverified = await unverifiedSubmission(page, { id: run.id, atsKind: run.atsKind, stepped: true }, null);
+      postSubmit = unverified.evidence;
+      throw unverified;
     }
     const submittedAnswers: Record<string, string> = {};
     for (const decision of walk.decisions) {

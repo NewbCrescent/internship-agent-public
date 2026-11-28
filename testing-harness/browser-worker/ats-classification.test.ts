@@ -13,6 +13,7 @@ import {
   classifyAts,
   classifyFieldRole,
   closedPostingNotice,
+  finalSubmitHoldReason,
   greenhouseEmbedTarget,
   hasApplicationFields,
   isCookieBannerCandidate,
@@ -555,6 +556,21 @@ describe("site ownership (Track 38)", () => {
     expect(claimedSiteHoldReason({ atsKind: "workday", pageUrl: "https://fixture.wd5.myworkdayjobs.com/en-US/careers", runUrl: offSite })).toBeNull();
     expect(claimedSiteHoldReason({ atsKind: "workday", pageUrl: offSite, runUrl: "https://fixture.wd5.myworkdayjobs.com/en-US/careers" })).toBeNull();
     expect(claimedSiteHoldReason({ atsKind: "unknown", pageUrl: offSite, runUrl: offSite })).toBeNull();
+  });
+
+  it("lets the policy click only a control that reads as the final submit on a site without a captured confirmation (Track 80)", () => {
+    const url = "https://careers.fixturelabs.example/us/en/apply";
+    for (const label of ["Submit", "Submit Application", "Submit application →", "Apply", "Apply Now", "Send application", "Complete application"]) {
+      expect(finalSubmitHoldReason({ url, label })).toBeNull();
+    }
+    const held: Array<string | null> = ["Upload", "Next", "Accept", "Accept all", "Apply with LinkedIn", "Submit resume", "Save and submit later", "Sign in", "Subscribe", "Sign up", "Notify me", "Join", "Join our talent community", "Submit and join", `Submit ${"x".repeat(54)}`, "", null];
+    expect(`Submit ${"x".repeat(54)}`).toHaveLength(61);
+    for (const label of held) {
+      const reason = finalSubmitHoldReason({ url, label });
+      expect(reason).toMatch(/^No control reading as the application's final submit/);
+      expect(reason).toContain("careers.fixturelabs.example");
+      if (label) expect(reason).not.toContain(label);
+    }
   });
 });
 

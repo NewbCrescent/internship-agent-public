@@ -70,8 +70,10 @@ export const ATS_KIND_LABELS: Record<Exclude<AtsKind, "unknown">, string> = {
 };
 
 /**
- * Recognized for display; the agent has no adapter that walks their
- * application, so the candidate approves each run. The agent takes Oracle
+ * Recognized for display; no adapter of the agent's own walks their
+ * application, so their runs are filled in the confirm band: the candidate
+ * confirms the kind on runs they approve, and under the auto-submit policy
+ * `approveRunSubmissionAutomatically` confirms it (Track 80). The agent takes Oracle
  * Candidate Experience's email and one-time-code step (packages/agent
  * oracle-email-step.ts), but no adapter walks its several-section form
  * (/apply/section/<n>, Next per section, Submit on the last), and the
@@ -102,6 +104,25 @@ export const ATS_KINDS_NEEDING_APPROVAL: ReadonlySet<string> = new Set(["oracle"
 export function atsKindNeedsApproval(kind: string | null | undefined): boolean {
   return typeof kind === "string" && ATS_KINDS_NEEDING_APPROVAL.has(kind);
 }
+
+/**
+ * Track 80: kinds whose confirmation page (or submit answer) the agent has seen and reads, so a recognized
+ * confirmation there marks a submit as submitted. On any other kind, an unrecognized site, or a several-page form
+ * walked without an adapter, a submit under the auto-submit policy is held as a possible submission until a receipt
+ * check. A kind joins only with a captured confirmation page and a regression.
+ */
+export const ATS_KINDS_WITH_CAPTURED_CONFIRMATION: ReadonlySet<string> = new Set(["greenhouse", "lever", "workday", "handshake", "ashby", "dover"]);
+
+export function atsConfirmationCaptured(kind: string | null | undefined): boolean {
+  return typeof kind === "string" && ATS_KINDS_WITH_CAPTURED_CONFIRMATION.has(kind);
+}
+
+/**
+ * Track 80: the one kind the auto-submit policy still never submits. A SmartRecruiters posting page sits in front of
+ * a separate application page the agent does not read (its one-click fields are not read, and its pages showed
+ * DataDome to the agent's browser), so the candidate approves each run.
+ */
+export const ATS_KINDS_NEVER_AUTO_SUBMITTED: ReadonlySet<string> = new Set(["smartrecruiters"]);
 
 /**
  * The hosts each kind's own application pages are served from (Track 38): a kind is confirmed

@@ -14,6 +14,6 @@ Rippling's Pronouns list offers each set alone and combined with "they/them/thei
 Rippling's custom questions carry nothing that names their control (no label, aria name, or placeholder, and a random `name` that changes on every load): the question is a `p` in a block written before the field, in a container holding no other question's control, and that text is now the label, read after the placeholder and before the name (`questionTextBefore` in `collectControlsIn`).
 Rippling's dropdown custom questions (`div role="combobox"`) and Yes/No questions (`div role="radiogroup"` of `div role="radio"`) are not read as fields at all; that is left open.
 A saved protected self-identification answer is still used only on a single matching option, and a race question with no saved answer still pauses for the candidate.
-These runs still wait for the candidate's approval as an unrecognized or Rippling site, and nothing about automatic submission changes.
+Since Track 80 the auto-submit policy submits these runs when nothing else holds them (`079-auto-submit-on-sites-without-an-adapter.md`).
 That was not true for MITRE's Phenom form, which was taken for Workday and approved by the auto-submit policy; Track 38 (077-site-ownership-and-the-submit-target.md) fixed it.
 Regression: `pnpm test:browser:unrecognized-forms` (scenarios d to h), with fast cases for the phone-code label, the kept picker, the pronoun rule, and the announcement chooser in `pnpm test:browser-worker:fast`.

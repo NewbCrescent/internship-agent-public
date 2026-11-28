@@ -257,7 +257,7 @@ describe("pass notice items", () => {
     expect(text).toContain(`run ${RUN_HELD.slice(0, 8)}`);
     expect(text).toContain(`run ${RUN_PAUSED.slice(0, 8)}`);
     expect(text).toContain('  Q1: "Are you willing to relocate to Austin?"');
-    expect(text).toContain('  Q2 CAPTCHA or safeguard, solve it in the browser: "reCAPTCHA"');
+    expect(text).toContain('  Q2 CAPTCHA or safeguard, the one step the agent never does for you; solve it in the browser: "reCAPTCHA"');
     expect(text).not.toContain("Q3");
     expect(text).not.toContain("Preferred start date");
     expect(text).toContain('  Q4 demographic, answered for this application only: "Gender"');

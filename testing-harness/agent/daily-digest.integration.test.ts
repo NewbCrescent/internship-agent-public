@@ -105,7 +105,7 @@ describe("digest text", () => {
       lines[0],
       "Waiting on you (5):",
       `1. Datadog SWE Intern — 2 questions: "Are you 21 or older?", "Earliest start date?"`,
-      "2. Glowpath Platform Intern — solve a CAPTCHA",
+      "2. Glowpath Platform Intern — solve a CAPTCHA, the only step left for you",
       `3. ServiceNow FDE Intern — ready, say "send ServiceNow"`,
       `4. Acme Data Intern — ready, check the drafted answer, then say "send Acme"`,
       `5. Globex ML Intern — 1 question: "Cover letter" (file)`,

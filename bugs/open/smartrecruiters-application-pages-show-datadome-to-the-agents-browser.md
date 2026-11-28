@@ -12,3 +12,5 @@ challenge. The form behind it could not be read, so no adapter fills it, and
 "Application submitted!" was found in the page's translation bundle, but
 the form walk and its regression are missing). Next step: a read-only capture
 of the application form from a session the candidate opens.
+
+Update 2026-11-28 (Track 80): SmartRecruiters is the one kind the auto-submit policy still never submits (`ATS_KINDS_NEVER_AUTO_SUBMITTED`).

@@ -103,6 +103,8 @@ export type BrowserPage = {
   readFields?(): Promise<BrowserField[]>;
   /** Whether the terminal submit control is still shown. */
   submitControlShown?(): Promise<boolean>;
+  /** The visible text of the control `clickSubmit` would click (the same `findSubmitIndex` pick), or null when none (Track 80). */
+  submitControlLabel?(): Promise<string | null>;
   /**
    * Handshake Quick apply: clicks the page's "Quick apply" button and scopes
    * every later read, fill, and submit to the "Apply to …" dialog. Resolves
@@ -599,7 +601,7 @@ export async function submitAndConfirm(
       const challenge = page.visibleChallenge ? await page.visibleChallenge() : null;
       if (challenge) {
         throw new SubmissionChallenged(
-          `After the submit click the site showed ${challenge.detail}. The agent never solves CAPTCHAs, so this application is held for you: finish it in your own browser. The run is not marked submitted.`,
+          `After the submit click the site showed ${challenge.detail}. The agent never solves CAPTCHAs or site checks, so this is the only step left for you: check this application in your own browser and finish it there. The run is not marked submitted.`,
           scrubbed(await capturePostSubmitEvidence(page, "challenged", { bodyText: body, challenge: challenge.detail }))
         );
       }
@@ -1067,6 +1069,22 @@ export function createPlaywrightPage(page: Page): BrowserPage {
         return (await root().evaluate(findSubmitIndex)) >= 0;
       } catch {
         return false;
+      }
+    },
+    submitControlLabel: async () => {
+      try {
+        await ensureNameShim(page);
+        const index = await root().evaluate(findSubmitIndex);
+        if (index < 0) return null;
+        const label = await root().locator(SUBMIT_SELECTOR).nth(index).evaluate((element) => {
+          const value = element instanceof HTMLInputElement
+            ? (element.value || ((element.type ?? "").toLowerCase() === "submit" ? "Submit" : ""))
+            : ((element as HTMLButtonElement).value ?? "");
+          return `${element.textContent ?? ""} ${value}`.replace(/\s+/g, " ").trim();
+        });
+        return label.slice(0, 200) || null;
+      } catch {
+        return null;
       }
     },
     openApplicationDialog: async () => {

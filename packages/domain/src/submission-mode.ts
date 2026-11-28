@@ -1,5 +1,5 @@
-import { ATS_KIND_LABELS, atsKindNeedsApproval } from "./ats";
-import { isSteppedRun, STEPPED_FORM_BLOCKER } from "./stepped-form";
+import { ATS_KIND_LABELS, ATS_KINDS_NEVER_AUTO_SUBMITTED, atsConfirmationCaptured } from "./ats";
+import { isSteppedRun } from "./stepped-form";
 
 /**
  * Manual checklist mode. When on, the AI submission flow (package approval,
@@ -67,23 +67,45 @@ const LEGACY_SITE_VALUE_REASON = "The site already shows this value.";
 type RunForAutoSubmit = {
   status: string;
   atsConfirmed: boolean;
+  atsKind?: string;
   /** The kind the classifier suggested when the run was not confirmed automatically. */
   suggestedAtsKind?: string | null;
   pauses: ReadonlyArray<{ safeguard: boolean; status?: string; draft?: { source?: string } | null }>;
-  decisions: ReadonlyArray<{ fieldId?: string; action: string; basis: { kind: string } | null; reason?: string }>;
+  decisions: ReadonlyArray<{ fieldId?: string; action: string; basis: { kind: string; field?: string } | null; reason?: string }>;
 };
+
+/** Track 80: the reason a run whose form shows no application content is never submitted automatically. */
+export const NO_APPLICATION_CONTENT_BLOCKER = "The form the agent filled has no application content (no resume and not your name with your email), so it may be a newsletter or sign-up box; it is never submitted automatically.";
+
+const NAME_FIELDS: ReadonlySet<string> = new Set(["fullName", "legalFirstName", "legalLastName", "preferredName"]);
+const DOCUMENT_BASES: ReadonlySet<string> = new Set(["variant", "base_resume", "candidate_document"]);
+
+/**
+ * Track 80 (the manager, after Track 77 found newsletter boxes captured as "the form" on unknown sites): whether a
+ * run's own decisions hold application content: an uploaded resume or document, or the candidate's name and email
+ * from the profile. A lone email box (a newsletter or sign-up) has none. Pure.
+ */
+export function hasApplicationContent(decisions: ReadonlyArray<{ action: string; basis: { kind: string; field?: string } | null }>): boolean {
+  const acted = decisions.filter((decision) => decision.action === "fill" || decision.action === "choose" || decision.action === "check" || decision.action === "upload");
+  if (acted.some((decision) => decision.action === "upload" && decision.basis !== null && DOCUMENT_BASES.has(decision.basis.kind))) return true;
+  const profile = (field: (value: string) => boolean) => acted.some((decision) =>
+    decision.action !== "upload" && decision.basis?.kind === "profile" && typeof decision.basis.field === "string" && field(decision.basis.field));
+  return profile((value) => NAME_FIELDS.has(value)) && profile((value) => value === "email");
+}
 
 /**
  * Why a filled run may not be submitted without the candidate. An unanswered
- * pause, a safeguard, a site type the classifier did not recognize on its own,
- * an answer drafted in the candidate's voice, a draft the AI review suggested
+ * pause, a safeguard, an answer drafted in the candidate's voice, a draft the AI review suggested
  * for a question still unanswered, or an attachment the site already held
  * keeps the run for the candidate. An answer the AI review matched to a saved
  * answer after every deterministic guardrail passed does not hold the run (the
  * candidate's decision, 2026-11-26). A value a form field already showed
  * with nothing saved against it does not hold the run; a shown value on a
  * question only the candidate's saved answers may answer does.
- * A several-page form the stepped walk filled (Track 74) is always the candidate's to approve.
+ * The site type holds a run only on SmartRecruiters (Track 80, the candidate's decision of 2026-11-28); a recognized
+ * kind without an adapter, an unrecognized site, and a several-page form walked step by step are submitted like any
+ * other clean run, under the extra checks `uncapturedSiteRun` names.
+ * On a site without a captured flow, a run whose decisions hold no application content (`hasApplicationContent`) is held.
  */
 export function autoSubmitBlockers(run: RunForAutoSubmit): string[] {
   const blockers: string[] = [];
@@ -92,16 +114,15 @@ export function autoSubmitBlockers(run: RunForAutoSubmit): string[] {
   if (run.pauses.some((pause) => pause.status === "open")) {
     blockers.push("The form has unanswered questions waiting for you.");
   }
-  if (!run.atsConfirmed) {
-    const suggested = run.suggestedAtsKind;
-    if (atsKindNeedsApproval(suggested)) {
-      const label = ATS_KIND_LABELS[suggested as keyof typeof ATS_KIND_LABELS];
-      blockers.push(`${label} application sites are recognized, but the agent has no adapter that walks their application, so you approve each one.`);
-    } else {
-      blockers.push("The application site type was not recognized automatically.");
-    }
+  // Track 80 (the candidate, 2026-11-28): the site type no longer holds a run, except SmartRecruiters.
+  const kind = run.atsConfirmed ? run.atsKind : run.suggestedAtsKind;
+  if (kind && ATS_KINDS_NEVER_AUTO_SUBMITTED.has(kind)) {
+    const label = ATS_KIND_LABELS[kind as keyof typeof ATS_KIND_LABELS] ?? kind;
+    blockers.push(`${label} application sites are recognized, but their posting page sits in front of a separate application page the agent does not read, so you approve each one.`);
   }
-  if (isSteppedRun({ decisions: run.decisions })) blockers.push(STEPPED_FORM_BLOCKER);
+  // Track 80: on a site without a captured flow, a form with no application content (a lone newsletter or sign-up email box) is never submitted.
+  const guarded = !run.atsConfirmed || (run.atsKind !== undefined && !atsConfirmationCaptured(run.atsKind)) || isSteppedRun({ decisions: run.decisions });
+  if (guarded && !hasApplicationContent(run.decisions)) blockers.push(NO_APPLICATION_CONTENT_BLOCKER);
   if (run.decisions.some((decision) => decision.basis?.kind === "voice_draft")) blockers.push("An answer was drafted in your voice; you review those.");
   // The AI review of a pause batch (pause-review.ts): a suggested draft holds the run while its question is unanswered;
   // once the candidate answers it (with the draft or their own text) it is the candidate's answer, as with voice drafts.
@@ -112,4 +133,14 @@ export function autoSubmitBlockers(run: RunForAutoSubmit): string[] {
   // Only a kept attachment (Handshake's attached resume, or any keep the planner did not mark as a field's shown value) holds the run as an attachment.
   if (kept.some((decision) => decision.reason !== SITE_VALUE_KEPT_REASON && !unconfirmed(decision.reason))) blockers.push("The site kept an attachment you need to confirm.");
   return blockers;
+}
+
+/**
+ * Track 80: whether a run is on a site whose confirmation page the agent has not captured: a several-page form
+ * walked without an adapter (Track 74), or a kind outside ATS_KINDS_WITH_CAPTURED_CONFIRMATION (an unrecognized
+ * site included). Under the auto-submit policy such a run's click goes only to a control that reads as the final
+ * submit, and its outcome waits for a receipt check. Pure.
+ */
+export function uncapturedSiteRun(run: { atsKind: string; decisions: ReadonlyArray<{ fieldId?: string }>; pauses?: ReadonlyArray<{ fieldId: string }> }): boolean {
+  return isSteppedRun(run) || !atsConfirmationCaptured(run.atsKind);
 }

@@ -1,4 +1,4 @@
-import type { BrowserField, FillDecision, PauseRecord, RecognizedForm } from "@internship-agent/domain";
+import { ATS_KIND_LABELS, type BrowserField, type FillDecision, type PauseRecord, type RecognizedForm } from "@internship-agent/domain";
 
 import type { CoveringDialog } from "./announcement-dialog";
 import type { AshbySubmitDiagnostics } from "./ats/ashby-diagnostics";
@@ -243,6 +243,46 @@ export class SubmissionUnconfirmed extends Error {
   constructor(message: string, readonly evidence: PostSubmitEvidence) {
     super(message);
   }
+}
+
+/**
+ * Track 80: a submit the auto-submit policy clicked on a site whose confirmation page the agent has not captured
+ * (`uncapturedSiteRun`): the page read as a confirmation, or the site then asked for an emailed code the agent cannot
+ * enter there. Not a hold for the candidate: the run is failed with its approval kept and its evidence saved, so the
+ * hold refresh holds it as a possible submission until a receipt check, and it is never submitted again automatically.
+ */
+export class SubmissionUnverified extends SubmissionUnconfirmed {}
+
+export const UNVERIFIED_CONFIRMATION_DETAIL = "Auto-submit policy: the page read as a confirmation, but this site's confirmation page was never captured, so the outcome waits for a receipt check.";
+export const UNVERIFIED_CODE_DETAIL = "Auto-submit policy: after the submit click the site asked for an emailed code on a site whose confirmation page was never captured, so the outcome waits for a receipt check.";
+
+/** The SubmissionUnverified for a policy submit on such a site; `evidence` is the code step's capture, or null to capture the confirmation page now. */
+export async function unverifiedSubmission(
+  page: BrowserPage,
+  run: { id: string; atsKind: string; stepped: boolean },
+  evidence: PostSubmitEvidence | null
+): Promise<SubmissionUnverified> {
+  const label = (ATS_KIND_LABELS as Record<string, string>)[run.atsKind];
+  const site = run.stepped ? "the several-page application" : label ? `the ${label} application` : "the application";
+  let host = "";
+  try {
+    host = new URL(page.url()).hostname.toLowerCase();
+  } catch {
+    host = "";
+  }
+  const ref = run.id.slice(0, 8);
+  const tail = `so it is held as a possible submission until a receipt check finds the site's receipt (pnpm mail:scan --receipt ${ref}). It is never submitted again automatically, and the run is not marked submitted.`;
+  if (evidence) {
+    return new SubmissionUnverified(
+      `The auto-submit policy clicked the final submit of ${site} at ${host}, and the site then asked for an emailed code the agent cannot enter there; the application may have been sent, ${tail}`,
+      { ...evidence, detail: evidence.detail ?? UNVERIFIED_CODE_DETAIL }
+    );
+  }
+  const captured = await capturePostSubmitEvidence(page, "unknown", { detail: UNVERIFIED_CONFIRMATION_DETAIL });
+  return new SubmissionUnverified(
+    `The auto-submit policy clicked the final submit of ${site} at ${host} and the page read as a confirmation, but the agent has not captured this site's confirmation page yet, ${tail}`,
+    captured
+  );
 }
 
 export type SecurityCodeLookupResult =

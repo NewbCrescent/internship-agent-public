@@ -13,8 +13,8 @@
  *     denied, never accepted, the names and email are typed, step 2's age
  *     list takes the fictional saved answer, and the run waits for approval
  *     with its site type unconfirmed; Submit is never clicked;
- * (b) the same form on an automatic run waits for approval too, held by the
- *     stepped-form auto-submit blocker; Submit is never clicked;
+ * (b) the same form on an automatic run reaches the submit step with no
+ *     auto-submit blocker (Track 80); Submit is never clicked;
  * (c) that run, confirmed and approved by the candidate, is walked again and
  *     submitted with exactly one Submit click on the Review step;
  * (d) a Paylocity-shaped form ("Step n of 3", steps drawn in place) pauses on
@@ -28,7 +28,11 @@
  * (g) a step showing both "Next Step" and "Submit" (`?both=1`) stops the run
  *     with a step-transition capture, nothing clicked as submit;
  * (h) a Next Step that shows a confirmation (`?confirm=1`) stops the run and
- *     never marks it submitted.
+ *     never marks it submitted;
+ * (i) the auto-submit policy approves a fresh automatic Phenom-shaped run
+ *     (Track 80), which is walked again and clicked once on Submit, then held
+ *     as a possible submission (failed, approval kept, evidence saved, never
+ *     marked submitted); the only real-Chromium proof of submitControlLabel.
  *
  * Usage: pnpm test:browser:stepped-forms
  */
@@ -43,18 +47,21 @@ import {
   answerRunPause,
   approveApplication,
   approveRunSubmission,
+  approveRunSubmissionAutomatically,
   confirmRunAts,
   continueBrowserRun,
   evaluateAndPersistMatch,
   getBrowserRuns,
   prepareApplication,
   readStopEvidence,
+  readSubmitEvidence,
   startBrowserRun,
   submitBrowserRun
 } from "@internship-agent/agent";
-import { createApplicationPage } from "@internship-agent/browser";
+import { createApplicationPage, SubmissionUnverified } from "@internship-agent/browser";
 import {
   createDatabase,
+  getJobPosting,
   LOCAL_CANDIDATE_ID,
   listProjectEvidenceProfiles,
   reconcileProjectEvidence,
@@ -64,7 +71,7 @@ import {
   saveCandidateFact,
   seedDevelopmentData
 } from "@internship-agent/db";
-import { autoSubmitBlockers, STEPPED_FORM_BLOCKER } from "@internship-agent/domain";
+import { autoSubmitBlockers } from "@internship-agent/domain";
 
 const PREFIX = "internship-agent-stepped-forms-";
 const PHENOM_HOST = "careers.fixturesteps.example";
@@ -209,14 +216,14 @@ async function main(): Promise<void> {
       database.close();
     }
 
-    // (b) and (c) Phenom-shaped, automatic: held by the stepped blocker, then submitted only after the candidate's approval.
+    // (b) and (c) Phenom-shaped, automatic: no stepped blocker (Track 80), then submitted after the candidate's approval.
     scenarios += 2;
     {
       const { database, jobId, dataDir } = fresh(true);
       const report = await started(database, jobId, dataDir, PHENOM_URL, true);
       const startState = await phenomState(tabs.at(-1));
       check(report.run.status === "awaiting-approval", `(b) run status ${report.run.status}`);
-      check(autoSubmitBlockers(report.run).includes(STEPPED_FORM_BLOCKER), `(b) blockers ${autoSubmitBlockers(report.run).join(" | ")}`);
+      check(!autoSubmitBlockers(report.run).some((blocker) => /several pages|recognized/i.test(blocker)), `(b) blockers ${autoSubmitBlockers(report.run).join(" | ")}`);
       check(startState?.submitClicks === 0, `(b) clicks ${JSON.stringify(startState)}`);
       confirmRunAts(report.run.id, "unknown", { database });
       approveRunSubmission(report.run.id, undefined, { database });
@@ -307,6 +314,28 @@ async function main(): Promise<void> {
       const error = await caught(started(database, jobId, dataDir, `${PAY_URL}?confirm=1&county=0`, false));
       check(error?.message.includes("looks like a confirmation") === true, `(h) stop: ${error?.message ?? "none"}`);
       check(!getBrowserRuns(jobId, database).some((run) => run.status === "submitted"), "(h) a run was marked submitted");
+      await closeTabs();
+      database.close();
+    }
+
+    // (i) Track 80: the auto-submit policy submits a fresh automatic Phenom-shaped run once and holds it as a possible submission.
+    scenarios += 1;
+    {
+      const { database, jobId, dataDir } = fresh(true);
+      const report = await started(database, jobId, dataDir, PHENOM_URL, true);
+      check(report.run.status === "awaiting-approval", `(i) run status ${report.run.status}`);
+      approveRunSubmissionAutomatically(report.run.id, ["fixture"], { database });
+      const error = await caught(submitBrowserRun(report.run.id, {
+        database, dataDir, openPage, renderPdf, applicationRecord: null, policyApproval: true, submitWait: { timeoutMs: 10_000, pollMs: 200 }
+      }));
+      const submitState = await phenomState(tabs.at(-1));
+      check(error instanceof SubmissionUnverified && error.message.includes("held as a possible submission"), `(i) error: ${error?.message ?? "none"}`);
+      check(submitState?.submitClicks === 1 && submitState.nextClicks === 2 && submitState.acceptClicks === 0, `(i) clicks ${JSON.stringify(submitState)}`);
+      const after = getBrowserRuns(jobId, database).find((run) => run.id === report.run.id);
+      check(after?.status === "failed" && !!after.submissionApprovedAt && after.confirmationText === null, `(i) run ${after?.status}, approved ${after?.submissionApprovedAt}, confirmation ${after?.confirmationText}`);
+      check(after?.atsConfirmed === true && after.atsKind === "unknown", `(i) site type ${after?.atsKind} confirmed ${after?.atsConfirmed}`);
+      check(getJobPosting(database, jobId)?.status !== "SUBMITTED", `(i) job status ${getJobPosting(database, jobId)?.status}`);
+      check(readSubmitEvidence(dataDir, report.run).some((entry) => entry.outcome === "unknown"), `(i) evidence ${readSubmitEvidence(dataDir, report.run).map((entry) => entry.outcome).join(", ")}`);
       await closeTabs();
       database.close();
     }

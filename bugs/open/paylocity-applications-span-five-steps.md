@@ -18,3 +18,5 @@ now fills Paylocity's steps while they show "Step n of 5", pausing on County
 and on unknown questions, and stops at the last step for the candidate's
 approval. `paylocity` stays in `ATS_KINDS_NEEDING_APPROVAL` because no later
 step or confirmation has been seen live.
+
+Update 2026-11-28 (Track 80): the auto-submit policy now submits a clean stepped Paylocity run on its last step, clicking only a control that reads as the final submit; no Paylocity confirmation page has been captured, so the outcome is held as a possible submission until a receipt check, and the bug stays open until a live run shows the later steps and the confirmation.

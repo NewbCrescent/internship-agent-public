@@ -82,6 +82,8 @@ import {
   submitAndConfirm,
   submitTargetHoldReason,
   submitTargetPause,
+  finalSubmitHoldReason,
+  unverifiedSubmission,
   SubmissionChallenged,
   SubmissionCodeNotFound,
   SubmissionHeld,
@@ -106,6 +108,8 @@ import {
   aiReviewMatchLabel,
   answerKindFor,
   applicationChannelFor,
+  ATS_KIND_LABELS,
+  atsKindOwnsUrl,
   AUTO_SUBMIT_EVENT,
   autoSubmitBlockers,
   boundDecisionText,
@@ -120,6 +124,7 @@ import {
   planApplicationHistory,
   scopeKey,
   standingConsentSettings,
+  uncapturedSiteRun,
   workdaySiteKey,
   type QuestionAliasTarget,
   type QuestionResolution,
@@ -1832,6 +1837,8 @@ export function approveRunSubmission(
  * The candidate's opt-in auto-submit policy standing in for the submit
  * approval. It refuses every run autoSubmitBlockers names, and the timeline
  * records it as the policy's approval, never as the candidate's.
+ * Track 80: it also takes an unconfirmed run's site type as the policy's own act, named in its event: the suggested
+ * kind on that kind's own site, else unknown (the generic filler's gates).
  */
 export function approveRunSubmissionAutomatically(
   runId: string,
@@ -1844,14 +1851,28 @@ export function approveRunSubmissionAutomatically(
   if (manualOnly()) throw new Error("Manual checklist mode is on; nothing is submitted automatically.");
   const blockers = autoSubmitBlockers(run);
   if (blockers.length > 0) throw new Error("Not submitted automatically: " + blockers.join(" "));
-  const approved = updateBrowserRun(database, runId, { submissionApprovedAt: new Date().toISOString() });
+  // Track 80: the policy, never the candidate, takes the site type of an unconfirmed run: the suggested kind on its own site, else unknown (the generic filler's gates).
+  const suggested = run.atsConfirmed ? null : run.suggestedAtsKind;
+  const kind: AtsKind = run.atsConfirmed ? run.atsKind : suggested && atsKindOwnsUrl(suggested, run.applicationUrl) ? suggested : "unknown";
+  const approved = updateBrowserRun(database, runId, {
+    submissionApprovedAt: new Date().toISOString(),
+    ...(run.atsConfirmed ? {} : { atsKind: kind, suggestedAtsKind: null, atsConfirmed: true })
+  });
+  const site: string[] = [];
+  if (!run.atsConfirmed) {
+    site.push(kind === "unknown"
+      ? "Site: not a recognized application site type, submitted through the generic form filler."
+      : `Site: ${ATS_KIND_LABELS[kind]}, the kind the classifier suggested, confirmed by the policy.`);
+  }
+  if (uncapturedSiteRun(approved)) site.push("Its confirmation page was never captured, so the outcome waits for a receipt check.");
+  const parts = [...site, ...basis];
   const status = getJobPosting(database, run.jobId)?.status ?? "APPLYING";
   // The questions an AI review matched to saved answers, by label only (no key, value, or option).
   const matched = [...new Set(run.decisions.map((decision) => aiReviewMatchLabel(decision.reason)).filter((label): label is string => label !== null))];
   const aiMatches = matched.length ? ` AI review matched your saved answers for: ${matched.map((label) => `"${label}"`).join(", ")}.` : "";
   logApplicationEvent(database, {
     jobId: run.jobId, fromStatus: status, toStatus: status,
-    detail: (AUTO_SUBMIT_EVENT + (basis.length ? ": " + basis.join(" ") : ".") + aiMatches).slice(0, 1_000)
+    detail: (AUTO_SUBMIT_EVENT + (parts.length ? ": " + parts.join(" ") : ".") + aiMatches).slice(0, 1_000)
   });
   return approved;
 }
@@ -1865,7 +1886,7 @@ function holdForChallengeBeforeClick(database: DatabaseSync, runId: string, run:
     decisions: [...run.decisions.filter((decision) => decision.fieldId !== held.decision.fieldId), held.decision],
     pauses: [...run.pauses.filter((pause) => pause.fieldId !== held.pause.fieldId), held.pause]
   });
-  return new SubmissionChallenged(`Before the submit click the site showed ${challenge.detail}. The agent never solves CAPTCHAs, so this application is held for you: finish it in your own browser. The run is not marked submitted.`);
+  return new SubmissionChallenged(`Before the submit click the site showed ${challenge.detail}. The agent never solves CAPTCHAs or site checks, so this is the only step left for you: finish this application in your own browser. The run is not marked submitted.`);
 }
 
 /** A submit held before the click (Track 38): the approval is withdrawn and the run pauses with one safeguard; nothing is clicked. */
@@ -1961,7 +1982,7 @@ export async function submitBrowserRun(
     return submitted;
   }
   if (isSteppedRun(run)) {
-    // Track 74: re-walked to its last step and submitted there only with this approval; never by the auto-submit policy.
+    // Track 74/80: re-walked to its last step and submitted there with the candidate's or the auto-submit policy's approval.
     return submitSteppedRun(database, steppedRunDeps(database, { candidateId: LOCAL_CANDIDATE_ID, candidate: getCandidate(database, LOCAL_CANDIDATE_ID), dataDir, renderPdf: options.renderPdf ?? renderHtmlToPdf, standing, applicationRecord: options.applicationRecord }), run, {
       openPage: options.openPage ?? ((url: string) => defaultOpenPage(url, dataDir, { database, jobId: run.jobId, runId: run.id })), dataDir, standing, submitWait: options.submitWait, policyApproval: options.policyApproval
     });
@@ -2081,6 +2102,15 @@ export async function submitBrowserRun(
       heldForInput = true;
       throw holdSubmitTarget(database, runId, run, target);
     }
+    // Track 80: on a site whose confirmation page was never captured, the policy's click goes only to a control that reads as the final submit.
+    if (options.policyApproval && uncapturedSiteRun(run)) {
+      const label = page.submitControlLabel ? await page.submitControlLabel().catch(() => null) : null;
+      const final = finalSubmitHoldReason({ url: page.url(), label });
+      if (final) {
+        heldForInput = true;
+        throw holdSubmitTarget(database, runId, run, final);
+      }
+    }
     // Greenhouse's emailed security-code step: the code is read from the candidate's mailbox (read only, in memory).
     const securityCode = greenhouseSecurityCodeLookup({
       mailbox: options.securityCodeMailbox === undefined ? gmailMailboxFactory(process.env) : options.securityCodeMailbox,
@@ -2093,7 +2123,19 @@ export async function submitBrowserRun(
     } catch (error) {
       // Anything after the click (even a failed click) keeps what the page showed.
       postSubmit = postSubmitEvidenceOf(error) ?? await capturePostSubmitEvidence(page, "unknown");
+      // Track 80: on such a site a code step after the policy's click may follow a sent application, so it is held as a possible submission.
+      if (error instanceof SubmissionCodeNotFound && options.policyApproval && uncapturedSiteRun(run)) {
+        const unverified = await unverifiedSubmission(page, { id: run.id, atsKind: run.atsKind, stepped: false }, postSubmit);
+        postSubmit = unverified.evidence;
+        throw unverified;
+      }
       throw error;
+    }
+    // Track 80: a confirmation on a site whose confirmation page was never captured waits for a receipt check.
+    if (options.policyApproval && uncapturedSiteRun(run)) {
+      const unverified = await unverifiedSubmission(page, { id: run.id, atsKind: run.atsKind, stepped: false }, null);
+      postSubmit = unverified.evidence;
+      throw unverified;
     }
     const submittedAnswers: Record<string, string> = {};
     for (const decision of run.decisions) {

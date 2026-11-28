@@ -57,8 +57,8 @@ import { runAnswerCommand, type RunCommandDeps } from "../../packages/agent/src/
  * still auto apply"): a run the pipeline started that paused, was answered
  * with `pnpm run:answer`, and reached the submit step clean is submitted on
  * the next pass through the same policy check, exactly once, with the
- * policy's approval. Runs the candidate started, open pauses, approval-only
- * sites, runs that may have reached the site, and manual checklist mode are
+ * policy's approval. Runs the candidate started, open pauses, SmartRecruiters
+ * sites (Track 80), runs that may have reached the site, and manual checklist mode are
  * never submitted. Disposable SQLite and data directories, fake pages; no
  * browser, no network, no model.
  */
@@ -337,17 +337,35 @@ describe("answered automatic runs under the auto-submit policy", () => {
     database.close();
   });
 
-  it("holds an approval-only site", async () => {
+  it("holds a SmartRecruiters site (Track 80)", async () => {
     const database = disposableDatabase();
     const dataDir = disposableDirectory("internship-agent-continued-data-");
     const flag = { clicked: false };
     const { jobId, run } = await answeredRun(database, dataDir, flag);
-    updateBrowserRun(database, run.id, { atsConfirmed: false, suggestedAtsKind: "icims" });
+    updateBrowserRun(database, run.id, { atsConfirmed: false, suggestedAtsKind: "smartrecruiters" });
     const report = await pass(database, dataDir, formPage(flag));
     expect(report.submitted).toEqual([]);
     expect(flag.clicked).toBe(false);
     expect(autoSubmitEvents(database, jobId)).toEqual([]);
-    expect(continuedAutoSubmitBlocker(database, dataDir, getBrowserRun(database, run.id)!)).toContain("no adapter that walks their application");
+    expect(continuedAutoSubmitBlocker(database, dataDir, getBrowserRun(database, run.id)!)).toContain("SmartRecruiters application sites are recognized");
+    database.close();
+  });
+
+  it("holds an unknown-site run with no application content (Track 80)", async () => {
+    const database = disposableDatabase();
+    const dataDir = disposableDirectory("internship-agent-continued-data-");
+    const flag = { clicked: false };
+    const { jobId, run } = await answeredRun(database, dataDir, flag);
+    // A lone newsletter email box: one profile email fill and nothing else, in the shape of the run's own fill decisions.
+    const fill = run.decisions.find((decision) => decision.action === "fill");
+    expect(fill).toBeDefined();
+    const emailOnly = [{ ...fill!, value: "candidate@example.test", basis: { kind: "profile" as const, field: "email" }, reason: "The profile's email.", pause: null }];
+    updateBrowserRun(database, run.id, { atsConfirmed: false, suggestedAtsKind: null, atsKind: "unknown", decisions: emailOnly });
+    const report = await pass(database, dataDir, formPage(flag));
+    expect(report.submitted).toEqual([]);
+    expect(flag.clicked).toBe(false);
+    expect(autoSubmitEvents(database, jobId)).toEqual([]);
+    expect(continuedAutoSubmitBlocker(database, dataDir, getBrowserRun(database, run.id)!)).toContain("no application content");
     database.close();
   });
 

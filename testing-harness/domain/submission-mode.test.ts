@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { aiReviewMatchLabel, aiReviewMatchReason, autoSubmitBlockers, isAiReviewMatchReason, autoSubmitSettings, manualOnly, SITE_VALUE_KEPT_REASON, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
+import { aiReviewMatchLabel, aiReviewMatchReason, atsConfirmationCaptured, autoSubmitBlockers, hasApplicationContent, isAiReviewMatchReason, autoSubmitSettings, manualOnly, NO_APPLICATION_CONTENT_BLOCKER, SITE_VALUE_KEPT_REASON, uncapturedSiteRun, UNCONFIRMED_SITE_VALUE_REASON } from "@internship-agent/domain";
+
+/** Track 80: the candidate's name and email from the profile, the application content an unconfirmed run needs. */
+const NAME_AND_EMAIL = [
+  { action: "fill", basis: { kind: "profile", field: "fullName" } },
+  { action: "fill", basis: { kind: "profile", field: "email" } }
+];
 
 describe("manual checklist mode", () => {
   it("leaves AI submission visible unless explicitly enabled", () => {
@@ -54,7 +60,7 @@ describe("auto-submit policy", () => {
     expect(autoSubmitBlockers({ ...clean, pauses: [{ safeguard: true, status: "answered" }] })).toEqual([
       "The site showed a safeguard challenge."
     ]);
-    expect(autoSubmitBlockers({ ...clean, atsConfirmed: false })).toEqual(["The application site type was not recognized automatically."]);
+    expect(autoSubmitBlockers({ ...clean, atsConfirmed: false, decisions: [...clean.decisions, ...NAME_AND_EMAIL] })).toEqual([]);
     expect(autoSubmitBlockers({ ...clean, decisions: [{ action: "fill", basis: { kind: "voice_draft" } }] })).toHaveLength(1);
     expect(autoSubmitBlockers({ ...clean, decisions: [{ action: "keep", basis: null }] })).toHaveLength(1);
   });
@@ -100,25 +106,98 @@ describe("auto-submit policy", () => {
     ]);
   });
 
-  it("says when a recognized site has no adapter and the candidate approves each run", () => {
-    const clean = { status: "awaiting-approval", atsConfirmed: false, pauses: [], decisions: [{ action: "fill", basis: { kind: "fact" } }] };
-    expect(autoSubmitBlockers({ ...clean, suggestedAtsKind: "oracle" })).toEqual([
-      "Oracle Cloud HCM application sites are recognized, but the agent has no adapter that walks their application, so you approve each one."
-    ]);
+  it("holds only SmartRecruiters for its site type (Track 80)", () => {
+    const clean = { status: "awaiting-approval", atsConfirmed: false, pauses: [], decisions: [{ action: "fill", basis: { kind: "fact" } }, ...NAME_AND_EMAIL] };
+    expect(autoSubmitBlockers({ ...clean, suggestedAtsKind: "oracle" })).toEqual([]);
     expect(autoSubmitBlockers({ ...clean, suggestedAtsKind: "smartrecruiters" })[0]).toMatch(/^SmartRecruiters application sites are recognized/);
-    expect(autoSubmitBlockers({ ...clean, suggestedAtsKind: null })).toEqual(["The application site type was not recognized automatically."]);
-    expect(autoSubmitBlockers({ ...clean, suggestedAtsKind: "lever" })).toEqual(["The application site type was not recognized automatically."]);
+    expect(autoSubmitBlockers({ ...clean, suggestedAtsKind: null })).toEqual([]);
+    expect(autoSubmitBlockers({ ...clean, suggestedAtsKind: "lever" })).toEqual([]);
+    expect(autoSubmitBlockers({ ...clean, atsConfirmed: true, atsKind: "smartrecruiters" })[0]).toMatch(/^SmartRecruiters application sites are recognized/);
   });
 
-  it("keeps supported kinds clean and holds unsupported or unknown ones", () => {
-    const filled = { status: "awaiting-approval", pauses: [], decisions: [{ action: "fill", basis: { kind: "fact" } }] };
+  it("keeps every kind but SmartRecruiters clean (Track 80)", () => {
+    const filled = { status: "awaiting-approval", pauses: [], decisions: [{ action: "fill", basis: { kind: "fact" } }, ...NAME_AND_EMAIL] };
     // A supported adapter (Greenhouse, Lever, Ashby, Dover) confirms its kind itself: nothing holds the run.
     expect(autoSubmitBlockers({ ...filled, atsConfirmed: true, suggestedAtsKind: null })).toEqual([]);
-    // Paylocity is recognized but its five-step form has no adapter yet.
-    expect(autoSubmitBlockers({ ...filled, atsConfirmed: false, suggestedAtsKind: "paylocity" })).toEqual([
-      "Paylocity application sites are recognized, but the agent has no adapter that walks their application, so you approve each one."
+    // Paylocity is recognized without an adapter; its runs are submitted under the extra checks uncapturedSiteRun names.
+    expect(autoSubmitBlockers({ ...filled, atsConfirmed: false, suggestedAtsKind: "paylocity" })).toEqual([]);
+    // A site reached only by the generic navigation is not recognized, and it is no longer held for it.
+    expect(autoSubmitBlockers({ ...filled, atsConfirmed: false, suggestedAtsKind: null })).toEqual([]);
+  });
+
+  it("holds a run without application content on a site without a captured flow (Track 80)", () => {
+    const emailOnly = [{ action: "fill", basis: { kind: "profile", field: "email" } }];
+    const run = { status: "awaiting-approval", atsConfirmed: false, pauses: [], decisions: emailOnly };
+    // Track 77 found unknown sites whose only captured field was a newsletter email box.
+    expect(autoSubmitBlockers(run)).toEqual([NO_APPLICATION_CONTENT_BLOCKER]);
+    expect(autoSubmitBlockers({ ...run, atsConfirmed: true, atsKind: "oracle" })).toEqual([NO_APPLICATION_CONTENT_BLOCKER]);
+    expect(autoSubmitBlockers({ ...run, atsConfirmed: true, atsKind: "unknown" })).toEqual([NO_APPLICATION_CONTENT_BLOCKER]);
+    // A kind whose flow was captured, and a confirmed run object without a kind, are unchanged.
+    expect(autoSubmitBlockers({ ...run, atsConfirmed: true, atsKind: "greenhouse" })).toEqual([]);
+    expect(autoSubmitBlockers({ ...run, atsConfirmed: true })).toEqual([]);
+    // The candidate's name with the email, or an uploaded resume or document, is application content.
+    expect(autoSubmitBlockers({ ...run, decisions: NAME_AND_EMAIL })).toEqual([]);
+    const legalFirst = [{ action: "fill", basis: { kind: "profile", field: "legalFirstName" } }, ...emailOnly];
+    expect(autoSubmitBlockers({ ...run, decisions: legalFirst })).toEqual([]);
+    const nameOnly = [{ action: "fill", basis: { kind: "profile", field: "fullName" } }];
+    expect(autoSubmitBlockers({ ...run, decisions: nameOnly })).toEqual([NO_APPLICATION_CONTENT_BLOCKER]);
+    const emailAndPhone = [...emailOnly, { action: "fill", basis: { kind: "profile", field: "phone" } }];
+    expect(autoSubmitBlockers({ ...run, decisions: emailAndPhone })).toEqual([NO_APPLICATION_CONTENT_BLOCKER]);
+    const variant = { action: "upload", basis: { kind: "variant", variantId: "00000000-0000-4000-8000-000000000001" } };
+    const baseResume = { action: "upload", basis: { kind: "base_resume", baseResumeId: "00000000-0000-4000-8000-000000000002" } };
+    const transcript = { action: "upload", basis: { kind: "candidate_document", documentId: "00000000-0000-4000-8000-000000000003" } };
+    expect(autoSubmitBlockers({ ...run, decisions: [variant] })).toEqual([]);
+    expect(autoSubmitBlockers({ ...run, decisions: [baseResume, ...emailOnly] })).toEqual([]);
+    expect(autoSubmitBlockers({ ...run, decisions: [transcript] })).toEqual([]);
+    // A skipped or paused document field, or a suggested name, is not content.
+    const skipped = { action: "skip", basis: { kind: "variant", variantId: "00000000-0000-4000-8000-000000000001" } };
+    const paused = { action: "pause", basis: { kind: "base_resume", baseResumeId: "00000000-0000-4000-8000-000000000002" } };
+    expect(autoSubmitBlockers({ ...run, decisions: [skipped, paused, ...emailOnly] })).toEqual([NO_APPLICATION_CONTENT_BLOCKER]);
+    const suggested = [{ action: "suggest", basis: { kind: "profile", field: "fullName" } }, ...emailOnly];
+    expect(autoSubmitBlockers({ ...run, decisions: suggested })).toEqual([NO_APPLICATION_CONTENT_BLOCKER]);
+    // A several-page form walked step by step is guarded even on a confirmed captured kind.
+    const stepped = [{ fieldId: "step-1::email", action: "fill", basis: { kind: "profile", field: "email" } }];
+    expect(autoSubmitBlockers({ ...run, atsConfirmed: true, atsKind: "greenhouse", decisions: stepped })).toEqual([NO_APPLICATION_CONTENT_BLOCKER]);
+    // The reason comes after the other blockers, so a held run still names them.
+    expect(autoSubmitBlockers({ ...run, pauses: [{ safeguard: true, status: "open" }] })).toEqual([
+      "The site showed a safeguard challenge.",
+      "The form has unanswered questions waiting for you.",
+      NO_APPLICATION_CONTENT_BLOCKER
     ]);
-    // A site reached only by the generic navigation is not recognized, so it is not supported.
-    expect(autoSubmitBlockers({ ...filled, atsConfirmed: false, suggestedAtsKind: null })).toEqual(["The application site type was not recognized automatically."]);
+  });
+
+  it("reads application content from a run's own decisions (Track 80)", () => {
+    const email = { action: "fill", basis: { kind: "profile", field: "email" } };
+    expect(hasApplicationContent([])).toBe(false);
+    expect(hasApplicationContent([email])).toBe(false);
+    expect(hasApplicationContent([{ action: "fill", basis: { kind: "fact" } }, email])).toBe(false);
+    expect(hasApplicationContent(NAME_AND_EMAIL)).toBe(true);
+    for (const field of ["fullName", "legalFirstName", "legalLastName", "preferredName"]) {
+      expect(hasApplicationContent([{ action: "fill", basis: { kind: "profile", field } }, email])).toBe(true);
+      expect(hasApplicationContent([{ action: "choose", basis: { kind: "profile", field } }, email])).toBe(true);
+      expect(hasApplicationContent([{ action: "check", basis: { kind: "profile", field } }, email])).toBe(true);
+      expect(hasApplicationContent([{ action: "suggest", basis: { kind: "profile", field } }, email])).toBe(false);
+      expect(hasApplicationContent([{ action: "fill", basis: { kind: "profile", field } }])).toBe(false);
+    }
+    expect(hasApplicationContent([{ action: "fill", basis: { kind: "profile", field: "phone" } }, email])).toBe(false);
+    expect(hasApplicationContent([{ action: "upload", basis: { kind: "profile", field: "fullName" } }, email])).toBe(false);
+    const variant = { action: "upload", basis: { kind: "variant", variantId: "00000000-0000-4000-8000-000000000001" } };
+    const baseResume = { action: "upload", basis: { kind: "base_resume", baseResumeId: "00000000-0000-4000-8000-000000000002" } };
+    const transcript = { action: "upload", basis: { kind: "candidate_document", documentId: "00000000-0000-4000-8000-000000000003" } };
+    expect(hasApplicationContent([variant])).toBe(true);
+    expect(hasApplicationContent([baseResume])).toBe(true);
+    expect(hasApplicationContent([transcript])).toBe(true);
+    expect(hasApplicationContent([{ action: "upload", basis: null }])).toBe(false);
+    expect(hasApplicationContent([{ ...variant, action: "skip" }, { ...baseResume, action: "pause" }, { ...transcript, action: "keep" }])).toBe(false);
+  });
+
+  it("names the kinds whose confirmation page was captured, and the runs on any other site (Track 80)", () => {
+    for (const kind of ["greenhouse", "lever", "workday", "handshake", "ashby", "dover"]) expect(atsConfirmationCaptured(kind)).toBe(true);
+    for (const kind of ["oracle", "paylocity", "unknown", null]) expect(atsConfirmationCaptured(kind)).toBe(false);
+    expect(uncapturedSiteRun({ atsKind: "greenhouse", decisions: [{ fieldId: "email" }] })).toBe(false);
+    expect(uncapturedSiteRun({ atsKind: "oracle", decisions: [{ fieldId: "email" }] })).toBe(true);
+    expect(uncapturedSiteRun({ atsKind: "unknown", decisions: [{ fieldId: "email" }] })).toBe(true);
+    expect(uncapturedSiteRun({ atsKind: "paylocity", decisions: [] })).toBe(true);
+    expect(uncapturedSiteRun({ atsKind: "greenhouse", decisions: [{ fieldId: "step-1::email" }] })).toBe(true);
   });
 });

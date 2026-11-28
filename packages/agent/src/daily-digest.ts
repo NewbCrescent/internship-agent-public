@@ -131,7 +131,7 @@ export function buildDigest(snapshot: DigestSnapshot, now: Date): Digest | null 
     if (hold.ready) {
       parts.push(hold.voiceDraft ? `ready, check the drafted answer, then say "send ${company}"` : `ready, say "send ${company}"`);
     } else {
-      if (hold.captcha) parts.push("solve a CAPTCHA");
+      if (hold.captcha) parts.push(hold.asks.length === 0 && !hold.corrections?.length ? "solve a CAPTCHA, the only step left for you" : "solve a CAPTCHA");
       if (hold.corrections?.length) {
         const shown = hold.corrections.slice(0, MAX_QUESTIONS);
         const more = hold.corrections.length - shown.length;

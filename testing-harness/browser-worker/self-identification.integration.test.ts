@@ -389,7 +389,7 @@ describe("saved voluntary self-identification answers in browser runs", () => {
     database.close();
   });
 
-  it("an unrecognized site's lists take saved and standard answers and still wait for approval", async () => {
+  it("an unrecognized site's lists take saved and standard answers and are no longer held for their site (Track 80)", async () => {
     // Synthetic Eightfold-shaped form (Track 35): its ARIA lists read as plain lists by the collector. Fictional answers.
     const database = disposableDatabase();
     const jobId = approvedJobId(database, (db) => {
@@ -435,7 +435,7 @@ describe("saved voluntary self-identification answers in browser runs", () => {
     ]);
     expect(run.atsKind).toBe("unknown");
     expect(run.atsConfirmed).toBe(false);
-    expect(autoSubmitBlockers(run)).toContain("The application site type was not recognized automatically.");
+    expect(autoSubmitBlockers(run).some((blocker) => /site type|recognized/i.test(blocker))).toBe(false);
     for (const entry of run.decisions) {
       expect(entry.reason).not.toContain("Female");
       expect(entry.reason).not.toContain("They/Them/Theirs");

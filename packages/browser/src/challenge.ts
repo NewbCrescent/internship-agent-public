@@ -97,7 +97,7 @@ export const CHALLENGE_FIELD_ID = "site-challenge";
 
 /** The safeguard pause a visible challenge adds to a run; safeguard runs are never submitted. */
 export function challengePause(challenge: VisibleChallenge): { decision: FillDecision; pause: PauseRecord } {
-  const question = `The application shows ${challenge.detail}. The agent never solves CAPTCHAs; finish this application yourself in your browser.`;
+  const question = `The application shows ${challenge.detail}. The agent never solves CAPTCHAs or site checks, so this is the only step left for you: finish this application yourself in your browser.`;
   return {
     decision: {
       fieldId: CHALLENGE_FIELD_ID,

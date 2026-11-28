@@ -154,7 +154,7 @@ function questionLines(pauses: ReadonlyArray<NoticePause>, actionableOnly = fals
     const label = clip(redactNoticeText(pause.label), 200);
     const q = `Q${index + 1}`;
     if (kind === "correction") lines.push(`  ${q} fix this field in the browser: "${label}"`);
-    else if (pause.safeguard) lines.push(`  ${q} CAPTCHA or safeguard, solve it in the browser: "${label}"`);
+    else if (pause.safeguard) lines.push(`  ${q} CAPTCHA or safeguard, the one step the agent never does for you; solve it in the browser: "${label}"`);
     else if (pause.upload) lines.push(`  ${q} needs a document: "${label}"`);
     else if (pause.sensitive) lines.push(`  ${q} demographic, answered for this application only: "${label}"`);
     else lines.push(`  ${q}: "${label}"`);

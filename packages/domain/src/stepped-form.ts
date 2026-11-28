@@ -19,5 +19,3 @@ export function isSteppedRun(run: { decisions: ReadonlyArray<{ fieldId?: string 
   return run.decisions.some((decision) => decision.fieldId !== undefined && parseSteppedFieldId(decision.fieldId) !== null)
     || (run.pauses ?? []).some((pause) => parseSteppedFieldId(pause.fieldId) !== null);
 }
-
-export const STEPPED_FORM_BLOCKER = "This application continues over several pages on a site the agent has no adapter for, so you approve each one.";

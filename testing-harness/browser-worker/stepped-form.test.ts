@@ -11,7 +11,6 @@ import {
   isSteppedRun,
   parseSteppedFieldId,
   autoSubmitBlockers,
-  STEPPED_FORM_BLOCKER,
   steppedFieldId,
   type BrowserField,
   type FillDecision,
@@ -79,12 +78,16 @@ describe("stepped field ids and the auto-submit blocker", () => {
     expect(isSteppedRun({ decisions: [{ fieldId: "My Information::email" }], pauses: [] })).toBe(false);
   });
 
-  it("always holds a stepped run for the candidate, even with its site type confirmed", () => {
+  it("no longer holds a stepped run for being stepped (Track 80)", () => {
     const run = (fieldId: string) => ({
       status: "awaiting-approval", atsConfirmed: true, suggestedAtsKind: null, pauses: [],
-      decisions: [{ fieldId, action: "fill", basis: { kind: "profile" }, reason: "Profile email." }]
+      decisions: [
+        { fieldId, action: "fill", basis: { kind: "profile" }, reason: "Profile email." },
+        // Track 80: a stepped run needs application content (here its resume upload) to pass the content guard.
+        { fieldId: fieldId.replace("email", "resume"), action: "upload", basis: { kind: "variant", variantId: "00000000-0000-4000-8000-000000000001" }, reason: "Resume." }
+      ]
     });
-    expect(autoSubmitBlockers(run("step-1::email"))).toContain(STEPPED_FORM_BLOCKER);
+    expect(autoSubmitBlockers(run("step-1::email"))).toEqual([]);
     expect(autoSubmitBlockers(run("email"))).toEqual([]);
   });
 });

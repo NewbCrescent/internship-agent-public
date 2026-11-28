@@ -11,5 +11,5 @@ The same boxes are recognized by their container too (Track 77): a control is ne
 This covers Amperity's footer newsletter form (`styles_newsletter_signup_form__…`) and Lucid Motors' Subscribe block (`SubscribeForm_formBodyWrapper__…`), captured 2026-11-27; an application section whose container says "subscription" but holds a resume upload is still read (`pnpm test:browser:site-navigation`).
 A list's own search box labelled only "Search" (Rippling's phone-country popover) is not a question and is left empty (`isListSearchBox`).
 A control inside a wrapping label takes that label's `aria-labelledby` text first, so Rippling's uploads, wrapped in `label[aria-labelledby]` whose own text only says "Upload", read as their question ("Resume").
-These runs still wait for the candidate's approval as an unrecognized site, and nothing about automatic submission changes.
+Since Track 80 the auto-submit policy submits these runs when nothing else holds them (`079-auto-submit-on-sites-without-an-adapter.md`).
 Regression: `pnpm test:browser:unrecognized-forms` (derived fixtures `aria-list-application.html`, `labelledby-application.html`, and `job-alert-posting.html`), with fast cases in `pnpm test:browser-worker:fast` and a run through `startBrowserRun` in `pnpm test:browser-worker:local`.
